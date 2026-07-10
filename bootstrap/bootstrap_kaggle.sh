@@ -27,12 +27,6 @@ cleanup() {
     else
         notify "❌ Worker failed at stage: $CURRENT_STAGE (exit code $exit_code)"
     fi
-    # Attempt memory collect even on failure if run_id exists
-    if [ -n "$RUN_ID" ] && [ -d "state/runs/$RUN_ID" ]; then
-        echo "Attempting memory collect..."
-        python3 scripts/memory_sync.py collect --run-id "$RUN_ID" 2>/dev/null || true
-        python3 scripts/memory_sync.py push --run-id "$RUN_ID" 2>/dev/null || true
-    fi
     echo "=== CLEANUP DONE ==="
     exit "$exit_code"
 }
@@ -48,6 +42,10 @@ bash bootstrap/check_environment.sh
 CURRENT_STAGE="clone_repos"
 log_stage "Cloning external repos"
 bash bootstrap/clone_repos.sh
+
+CURRENT_STAGE="install_runtime_dependencies"
+log_stage "Installing runtime dependencies"
+bash bootstrap/install_runtime_dependencies.sh
 
 CURRENT_STAGE="install_skills"
 log_stage "Installing skill system"
@@ -91,6 +89,64 @@ python3 scripts/memory_sync.py hydrate
 CURRENT_STAGE="repo_preflight"
 log_stage "Repo preflight"
 python3 scripts/repo_preflight.py
+
+CURRENT_STAGE="search_capability_preflight"
+log_stage "Search capability preflight"
+python3 scripts/search_capability_preflight.py
+SEARCH_STATUS=$(python3 -c "
+import json
+try:
+    with open('state/runs/search_capability_preflight.json') as f:
+        d = json.load(f)
+    print(d.get('current_event_fact_verification', 'blocked'))
+except Exception:
+    print('blocked')
+")
+if [ "$SEARCH_STATUS" = "blocked" ]; then
+    echo ""
+    echo "=== SEARCH BLOCKED ==="
+    SEARCH_BLOCKER=$(python3 -c "
+import json
+try:
+    with open('state/runs/search_capability_preflight.json') as f:
+        d = json.load(f)
+    print(d.get('blocker', 'No search/retrieval capability available.'))
+except Exception:
+    print('No search/retrieval capability available.')
+")
+    CURRENT_STAGE="search_blocked"
+    notify "Search capability blocked: $SEARCH_BLOCKER"
+    exit 1
+fi
+# For current-event jobs, limited (retrieval-only) also blocks
+if [ "$SEARCH_STATUS" = "limited" ]; then
+    echo ""
+    echo "=== SEARCH LIMITED — CURRENT-EVENT JOBS BLOCKED ==="
+    CURRENT_STAGE="search_limited"
+    notify "Search capability limited (retrieval-only, no real search query engine). Current-event jobs blocked."
+    exit 1
+fi
+echo "Search capability preflight: $SEARCH_STATUS — proceeding."
+
+CURRENT_STAGE="runtime_smoke_test"
+log_stage "Runtime smoke test"
+python3 scripts/runtime_smoke_test.py
+SMOKE_STATUS=$(python3 -c "
+import json
+try:
+    with open('state/runs/runtime_smoke_test.json') as f:
+        d = json.load(f)
+    print(d.get('smoke_test_passed', False))
+except Exception:
+    print('false')
+")
+if [ "$SMOKE_STATUS" != "True" ]; then
+    echo "=== SMOKE TEST FAILED ==="
+    CURRENT_STAGE="smoke_test_failed"
+    notify "Smoke test failed — blocking job start"
+    exit 1
+fi
+echo "Smoke test passed — proceeding to job."
 
 CURRENT_STAGE="title_theme_job"
 log_stage "Running title/theme job"

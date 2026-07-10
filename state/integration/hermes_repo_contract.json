@@ -1,0 +1,59 @@
+{
+  "repo": "Hermes-Agent",
+  "pinned_commit": "caf557be5b4c9ae75b3a7566d65d3df2c701c5df",
+  "original_source": "https://github.com/NousResearch/Hermes-Agent",
+  "inspection_date": "2026-07-10",
+  "evidence_paths": {
+    "readme": "https://github.com/NousResearch/Hermes-Agent/blob/caf557be5b4c9ae75b3a7566d65d3df2c701c5df/README.md",
+    "cli_entrypoint": "cli.py (743KB, uses Fire library)",
+    "programmatic_entrypoint": "run_agent.py (AIAgent class)",
+    "provider_plugins_dir": "plugins/model-providers/",
+    "provider_custom": "plugins/model-providers/custom/__init__.py",
+    "provider_nvidia": "plugins/model-providers/nvidia/__init__.py",
+    "skills_dir": "skills/ (repo root)",
+    "memory_manager": "agent/memory_manager.py",
+    "skill_loader": "agent/skill_commands.py, agent/skill_bundles.py, agent/skill_preprocessing.py",
+    "config_example": "cli-config.yaml.example (74KB)",
+    "env_example": ".env.example (23KB)",
+    "setup": "setup.py, pyproject.toml",
+    "providers_registry": "providers/__init__.py",
+    "provider_base": "providers/base.py",
+    "agent_init": "agent/agent_init.py",
+    "conversation_loop": "agent/conversation_loop.py"
+  },
+  "supported_commands": {
+    "cli": "python3 cli.py [command]",
+    "programmatic": "from run_agent import AIAgent; agent = AIAgent(base_url=..., api_key=..., provider=...)",
+    "provider_config": {
+      "mechanism": "ProviderProfile objects registered via register_provider() in plugins/model-providers/<name>/__init__.py",
+      "env_vars": "Per-provider env vars (e.g. NVIDIA_API_KEY, OPENAI_API_KEY)",
+      "openai_compatible": "Use provider='custom' or provider name matching a plugin"
+    },
+    "installation": "pip install -e .  or  uv pip install -e '.[all,dev]'",
+    "skill_discovery": "Scans skills/, ~/.hermes/skills/, and --skills-dir arg; loaded via agent/skill_*.py"
+  },
+  "skill_discovery_mechanism": {
+    "paths": ["skills/", "optional-skills/", "$HERMES_HOME/skills/"],
+    "loading": "agent/skill_commands.py: scan directories for SKILL.md files and .py tools",
+    "registration": "Skills registered into agent's internal registry, exposed as slash commands and system prompt additions"
+  },
+  "memory_mechanism": {
+    "paths": ["$HERMES_HOME/memory/"],
+    "files": ["MEMORY.md", "USER.md", "learned_patterns.jsonl"],
+    "manager": "agent/memory_manager.py",
+    "sync": "agent/memory_provider.py (Honcho dialectic model)"
+  },
+  "openai_compatible_provider_config": {
+    "provider_name": "custom",
+    "plugin_location": "plugins/model-providers/custom/__init__.py",
+    "env_vars": "None fixed — uses base_url from config, api_key from config",
+    "base_url": "User-configured (typically LLM_BASE_URL or configured in model.base_url)",
+    "key_env_var": "OPENAI_API_KEY or per-provider key in config.yaml",
+    "note": "For NVIDIA NIM specifically: NVIDIA_API_KEY env var, base_url=https://integrate.api.nvidia.com/v1"
+  },
+  "blockers": [
+    "Cannot import Hermes directly without installation (pip install -e .)",
+    "AIAgent instantiation requires available provider and model configuration",
+    "Skill loading requires skill directories with SKILL.md files"
+  ]
+}
