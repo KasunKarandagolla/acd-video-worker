@@ -272,22 +272,76 @@ def _discover_v7_skills() -> dict:
     return result
 
 
-def _get_nvidia_endpoint() -> dict:
+def resolve_runtime_endpoint() -> dict:
+    """Authoritative private runtime endpoint configuration.
+
+    Returns:
+        {
+            "api_key": <actual secret from LLM_API_KEY>,
+            "base_url": <LLM_BASE_URL>,
+            "model": <LLM_MODEL>
+        }
+
+    Raises ValueError with safe message naming missing env vars.
+    Never log or serialize the returned dict.
+    """
+    api_key = (os.environ.get("LLM_API_KEY") or os.environ.get("NVIDIA_API_KEY") or "").strip()
+    base_url = (os.environ.get("LLM_BASE_URL") or "").strip()
+    model = (os.environ.get("LLM_MODEL") or "").strip()
+
+    missing = []
+    if not api_key:
+        missing.append("LLM_API_KEY")
+    if not base_url:
+        missing.append("LLM_BASE_URL")
+    if not model:
+        missing.append("LLM_MODEL")
+
+    if missing:
+        raise ValueError(
+            f"Missing required endpoint configuration: {', '.join(missing)}. "
+            "Set these environment variables before invoking Hermes."
+        )
+
+    return {
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": model,
+    }
+
+
+def sanitize_endpoint_for_report(endpoint: dict) -> dict:
+    """Sanitize runtime endpoint dict for reports / serialization.
+
+    Returns only safe fields — never includes the actual api_key.
+    Never pass this dict back into runtime execution.
+    """
     from urllib.parse import urlparse
-    api_key = os.environ.get("LLM_API_KEY") or os.environ.get("NVIDIA_API_KEY") or ""
-    base_url = os.environ.get("LLM_BASE_URL") or os.environ.get("NVIDIA_BASE_URL") or "https://integrate.api.nvidia.com/v1"
-    model = os.environ.get("LLM_MODEL") or "nvidia/llama-3.1-nemotron-70b-instruct"
+    base_url = endpoint.get("base_url", "") or ""
+    model = endpoint.get("model", "") or ""
     host = ""
     try:
         host = urlparse(base_url).hostname or ""
     except Exception:
         pass
     return {
-        "api_key_set": bool(api_key),
+        "api_key_set": bool(endpoint.get("api_key")),
         "base_url": base_url,
         "model": model,
         "endpoint_host": host,
     }
+
+
+def _get_nvidia_endpoint() -> dict:
+    """Return sanitized endpoint report (safe for serialization).
+
+    This is a report helper.  For runtime use call resolve_runtime_endpoint().
+    """
+    try:
+        runtime = resolve_runtime_endpoint()
+    except ValueError:
+        runtime = {"api_key": "", "base_url": "", "model": ""}
+    return sanitize_endpoint_for_report(runtime)
 
 
 def _check_venv_hermes_import() -> dict:
@@ -518,10 +572,11 @@ def run_hermes_turn(
         result["error_message"] = str(e)
         return result
 
-    endpoint = _get_nvidia_endpoint()
-    if not endpoint["api_key_set"]:
-        result["error_type"] = "no_api_key"
-        result["error_message"] = "No NVIDIA/NIM API key available"
+    try:
+        endpoint = resolve_runtime_endpoint()
+    except ValueError as e:
+        result["error_type"] = "endpoint_configuration_error"
+        result["error_message"] = str(e)
         return result
 
     v7 = _discover_v7_skills()
@@ -577,10 +632,13 @@ def run_hermes_turn(
         f"sys.path.insert(0, '{hermes_repo_str}')",
         f"os.environ['HERMES_HOME'] = {repr(str(_get_worker_hermes_home()))}",
         "from run_agent import AIAgent",
+        "api_key = os.environ['LLM_API_KEY']",
+        "base_url = os.environ['LLM_BASE_URL']",
+        "model = os.environ['LLM_MODEL']",
         f"agent = AIAgent(",
-        f"    base_url={repr(base_url)},",
-        f"    api_key={repr(api_key)},",
-        f"    model={repr(model)},",
+        f"    base_url=base_url,",
+        f"    api_key=api_key,",
+        f"    model=model,",
         f"    provider='nvidia',",
         f"    session_id={repr(session_id)},",
         f"    quiet_mode=True,",
@@ -596,9 +654,14 @@ def run_hermes_turn(
     code = "\n".join(script_lines)
 
     try:
+        child_env = dict(os.environ)
+        child_env["LLM_API_KEY"] = api_key
+        child_env["LLM_BASE_URL"] = base_url
+        child_env["LLM_MODEL"] = model
         proc = subprocess.run(
             [python, "-c", code],
             capture_output=True, text=True, timeout=120,
+            env=child_env,
         )
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
@@ -667,17 +730,13 @@ def invoke_hermes(title: str, theme: str, run_id: str, run_dir: Path) -> dict:
         result["blocker"] = str(e)
         return result
 
-    endpoint = _get_nvidia_endpoint()
-    result["_endpoint"] = {
-        "api_key_set": endpoint["api_key_set"],
-        "base_url": endpoint["base_url"],
-        "model": endpoint["model"],
-        "endpoint_host": endpoint["endpoint_host"],
-    }
-
-    if not endpoint["api_key_set"]:
-        result["blocker"] = "No NVIDIA/NIM API key available. Set LLM_API_KEY or NVIDIA_API_KEY."
+    try:
+        endpoint = resolve_runtime_endpoint()
+    except ValueError as e:
+        result["blocker"] = str(e)
         return result
+
+    result["_endpoint"] = sanitize_endpoint_for_report(endpoint)
 
     v7 = result["v7_skills"]
     result["selected_skills"] = v7.get("v7_skill_names", [])
@@ -719,7 +778,9 @@ def invoke_hermes(title: str, theme: str, run_id: str, run_dir: Path) -> dict:
 
     python = _hermes_venv_python()
     hermes_repo_str = str(HERMES_REPO)
-    api_key = os.environ.get("LLM_API_KEY") or os.environ.get("NVIDIA_API_KEY", "")
+    api_key = endpoint["api_key"]
+    base_url = endpoint["base_url"]
+    model = endpoint["model"]
 
     system_prompt = (
         "You are the ACD Video Worker editorial reasoning agent. "
@@ -741,10 +802,13 @@ def invoke_hermes(title: str, theme: str, run_id: str, run_dir: Path) -> dict:
         f"sys.path.insert(0, '{hermes_repo_str}')\n"
         "os.environ['HERMES_HOME'] = " + repr(str(_get_worker_hermes_home())) + "\n"
         "from run_agent import AIAgent\n"
+        "api_key = os.environ['LLM_API_KEY']\n"
+        "base_url = os.environ['LLM_BASE_URL']\n"
+        "model = os.environ['LLM_MODEL']\n"
         "agent = AIAgent(\n"
-        "    base_url=" + repr(endpoint["base_url"]) + ",\n"
-        "    api_key=" + repr(api_key) + ",\n"
-        "    model=" + repr(endpoint["model"]) + ",\n"
+        "    base_url=base_url,\n"
+        "    api_key=api_key,\n"
+        "    model=model,\n"
         "    provider='nvidia',\n"
         "    session_id=" + repr(session_id) + ",\n"
         "    quiet_mode=True,\n"
@@ -766,9 +830,14 @@ def invoke_hermes(title: str, theme: str, run_id: str, run_dir: Path) -> dict:
     )
 
     try:
+        child_env = dict(os.environ)
+        child_env["LLM_API_KEY"] = api_key
+        child_env["LLM_BASE_URL"] = base_url
+        child_env["LLM_MODEL"] = model
         proc = subprocess.run(
             [python, "-c", run_code],
-            capture_output=True, text=True, timeout=120
+            capture_output=True, text=True, timeout=120,
+            env=child_env,
         )
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""

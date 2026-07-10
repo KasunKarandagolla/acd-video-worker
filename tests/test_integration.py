@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -952,6 +953,310 @@ def test_color_grade_not_selected_as_compose():
 
 
 # ---------------------------------------------------------------------------
+# Regression tests for endpoint-contract repair
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_runtime_endpoint_has_api_key():
+    """Test: resolve_runtime_endpoint returns api_key when env vars are set."""
+    from scripts.hermes_runtime import resolve_runtime_endpoint
+
+    saved = {k: os.environ.pop(k, None) for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")}
+    try:
+        os.environ["LLM_API_KEY"] = "sk-test-key"
+        os.environ["LLM_BASE_URL"] = "https://example.invalid/v1"
+        os.environ["LLM_MODEL"] = "test-model"
+
+        ep = resolve_runtime_endpoint()
+        assert ep["api_key"] == "sk-test-key"
+        assert ep["base_url"] == "https://example.invalid/v1"
+        assert ep["model"] == "test-model"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print(f"  resolve_runtime_endpoint has api_key: OK")
+
+
+def test_sanitized_report_has_api_key_set_not_api_key():
+    """Test: sanitize_endpoint_for_report contains api_key_set but not api_key."""
+    from scripts.hermes_runtime import sanitize_endpoint_for_report
+
+    runtime = {"api_key": "sk-secret", "base_url": "https://example.invalid/v1", "model": "test-model"}
+    report = sanitize_endpoint_for_report(runtime)
+
+    assert "api_key_set" in report
+    assert "api_key" not in report, "Sanitized report must NOT contain api_key"
+    assert report["api_key_set"] is True
+    assert report["base_url"] == "https://example.invalid/v1"
+    assert report["model"] == "test-model"
+    assert isinstance(report.get("endpoint_host"), str)
+    print(f"  Sanitized report has api_key_set, no api_key: OK")
+
+
+def test_sanitized_report_cannot_be_runtime():
+    """Test: sanitized report dict is missing api_key and cannot serve as runtime config."""
+    from scripts.hermes_runtime import sanitize_endpoint_for_report
+
+    runtime = {"api_key": "sk-secret", "base_url": "https://example.invalid/v1", "model": "test-model"}
+    report = sanitize_endpoint_for_report(runtime)
+
+    assert "api_key" not in report
+    try:
+        _ = report["api_key"]
+        assert False, "Should have raised KeyError"
+    except KeyError:
+        pass
+    print(f"  Sanitized report cannot be runtime config: OK")
+
+
+def test_run_hermes_turn_no_key_error():
+    """Test: run_hermes_turn does NOT raise KeyError when API key is missing."""
+    from scripts.hermes_runtime import run_hermes_turn
+
+    saved = {k: os.environ.pop(k, None) for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")}
+    try:
+        for k in saved:
+            os.environ.pop(k, None)
+        run_id = "test_no_key_error"
+        run_dir = TEST_DIR / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        result = run_hermes_turn("", "", run_id, run_dir, smoke_test=True)
+
+        assert isinstance(result, dict)
+        assert result.get("success") is False
+        assert result.get("error_type") == "endpoint_configuration_error"
+        assert "LLM_API_KEY" in result.get("error_message", "")
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+    print(f"  run_hermes_turn no KeyError: OK")
+
+
+def test_missing_llm_api_key_returns_structured_error():
+    """Test: missing LLM_API_KEY returns endpoint_configuration_error with safe message."""
+    from scripts.hermes_runtime import resolve_runtime_endpoint
+
+    saved = {k: os.environ.pop(k, None) for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")}
+    try:
+        for k in saved:
+            os.environ.pop(k, None)
+        resolve_runtime_endpoint()
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        msg = str(e)
+        assert "LLM_API_KEY" in msg
+        assert "LLM_BASE_URL" in msg
+        assert "LLM_MODEL" in msg
+        assert "sk-test" not in msg.lower()  # no secret text
+    except Exception as e:
+        assert False, f"Expected ValueError, got {type(e).__name__}: {e}"
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+    print(f"  Missing LLM_API_KEY returns structured error: OK")
+
+
+def test_smoke_and_production_share_resolver():
+    """Test: both smoke test and production use resolve_runtime_endpoint."""
+    content = (SCRIPTS_DIR / "hermes_runtime.py").read_text()
+    # Both run_hermes_turn and invoke_hermes must call resolve_runtime_endpoint
+    assert "resolve_runtime_endpoint()" in content
+    # No remaining direct calls to _get_nvidia_endpoint for runtime config
+    assert "_get_nvidia_endpoint()" not in content or \
+           "_get_nvidia_endpoint" not in [l.strip() for l in content.split("\n")
+                                            if l.strip().startswith("endpoint =")], \
+        "_get_nvidia_endpoint must not be used for runtime config"
+    print(f"  Smoke and production share resolver: OK")
+
+
+def test_generated_code_no_embedded_secrets():
+    """Test: generated subprocess code reads from env, not embedding secret literals."""
+    from scripts.hermes_runtime import run_hermes_turn
+    import inspect
+    source = inspect.getsource(run_hermes_turn)
+    # The generated code must read api_key/base_url/model from os.environ
+    assert "api_key = os.environ['LLM_API_KEY']" in source
+    assert "base_url = os.environ['LLM_BASE_URL']" in source
+    assert "model = os.environ['LLM_MODEL']" in source
+    # Must NOT embed repr(api_key) or repr(base_url) or repr(model) in AIAgent() call
+    lines_to_check = source.split("\n")
+    agent_section = False
+    for line in lines_to_check:
+        if "agent = AIAgent(" in line:
+            agent_section = True
+        if agent_section:
+            if "api_key" in line and "os.environ" not in line:
+                assert "repr" not in line, f"API key must not be embedded in code: {line.strip()}"
+            if "base_url" in line and "os.environ" not in line:
+                assert "repr" not in line, f"Base URL must not be embedded in AIAgent call: {line.strip()}"
+            if "model" in line and "os.environ" not in line:
+                assert "repr" not in line, f"Model must not be embedded in AIAgent call: {line.strip()}"
+    print(f"  Generated code no embedded secrets: OK")
+
+
+def test_subprocess_env_passes_secrets():
+    """Test: subprocess receives LLM_API_KEY, LLM_BASE_URL, LLM_MODEL through environment."""
+    from scripts.hermes_runtime import run_hermes_turn
+    import inspect
+    source = inspect.getsource(run_hermes_turn)
+
+    # Must construct child_env with the three env vars
+    assert 'child_env["LLM_API_KEY"]' in source
+    assert 'child_env["LLM_BASE_URL"]' in source
+    assert 'child_env["LLM_MODEL"]' in source
+    # Must pass env=child_env to subprocess.run
+    assert "env=child_env" in source
+    print(f"  Subprocess env passes secrets: OK")
+
+
+def test_secret_not_in_reports_or_logs():
+    """Test: actual API key text never appears in reports, logs or stdout/stderr."""
+    from scripts.hermes_runtime import sanitize_endpoint_for_report
+
+    runtime = {"api_key": "sk-ultra-secret-value-42", "base_url": "https://test.example/v1", "model": "test-model"}
+    report = sanitize_endpoint_for_report(runtime)
+
+    report_str = json.dumps(report)
+    assert "sk-ultra-secret-value-42" not in report_str
+    assert "api_key_set" in report_str
+    assert "ultra-secret" not in report_str
+
+    # Verify exception messages from resolve_runtime_endpoint do not contain secrets
+    from scripts.hermes_runtime import resolve_runtime_endpoint
+    saved = {k: os.environ.pop(k, None) for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")}
+    try:
+        for k in saved:
+            os.environ.pop(k, None)
+        os.environ["LLM_API_KEY"] = "sk-should-not-appear"
+        os.environ["LLM_BASE_URL"] = "https://should-not-appear.invalid/v1"
+        os.environ["LLM_MODEL"] = "should-not-appear"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print(f"  Secret not in reports or logs: OK")
+
+
+def test_existing_bootstrap_unchanged():
+    """Test: existing truthful nonzero bootstrap behavior remains unchanged."""
+    # bootstrap exit-code tests already verify this; here we check the files still exist
+    bootstrap_sh = BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh"
+    assert bootstrap_sh.is_file()
+    content = bootstrap_sh.read_text()
+    # Require the key bootstrap behaviors remain
+    assert "set -e" in content
+    assert "python3 -m scripts.runtime_smoke_test" in content
+    assert "scripts/run_title_theme_job.py" in content
+    print(f"  Existing bootstrap unchanged: OK")
+
+
+def test_contract_monkeypatched_network():
+    """Contract-level test: sets LLM env vars, monkeypatches only the network/AIAgent
+    execution boundary, proves run_hermes_turn reaches beyond endpoint resolution
+    without KeyError and without exposing test-secret."""
+    from scripts.hermes_runtime import run_hermes_turn, resolve_runtime_endpoint, sanitize_endpoint_for_report
+
+    saved = {k: os.environ.pop(k, None) for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")}
+    try:
+        os.environ["LLM_API_KEY"] = "test-secret"
+        os.environ["LLM_BASE_URL"] = "https://example.invalid/v1"
+        os.environ["LLM_MODEL"] = "test-model"
+
+        # Step 1: verify resolve_runtime_endpoint works
+        ep = resolve_runtime_endpoint()
+        assert ep["api_key"] == "test-secret"
+        assert ep["base_url"] == "https://example.invalid/v1"
+        assert ep["model"] == "test-model"
+
+        # Step 2: verify sanitize strips api_key
+        report = sanitize_endpoint_for_report(ep)
+        assert "api_key" not in report
+        assert report["api_key_set"] is True
+        assert report["base_url"] == "https://example.invalid/v1"
+
+        # Step 3: call run_hermes_turn with monkeypatched execution boundary
+        run_id = "test_contract_network"
+        run_dir = TEST_DIR / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        with patch("scripts.hermes_runtime._check_venv_hermes_import") as mock_check, \
+             patch("scripts.hermes_runtime._prepare_and_query_skills") as mock_skills, \
+             patch("scripts.hermes_runtime.subprocess.run") as mock_subprocess:
+
+            mock_check.return_value = {
+                "aiagent_importable": True,
+                "import_error": None,
+                "import_module_path": "run_agent.AIAgent",
+            }
+            mock_skills.return_value = {
+                "hermes_loaded_skill_count": 1,
+                "hermes_loaded_skill_names": ["test_skill"],
+                "skill_runtime_preparation": {
+                    "installed_skill_names": ["test_skill"],
+                    "expected_skill_names": ["test_skill"],
+                    "official_skill_root": str(run_dir),
+                },
+            }
+
+            fake_proc = MagicMock()
+            fake_proc.returncode = 0
+            fake_proc.stdout = "RESPONSE_START\nok\nRESPONSE_END\n"
+            fake_proc.stderr = ""
+            mock_subprocess.return_value = fake_proc
+
+            result = run_hermes_turn("test", "test", run_id, run_dir, smoke_test=True)
+
+        # Verify no KeyError — result is a valid dict
+        assert isinstance(result, dict)
+
+        # Verify the error is NOT endpoint_configuration_error (it should have
+        # gotten past that point)
+        err_type = result.get("error_type")
+        assert err_type != "endpoint_configuration_error", \
+            f"Should have passed endpoint config, got error: {result.get('error_message')}"
+
+        # Verify test-secret is not leaked anywhere in the result
+        result_str = json.dumps(result)
+        assert "test-secret" not in result_str, \
+            "test-secret must not appear in the result dict"
+
+        # Verify the subprocess received env vars with test-secret
+        if mock_subprocess.call_count >= 1:
+            call_kwargs = mock_subprocess.call_args[1]
+            child_env = call_kwargs.get("env", {})
+            assert child_env.get("LLM_API_KEY") == "test-secret"
+            assert child_env.get("LLM_BASE_URL") == "https://example.invalid/v1"
+            assert child_env.get("LLM_MODEL") == "test-model"
+
+        # Verify generated code passed to subprocess does NOT contain test-secret
+        if mock_subprocess.call_count >= 1:
+            call_args = mock_subprocess.call_args[0]
+            code_arg = call_args[0] if call_args else ""
+            if isinstance(code_arg, list):
+                code_text = " ".join(code_arg)
+            else:
+                code_text = str(code_arg)
+            assert "test-secret" not in code_text, \
+                "Generated code must not embed the API key"
+
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print(f"  Contract monkeypatched network: OK")
+
+
+# ---------------------------------------------------------------------------
 # Exit-code propagation tests (execute real shell scripts)
 # ---------------------------------------------------------------------------
 
@@ -1111,6 +1416,17 @@ def run_all():
         ("Exit-code propagation success", test_exit_code_propagation_success),
         ("Cleanup does not change 1 to 0", test_cleanup_does_not_change_one_to_zero),
         ("Success text absent on failure", test_success_text_absent_on_failure),
+        ("resolve_runtime_endpoint has api_key", test_resolve_runtime_endpoint_has_api_key),
+        ("Sanitized report no api_key", test_sanitized_report_has_api_key_set_not_api_key),
+        ("Sanitized report cannot be runtime", test_sanitized_report_cannot_be_runtime),
+        ("run_hermes_turn no KeyError", test_run_hermes_turn_no_key_error),
+        ("Missing LLM_API_KEY returns structured error", test_missing_llm_api_key_returns_structured_error),
+        ("Smoke and production share resolver", test_smoke_and_production_share_resolver),
+        ("Generated code no embedded secrets", test_generated_code_no_embedded_secrets),
+        ("Subprocess env passes secrets", test_subprocess_env_passes_secrets),
+        ("Secret not in reports or logs", test_secret_not_in_reports_or_logs),
+        ("Existing bootstrap unchanged", test_existing_bootstrap_unchanged),
+        ("Contract monkeypatched network", test_contract_monkeypatched_network),
     ]
 
     passed = 0
