@@ -57,6 +57,33 @@ CURRENT_STAGE="llm_key_check"
 log_stage "LLM API key check"
 python3 scripts/llm_key_check.py
 
+LLM_STATUS=$(python3 -c "
+import json
+try:
+    with open('state/runs/llm_key_check.json') as f:
+        d = json.load(f)
+    print(d.get('llm_status', 'unknown'))
+except Exception:
+    print('unknown')
+")
+if [ "$LLM_STATUS" = "blocked" ]; then
+    LLM_ERROR=$(python3 -c "
+import json
+try:
+    with open('state/runs/llm_key_check.json') as f:
+        d = json.load(f)
+    print(d.get('error', 'unknown error')[:200])
+except Exception:
+    print('unknown error')
+")
+    echo ""
+    echo "=== LLM BLOCKED ==="
+    echo "LLM endpoint is not accessible after retries."
+    CURRENT_STAGE="llm_blocked"
+    notify "LLM blocked: $LLM_ERROR"
+    exit 1
+fi
+
 CURRENT_STAGE="memory_hydrate"
 log_stage "Memory hydrate"
 python3 scripts/memory_sync.py hydrate

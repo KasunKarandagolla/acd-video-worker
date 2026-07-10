@@ -68,6 +68,8 @@ VALIDATORS=(
     "$SKILL_DIR/skills/validate.sh"
     "$SKILL_DIR/validate.sh"
     "$SKILL_DIR/tools/validate.py"
+    "$SKILL_DIR/tools/validate_skill_system.py"
+    "$SKILL_DIR/tools/validate_packaged_zip.py"
     "$SKILL_DIR/evals/validate.py"
     "$SKILL_DIR/evals/run_validation.py"
 )
@@ -79,7 +81,29 @@ for validator in "${VALIDATORS[@]}"; do
         if [[ "$validator" == *.sh ]]; then
             bash "$validator" 2>&1 | tee -a "$REPORT" || echo "Validator exited non-zero, continuing..." | tee -a "$REPORT"
         elif [[ "$validator" == *.py ]]; then
-            python3 "$validator" 2>&1 | tee -a "$REPORT" || echo "Validator exited non-zero, continuing..." | tee -a "$REPORT"
+            if [[ "$(basename "$validator")" == "validate_skill_system.py" ]]; then
+                echo "Detected validate_skill_system.py — checking CLI interface..." | tee -a "$REPORT"
+                HAS_CLI_ARG=$(python3 -c "
+import sys
+with open('$validator') as f:
+    content = f.read()
+if 'sys.argv' in content:
+    sys.exit(0)
+sys.exit(1)
+" 2>/dev/null && echo "yes" || echo "no")
+                if [ "$HAS_CLI_ARG" = "yes" ]; then
+                    echo "CLI argument support detected. Running with SKILL_DIR..." | tee -a "$REPORT"
+                    python3 "$validator" "$SKILL_DIR" 2>&1 | tee -a "$REPORT" || echo "Validator exited non-zero." | tee -a "$REPORT"
+                else
+                    echo "No CLI argument support detected. Running without arguments..." | tee -a "$REPORT"
+                    python3 "$validator" 2>&1 | tee -a "$REPORT" || echo "Validator exited non-zero." | tee -a "$REPORT"
+                fi
+            elif [[ "$(basename "$validator")" == "validate_packaged_zip.py" ]]; then
+                echo "Running validate_packaged_zip.py with ZIP path..." | tee -a "$REPORT"
+                python3 "$validator" "$SKILL_ZIP" 2>&1 | tee -a "$REPORT" || echo "Validator exited non-zero." | tee -a "$REPORT"
+            else
+                python3 "$validator" 2>&1 | tee -a "$REPORT" || echo "Validator exited non-zero, continuing..." | tee -a "$REPORT"
+            fi
         fi
         VALIDATOR_FOUND=true
         break
@@ -87,7 +111,7 @@ for validator in "${VALIDATORS[@]}"; do
 done
 
 if [ "$VALIDATOR_FOUND" = false ]; then
-    echo "  No standalone validators found. This is not necessarily an error." | tee -a "$REPORT"
+    echo "  No standalone validators found." | tee -a "$REPORT"
 fi
 
 echo "" >> "$REPORT"
