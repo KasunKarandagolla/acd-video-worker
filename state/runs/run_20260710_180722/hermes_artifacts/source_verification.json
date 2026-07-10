@@ -1,0 +1,10 @@
+{
+  "verified_sources": [
+    {
+      "source_id": "synthetic_001",
+      "verified": true,
+      "verification_method": "synthetic_fixture"
+    }
+  ],
+  "blocker": null
+}

@@ -1,0 +1,69 @@
+{
+  "run_id": "run_20260710_180722",
+  "timestamp_utc": "2026-07-10T18:07:57.382808+00:00",
+  "render_found": true,
+  "render_path": "/kaggle/working/acd-video-worker/outputs/run_20260710_180722/fallback_render_attempt.mp4",
+  "ffprobe": {
+    "valid": true,
+    "error": null,
+    "streams": [
+      {
+        "index": 0,
+        "codec_type": "video",
+        "codec_name": "h264",
+        "width": 640,
+        "height": 480,
+        "r_frame_rate": "30/1",
+        "duration": "5.000000"
+      }
+    ],
+    "format": {
+      "filename": "/kaggle/working/acd-video-worker/outputs/run_20260710_180722/fallback_render_attempt.mp4",
+      "nb_streams": 1,
+      "nb_programs": 0,
+      "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+      "format_long_name": "QuickTime / MOV",
+      "start_time": "0.000000",
+      "duration": "5.000000",
+      "size": "44030",
+      "bit_rate": "70448",
+      "probe_score": 100,
+      "tags": {
+        "major_brand": "isom",
+        "minor_version": "512",
+        "compatible_brands": "isomiso2avc1mp41",
+        "encoder": "Lavf58.76.100"
+      }
+    }
+  },
+  "loudness": {
+    "measured": false,
+    "integrated_loudness": null,
+    "loudness_range": null,
+    "true_peak": null
+  },
+  "factual_claims": {
+    "checked": true,
+    "match": "Synthetic Team A vs Synthetic Team B",
+    "opponent": "Synthetic Team B",
+    "date": "2024-06-15",
+    "score": "2-1",
+    "stage": null,
+    "verification_status": "verified",
+    "note": "All claims should be verified before on-screen display. Automated fact-check of rendered text requires OCR/ASR."
+  },
+  "summary": {
+    "has_video": true,
+    "has_audio": false,
+    "duration_seconds": 5.0,
+    "resolution": "640x480",
+    "codec": "h264",
+    "file_size_bytes": 44030,
+    "loudness_ok": false
+  },
+  "issues": [
+    "NO AUDIO STREAM FOUND",
+    "Loudness outside target range (-25 to -10 LUFS)"
+  ],
+  "qa_passed": false
+}

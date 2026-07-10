@@ -1,0 +1,13 @@
+{
+  "structure": [
+    "intro",
+    "highlight",
+    "closing"
+  ],
+  "segments": [
+    {
+      "type": "highlight",
+      "duration_seconds": 5
+    }
+  ]
+}

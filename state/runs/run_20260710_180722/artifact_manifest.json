@@ -1,0 +1,407 @@
+{
+  "run_id": "run_20260710_180722",
+  "timestamp_utc": "2026-07-10T18:07:57.710507+00:00Z",
+  "artifacts": {
+    "match_fact_lock.json": {
+      "artifact_name": "match_fact_lock.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/match_fact_lock.json",
+      "producer_stage": "hermes_reasoning",
+      "consumers": [
+        "match_fact_lock",
+        "source_discovery",
+        "artifact_gate",
+        "output_validation"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 637,
+      "sha256": "6637a90bbe32070e039be120243d79e0abb2d050359574643ef6f5ef86a8d91c",
+      "created_timestamp": "2026-07-10T18:07:24.371928+00:00",
+      "validation_errors": []
+    },
+    "brief_interpretation.json": {
+      "artifact_name": "brief_interpretation.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/brief_interpretation.json",
+      "producer_stage": "hermes_reasoning",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 153,
+      "sha256": "7c2a6a17b7fb8b5dec8fe2fbbd2547e9d638fff1b7627da571577fc86dd3203c",
+      "created_timestamp": "2026-07-10T18:07:24.371928+00:00",
+      "validation_errors": []
+    },
+    "hermes_raw_response.json": {
+      "artifact_name": "hermes_raw_response.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/hermes_raw_response.json",
+      "producer_stage": "hermes_reasoning",
+      "consumers": [],
+      "exists": false,
+      "schema_valid": false,
+      "status": "missing",
+      "size": 0,
+      "sha256": null,
+      "created_timestamp": null,
+      "validation_errors": []
+    },
+    "hermes_run_report.json": {
+      "artifact_name": "hermes_run_report.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_run_report.json",
+      "producer_stage": "hermes_reasoning",
+      "consumers": [
+        "memory_collection"
+      ],
+      "exists": false,
+      "schema_valid": false,
+      "status": "missing",
+      "size": 0,
+      "sha256": null,
+      "created_timestamp": null,
+      "validation_errors": []
+    },
+    "source_candidates.json": {
+      "artifact_name": "source_candidates.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/source_candidates.json",
+      "producer_stage": "source_discovery",
+      "consumers": [
+        "downloads",
+        "openmontage_execution"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 564,
+      "sha256": "2af689a08aba738af9a0ae973685483af0790d2a49e4d384a5c7f96e2fcf22f6",
+      "created_timestamp": "2026-07-10T18:07:24.953972+00:00",
+      "validation_errors": []
+    },
+    "source_verification.json": {
+      "artifact_name": "source_verification.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/source_verification.json",
+      "producer_stage": "source_verification",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 172,
+      "sha256": "e8d9ab28e21d582f091486a026dd34be4fb3bebe0ae04a95d346a5500fa3d66f",
+      "created_timestamp": "2026-07-10T18:07:24.953972+00:00",
+      "validation_errors": []
+    },
+    "downloaded_assets.json": {
+      "artifact_name": "downloaded_assets.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/downloaded_assets.json",
+      "producer_stage": "downloads",
+      "consumers": [
+        "openmontage_execution"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 590,
+      "sha256": "1c43528f0406eee1ab35ae32e3cbd51de2eb238e6cd27de82dacb8f39f7e5002",
+      "created_timestamp": "2026-07-10T18:07:24.953972+00:00",
+      "validation_errors": []
+    },
+    "media_probe.json": {
+      "artifact_name": "media_probe.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/analysis/media_probe.json",
+      "producer_stage": "media_analysis",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": false,
+      "status": "schema_invalid",
+      "size": 1379,
+      "sha256": "1e5fff9931ec97cb539f37c35144b6196d112fd9b1e9c4f3c570495c7f9eec87",
+      "created_timestamp": "2026-07-10T18:07:26.446085+00:00",
+      "validation_errors": [
+        "Not a JSON object"
+      ]
+    },
+    "visual_scene_analysis.json": {
+      "artifact_name": "visual_scene_analysis.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/analysis/visual_scene_analysis.json",
+      "producer_stage": "media_analysis",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 1576,
+      "sha256": "46fefc420123f620b0cb18eda53b8ac203030c83813744027536f79a109ebbb3",
+      "created_timestamp": "2026-07-10T18:07:26.447085+00:00",
+      "validation_errors": []
+    },
+    "audio_analysis.json": {
+      "artifact_name": "audio_analysis.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/analysis/audio_analysis.json",
+      "producer_stage": "media_analysis",
+      "consumers": [],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 497,
+      "sha256": "c951221cfc7ea13eb20c096f8281a2555560fbc731b91d15c1d70d3a0e210e56",
+      "created_timestamp": "2026-07-10T18:07:26.447085+00:00",
+      "validation_errors": []
+    },
+    "timestamp_candidates.json": {
+      "artifact_name": "timestamp_candidates.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/timestamp_candidates.json",
+      "producer_stage": "editorial_artifact_generation",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 104,
+      "sha256": "e4318965d2ed852ec1a025fddcdbd56c3a9272d1a80e1d4b2b07878ac7719f1f",
+      "created_timestamp": "2026-07-10T18:07:26.461086+00:00",
+      "validation_errors": []
+    },
+    "clip_scores.json": {
+      "artifact_name": "clip_scores.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/clip_scores.json",
+      "producer_stage": "editorial_artifact_generation",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 89,
+      "sha256": "4d5eff2c41935e1346541c79b217fa8a011c200404aaf76ee14bf3ac8bdb2852",
+      "created_timestamp": "2026-07-10T18:07:26.462086+00:00",
+      "validation_errors": []
+    },
+    "arc_revision_gate.json": {
+      "artifact_name": "arc_revision_gate.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/arc_revision_gate.json",
+      "producer_stage": "editorial_artifact_generation",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 54,
+      "sha256": "bd9622b4fdddf664766ab793bd67a350fc6f58157cf199f50130eeaf75c301a4",
+      "created_timestamp": "2026-07-10T18:07:26.462086+00:00",
+      "validation_errors": []
+    },
+    "story_plan.json": {
+      "artifact_name": "story_plan.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/story_plan.json",
+      "producer_stage": "editorial_artifact_generation",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 157,
+      "sha256": "151d4b9bf7f0890f0b488c3af48e1e92e78c4688f96353e99a674f2d8c83d84e",
+      "created_timestamp": "2026-07-10T18:07:26.462086+00:00",
+      "validation_errors": []
+    },
+    "audio_music_plan.json": {
+      "artifact_name": "audio_music_plan.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/audio_music_plan.json",
+      "producer_stage": "editorial_artifact_generation",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 77,
+      "sha256": "b0947909e2cdc7d1c58155c6adceafa3f96c8393d3ced5cad0e3c8c59597813c",
+      "created_timestamp": "2026-07-10T18:07:26.462086+00:00",
+      "validation_errors": []
+    },
+    "commentary_rights_check.json": {
+      "artifact_name": "commentary_rights_check.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/commentary_rights_check.json",
+      "producer_stage": "editorial_artifact_generation",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 74,
+      "sha256": "50fdbd30677b42e58bb68253da43b7bd12f4da2fff7cc836d36550a1b17c9bd8",
+      "created_timestamp": "2026-07-10T18:07:26.462086+00:00",
+      "validation_errors": []
+    },
+    "visual_cohesion_plan.json": {
+      "artifact_name": "visual_cohesion_plan.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/visual_cohesion_plan.json",
+      "producer_stage": "editorial_artifact_generation",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 75,
+      "sha256": "4b746e6f5f85ca714b0504b3d10bffd798b7c3a1b9af8e285269ce0443571b4c",
+      "created_timestamp": "2026-07-10T18:07:26.462086+00:00",
+      "validation_errors": []
+    },
+    "graphics_text_plan.json": {
+      "artifact_name": "graphics_text_plan.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/graphics_text_plan.json",
+      "producer_stage": "editorial_artifact_generation",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 52,
+      "sha256": "1460a4e61b3a43d75a83af581930b3f9c756b6aef19c225bd9968e2f7af2af67",
+      "created_timestamp": "2026-07-10T18:07:26.462086+00:00",
+      "validation_errors": []
+    },
+    "assembly_plan.json": {
+      "artifact_name": "assembly_plan.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/assembly_plan.json",
+      "producer_stage": "editorial_artifact_generation",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 132,
+      "sha256": "c22e3a9e624e1ce7f449677e1c5af566c81cf443f00721f41356a0504cc090e5",
+      "created_timestamp": "2026-07-10T18:07:26.462086+00:00",
+      "validation_errors": []
+    },
+    "fact_provenance_gate.json": {
+      "artifact_name": "fact_provenance_gate.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/fact_provenance_gate.json",
+      "producer_stage": "editorial_artifact_generation",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 158,
+      "sha256": "e948a86ff71a0157d5cebe9ed81fc824f9f2024251a9fa6cfc334548a3d57eeb",
+      "created_timestamp": "2026-07-10T18:07:26.463086+00:00",
+      "validation_errors": []
+    },
+    "editorial_journey_state.json": {
+      "artifact_name": "editorial_journey_state.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/hermes_artifacts/editorial_journey_state.json",
+      "producer_stage": "editorial_artifact_generation",
+      "consumers": [
+        "artifact_gate"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 135,
+      "sha256": "9dd97fbd01448516997cddc6c5d05754c504a0934eb7abcc6bbd166d998ab651",
+      "created_timestamp": "2026-07-10T18:07:26.463086+00:00",
+      "validation_errors": []
+    },
+    "artifact_gate_result.json": {
+      "artifact_name": "artifact_gate_result.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/artifact_gate_result.json",
+      "producer_stage": "artifact_gate",
+      "consumers": [],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 704,
+      "sha256": "0fbf6385362a435475dda46b408dce4d2fb591f68d7ac95dfe7262cc525ab332",
+      "created_timestamp": "2026-07-10T18:07:26.963124+00:00",
+      "validation_errors": []
+    },
+    "final_openmontage_render.mp4": {
+      "artifact_name": "final_openmontage_render.mp4",
+      "expected_path": "/kaggle/working/acd-video-worker/outputs/run_20260710_180722/final_openmontage_render.mp4",
+      "producer_stage": "openmontage_execution",
+      "consumers": [
+        "output_validation"
+      ],
+      "exists": false,
+      "schema_valid": false,
+      "status": "missing",
+      "size": 0,
+      "sha256": null,
+      "created_timestamp": null,
+      "validation_errors": []
+    },
+    "full_qa_report.json": {
+      "artifact_name": "full_qa_report.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/full_qa_report.json",
+      "producer_stage": "output_validation",
+      "consumers": [],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 1912,
+      "sha256": "3c9c3b0c02c163ceef2625e58a26817acf69dd7fbaaf347f8b56e867eed2c1cd",
+      "created_timestamp": "2026-07-10T18:07:57.694453+00:00",
+      "validation_errors": []
+    },
+    "session_summary.md": {
+      "artifact_name": "session_summary.md",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/session_summary.md",
+      "producer_stage": "qa",
+      "consumers": [],
+      "exists": true,
+      "schema_valid": false,
+      "status": "invalid_json",
+      "size": 1606,
+      "sha256": "46d7d2b08939d158f9fa5486def036334423510913ad6772accb4635d4fcb1bb",
+      "created_timestamp": "2026-07-10T18:07:57.709455+00:00",
+      "validation_errors": [
+        "Expecting value: line 1 column 1 (char 0)"
+      ]
+    },
+    "artifact_manifest.json": {
+      "artifact_name": "artifact_manifest.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/artifact_manifest.json",
+      "producer_stage": "hermes_reasoning",
+      "consumers": [
+        "*"
+      ],
+      "exists": true,
+      "schema_valid": true,
+      "status": "present",
+      "size": 15362,
+      "sha256": "0f9d9201f6a0db61c96839a26ca1cbb62b0c022be02ba138ff0f3a9074f1c0f3",
+      "created_timestamp": "2026-07-10T18:07:26.982126+00:00",
+      "validation_errors": []
+    },
+    "failure_summary.json": {
+      "artifact_name": "failure_summary.json",
+      "expected_path": "/kaggle/working/acd-video-worker/state/runs/run_20260710_180722/failure_summary.json",
+      "producer_stage": "any",
+      "consumers": [],
+      "exists": false,
+      "schema_valid": false,
+      "status": "missing",
+      "size": 0,
+      "sha256": null,
+      "created_timestamp": null,
+      "validation_errors": []
+    }
+  }
+}

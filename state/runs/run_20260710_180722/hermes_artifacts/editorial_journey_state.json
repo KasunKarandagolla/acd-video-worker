@@ -1,0 +1,8 @@
+{
+  "current_stage": "gate",
+  "artifacts_produced": [
+    "match_fact_lock",
+    "source_candidates"
+  ],
+  "artifacts_pending": []
+}

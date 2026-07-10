@@ -1,0 +1,21 @@
+{
+  "run_id": "run_20260710_180722",
+  "job_title": "Argentina's Hardest Victory Nobody Expected",
+  "job_theme": "most recent Argentina World Cup match in 2026",
+  "total_candidates": 1,
+  "sources_queried": [
+    "synthetic_e2e"
+  ],
+  "match_facts_loaded": true,
+  "candidates": [
+    {
+      "source_id": "synthetic_001",
+      "canonical_url": "https://example.com/synthetic_e2e_source",
+      "title": "Synthetic Test Video",
+      "platform": "synthetic",
+      "initial_rank": 1,
+      "verified_match_relevance": "relevant"
+    }
+  ],
+  "blocker": null
+}
