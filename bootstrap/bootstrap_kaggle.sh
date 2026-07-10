@@ -21,7 +21,7 @@ log_stage() {
 
 notify() {
     local msg="$1"
-    python3 scripts/discord_notify.py "$msg" 2>/dev/null || true
+    python3 -m scripts.discord_notify "$msg" 2>/dev/null || true
 }
 
 cleanup() {
@@ -64,7 +64,7 @@ bash bootstrap/install_skills.sh
 
 CURRENT_STAGE="llm_key_check"
 log_stage "LLM API key check"
-python3 scripts/llm_key_check.py
+python3 -m scripts.llm_key_check
 
 LLM_STATUS=$(python3 -c "
 import json
@@ -96,15 +96,15 @@ fi
 
 CURRENT_STAGE="memory_hydrate"
 log_stage "Memory hydrate"
-python3 scripts/memory_sync.py hydrate
+python3 -m scripts.memory_sync hydrate
 
 CURRENT_STAGE="repo_preflight"
 log_stage "Repo preflight"
-python3 scripts/repo_preflight.py
+python3 -m scripts.repo_preflight
 
 CURRENT_STAGE="search_capability_preflight"
 log_stage "Search capability preflight"
-python3 scripts/search_capability_preflight.py
+python3 -m scripts.search_capability_preflight
 SEARCH_STATUS=$(python3 -c "
 import json
 try:
@@ -170,7 +170,7 @@ RUN_ID=$(python3 -c "import sys, datetime; print(datetime.datetime.utcnow().strf
 export RUN_ID
 
 set +e
-python3 scripts/run_title_theme_job.py "$JOB_FILE" --run-id "$RUN_ID"
+python3 -m scripts.run_title_theme_job "$JOB_FILE" --run-id "$RUN_ID"
 JOB_EXIT=$?
 set -e
 
@@ -184,8 +184,8 @@ fi
 
 CURRENT_STAGE="memory_collect"
 log_stage "Memory collect"
-python3 scripts/memory_sync.py collect --run-id "$RUN_ID"
-python3 scripts/memory_sync.py push --run-id "$RUN_ID"
+python3 -m scripts.memory_sync collect --run-id "$RUN_ID"
+python3 -m scripts.memory_sync push --run-id "$RUN_ID"
 
 CURRENT_STAGE="worker_complete"
 log_stage "Worker complete"

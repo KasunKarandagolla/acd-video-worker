@@ -834,7 +834,7 @@ def test_validate_only_before_title_theme():
     """Test: HERMES_VALIDATE_ONLY is checked before run_title_theme_job.py."""
     content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
     validate_only_idx = content.find("HERMES_VALIDATE_ONLY:-0")
-    title_theme_idx = content.find("scripts/run_title_theme_job.py")
+    title_theme_idx = content.find("scripts.run_title_theme_job")
     assert validate_only_idx >= 0, "bootstrap must check HERMES_VALIDATE_ONLY"
     assert title_theme_idx >= 0, "bootstrap must call run_title_theme_job.py"
     assert validate_only_idx < title_theme_idx, \
@@ -846,13 +846,13 @@ def test_validate_only_skips_steps():
     """Test: validation-only mode does not invoke source discovery, rendering, or memory push."""
     content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
     # The validation-only exit comes before the job execution block
-    # which contains source_discovery (inside run_title_theme_job.py) and memory_sync.py push
+    # which contains source_discovery (inside run_title_theme_job.py) and scripts.memory_sync push
     validate_only_exit_idx = content.find('echo "Hermes validation-only mode completed successfully."')
-    title_theme_idx = content.find("scripts/run_title_theme_job.py")
-    memory_push_idx = content.find("memory_sync.py push")
+    title_theme_idx = content.find("scripts.run_title_theme_job")
+    memory_push_idx = content.find("scripts.memory_sync push")
     assert validate_only_exit_idx >= 0, "bootstrap must have validation-only exit message"
     assert title_theme_idx >= 0, "bootstrap must call run_title_theme_job.py"
-    assert memory_push_idx >= 0, "bootstrap must call memory_sync.py push"
+    assert memory_push_idx >= 0, "bootstrap must call scripts.memory_sync push"
     assert validate_only_exit_idx < title_theme_idx, \
         "Validation-only exit must be before title/theme job (which triggers source discovery and rendering)"
     assert validate_only_exit_idx < memory_push_idx, \
@@ -1154,7 +1154,7 @@ def test_existing_bootstrap_unchanged():
     # Require the key bootstrap behaviors remain
     assert "set -e" in content
     assert "python3 -m scripts.runtime_smoke_test" in content
-    assert "scripts/run_title_theme_job.py" in content
+    assert "scripts.run_title_theme_job" in content
     print(f"  Existing bootstrap unchanged: OK")
 
 
