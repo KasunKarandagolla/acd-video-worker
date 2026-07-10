@@ -157,7 +157,7 @@ def test_om_pipeline_loader() -> dict:
         "import sys; sys.path.insert(0, " + repr(str(OM_REPO)) + "); "
         "from lib.pipeline_loader import load_pipeline, list_pipelines; "
         "pipelines = list_pipelines(); "
-        f"print(f'OK: {len(pipelines)} pipelines: {pipelines}')"
+        "print(f'OK: {len(pipelines)} pipelines: {pipelines}')"
     )
     r = _subprocess_python(code, timeout=15)
     return {"test": "om_pipeline_loader", "passed": r["success"], "detail": r["stdout"] or r["stderr"]}
@@ -170,7 +170,7 @@ def test_tool_registry_discovery() -> dict:
         "import sys; sys.path.insert(0, " + repr(str(OM_REPO)) + "); "
         "from tools.tool_registry import registry; "
         "tools = registry.discover('tools'); "
-        f"print(f'OK: {len(tools)} tools discovered: {tools}')"
+        "print(f'OK: {len(tools)} tools discovered: {tools}')"
     )
     r = _subprocess_python(code, timeout=15)
     return {"test": "tool_registry_discovery", "passed": r["success"], "detail": r["stdout"] or r["stderr"]}
