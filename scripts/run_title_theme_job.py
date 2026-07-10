@@ -221,10 +221,10 @@ def main():
             print("  [SYNTHETIC] Proceeding to synthetic source discovery and media analysis.")
             _run_synthetic_stages(run_id, run_dir, outputs_dir, stages, job_path, title, theme, job)
         else:
-            # Stage 4: Hermes runtime — canonical run_hermes_turn
+            # Stage 4: Hermes runtime — canonical run_hermes_turn (with retry for transient errors)
             notify(f"[{run_id}] Stage 4/22: Hermes runtime")
-            from scripts.hermes_runtime import run_hermes_turn
-            hermes_result = run_hermes_turn(title, theme, run_id, run_dir)
+            from scripts.hermes_runtime import run_hermes_turn_with_retry
+            hermes_result = run_hermes_turn_with_retry(title, theme, run_id, run_dir, max_retries=1)
             stages["hermes_runtime"] = hermes_result
 
             print(f"  Hermes success: {hermes_result.get('success', False)}")
@@ -293,9 +293,31 @@ def main():
                 print("match_fact_lock.json: VALID")
                 print("artifact_manifest.json: WRITTEN")
                 stages["hermes_artifact_canary"] = {"passed": True}
+                canary_result = {
+                    "run_id": run_id,
+                    "hermes_success": stages.get("hermes_runtime", {}).get("success", False),
+                    "artifact_gate_passed": False,
+                    "openmontage_success": False,
+                    "pipeline_success": False,
+                    "final_success": False,
+                    "compose_tool_invoked": False,
+                    "compose_tool_returned_success": False,
+                    "qa_passed": False,
+                    "fallback_used": False,
+                    "final_output": None,
+                    "failed_stage": None,
+                    "errors": [],
+                    "all_required_true": False,
+                    "memory_collection_attempted": False,
+                    "memory_push_attempted": False,
+                    "discord_final_attempted": False,
+                    "canary_mode": True,
+                    "canary_passed": True,
+                }
+                stages["final_result"] = canary_result
                 stages["render_output"] = {"render_success": False, "note": "Stopped after canary — no render attempted"}
                 _write_session_summary(run_id, job_path, title, theme, stages, run_dir)
-                _write_success_status(stages, run_dir)
+                _write_success_status(stages, run_dir, canary_result)
                 sys.exit(0)
             # Stage 6: source discovery and verification
             notify(f"[{run_id}] Stage 6/22: source discovery")
@@ -335,9 +357,11 @@ def main():
             stages["media_analysis"] = {"exit_code": rc}
 
         # Stage 12: artifact gate
+        self_hermes_success = stages.get("hermes_runtime", {}).get("success", False)
+        self_mf_valid = stages.get("match_fact_lock", {}).get("schema_valid", False)
         notify(f"[{run_id}] Stage 12/22: artifact gate")
         rc = run_script("editorial_artifact_gate.py", [run_id], "artifact_gate")
-        stages["artifact_gate"] = {"exit_code": rc}
+        stages["artifact_gate"] = {"exit_code": rc, "hermes_success": self_hermes_success, "match_fact_schema_valid": self_mf_valid}
         gate_result = run_dir / "artifact_gate_result.json"
         if gate_result.is_file():
             with open(gate_result) as f:
@@ -385,24 +409,58 @@ def main():
                 print("  QA FAILED — issues found")
                 stages["qa_check"]["blocker"] = "QA checks failed"
 
-        final_mp4 = outputs_dir / "final_openmontage_render.mp4"
+        # Read the OpenMontage execution report to determine authoritative status
+        om_report_path = run_dir / "openmontage_execution_report.json"
+        om_success = False
+        om_pipeline_success = False
+        om_final_success = False
+        compose_tool_invoked = False
+        compose_tool_returned_success = False
+        fallback_used = False
+        if om_report_path.is_file():
+            try:
+                with open(om_report_path) as f:
+                    om_data = json.load(f)
+                om_success = om_data.get("openmontage_success", False)
+                om_pipeline_success = om_data.get("pipeline_success", False)
+                om_final_success = om_data.get("final_success", False)
+                compose_tool_invoked = om_data.get("compose_tool_invoked", False)
+                compose_tool_returned_success = om_data.get("compose_tool_returned_success", False)
+                fallback_used = om_data.get("fallback_used", False)
+            except Exception:
+                pass
+
+        qa_passed = stages.get("qa_check", {}).get("qa_passed", False)
+
+        final_output = outputs_dir / "final_openmontage_render.mp4"
         fallback_mp4 = outputs_dir / "fallback_render_attempt.mp4"
-        if final_mp4.is_file() and final_mp4.stat().st_size > 0:
-            stages["render_output"] = {
-                "render_success": True,
-                "output": str(final_mp4),
-                "size_bytes": final_mp4.stat().st_size,
-                "note": "OpenMontage/final mp4 exists.",
-            }
-        elif fallback_mp4.is_file() and fallback_mp4.stat().st_size > 0:
-            stages["render_output"] = {
-                "render_success": True,
-                "output": str(fallback_mp4),
-                "size_bytes": fallback_mp4.stat().st_size,
-                "note": "Fallback mp4 exists. Not a full OpenMontage render.",
-            }
-        else:
-            stages["render_output"] = {"render_success": False, "note": "No mp4 output found."}
+
+        render_success = bool(
+            om_success
+            and om_pipeline_success
+            and om_final_success
+            and compose_tool_invoked
+            and compose_tool_returned_success
+            and not fallback_used
+            and final_output.is_file()
+            and final_output.stat().st_size > 0
+        )
+
+        stages["render_output"] = {
+            "render_success": render_success,
+            "openmontage_success": om_success,
+            "pipeline_success": om_pipeline_success,
+            "final_success": om_final_success,
+            "compose_tool_invoked": compose_tool_invoked,
+            "compose_tool_returned_success": compose_tool_returned_success,
+            "fallback_used": fallback_used,
+            "qa_passed": qa_passed,
+            "output": str(final_output) if final_output.is_file() else None,
+            "size_bytes": final_output.stat().st_size if final_output.is_file() else 0,
+        }
+        if final_output.is_file():
+            stages["render_output"]["output"] = str(final_output)
+            stages["render_output"]["size_bytes"] = final_output.stat().st_size
 
     except SystemExit:
         raise
@@ -414,41 +472,117 @@ def main():
         write_failure_summary(run_id, failed_stage, exception_info, stages, run_dir)
         sys.exit(1)
 
+    # Build final authoritative result object
+    qa_passed = stages.get("qa_check", {}).get("qa_passed", False)
+    om_report_path = run_dir / "openmontage_execution_report.json"
+    hermes_success = stages.get("hermes_runtime", {}).get("success", False)
+    artifact_gate_passed = stages.get("artifact_gate", {}).get("gate_passed", False)
+    om_success = stages.get("render_output", {}).get("openmontage_success", False)
+    pipeline_success = stages.get("render_output", {}).get("pipeline_success", False)
+    final_success = stages.get("render_output", {}).get("final_success", False)
+    compose_tool_invoked = stages.get("render_output", {}).get("compose_tool_invoked", False)
+    compose_tool_returned_success = stages.get("render_output", {}).get("compose_tool_returned_success", False)
+    fallback_used = stages.get("render_output", {}).get("fallback_used", True)
+    render_success = stages.get("render_output", {}).get("render_success", False)
+
+    final_result = {
+        "run_id": run_id,
+        "hermes_success": hermes_success,
+        "artifact_gate_passed": artifact_gate_passed,
+        "openmontage_success": om_success,
+        "pipeline_success": pipeline_success,
+        "final_success": final_success,
+        "compose_tool_invoked": compose_tool_invoked,
+        "compose_tool_returned_success": compose_tool_returned_success,
+        "qa_passed": qa_passed,
+        "fallback_used": fallback_used,
+        "final_output": str(outputs_dir / "final_openmontage_render.mp4") if (outputs_dir / "final_openmontage_render.mp4").is_file() else None,
+        "failed_stage": failed_stage,
+        "errors": [],
+        "memory_collection_attempted": False,
+        "memory_push_attempted": False,
+        "discord_final_attempted": False,
+        "is_synthetic": is_synthetic,
+    }
+    if not render_success:
+        if not hermes_success:
+            final_result["errors"].append("hermes_success is false")
+        if not artifact_gate_passed:
+            final_result["errors"].append("artifact_gate not passed")
+        if not om_success:
+            final_result["errors"].append("openmontage_success is false")
+        if not pipeline_success:
+            final_result["errors"].append("pipeline_success is false")
+        if not final_success:
+            final_result["errors"].append("final_success is false")
+        if not compose_tool_invoked:
+            final_result["errors"].append("compose_tool not invoked")
+        if not compose_tool_returned_success:
+            final_result["errors"].append("compose_tool did not return success")
+        if fallback_used:
+            final_result["errors"].append("fallback was used instead of OpenMontage")
+        if not qa_passed:
+            final_result["errors"].append("QA failed")
+        if not (outputs_dir / "final_openmontage_render.mp4").is_file():
+            final_result["errors"].append("final output missing")
+    final_result["all_required_true"] = render_success
+
     # Stage 16: session summary
     _write_session_summary(run_id, job_path, title, theme, stages, run_dir)
 
-    if not is_synthetic:
+    if not is_synthetic and render_success:
         # Stage 17: one memory update
         notify(f"[{run_id}] Stage 17/22: memory update")
         rc = run_script("memory_sync.py", ["collect", "--run-id", run_id], "memory_collect")
         stages["memory_update"] = {"exit_code": rc}
+        final_result["memory_collection_attempted"] = True
 
         # Stage 18: one GitHub push
         notify(f"[{run_id}] Stage 18/22: GitHub push")
         rc = run_script("memory_sync.py", ["push", "--run-id", run_id], "memory_push")
         stages["github_push"] = {"exit_code": rc}
+        final_result["memory_push_attempted"] = True
+    elif is_synthetic:
+        print("  [SYNTHETIC] Skipping memory collect/push — synthetic mode.")
+        stages["memory_update"] = {"skipped": True, "reason": "synthetic_mode"}
+        stages["github_push"] = {"skipped": True, "reason": "synthetic_mode"}
+        final_result["memory_collection_attempted"] = False
+        final_result["memory_push_attempted"] = False
+    else:
+        print("  Skipping memory collect/push — render did not succeed.")
+        stages["memory_update"] = {"skipped": True, "reason": "render_not_successful"}
+        stages["github_push"] = {"skipped": True, "reason": "render_not_successful"}
+        final_result["memory_collection_attempted"] = False
+        final_result["memory_push_attempted"] = False
 
-    # Stage 19/22: Discord final status
-    render_status = stages.get("render_output", {}).get("render_success", False)
-    if render_status and not is_synthetic:
+    # Discord final status — never send on synthetic or failure
+    if is_synthetic:
+        print("  [SYNTHETIC] Skipping Discord notification — synthetic mode.")
+        stages["discord_final"] = {"sent": False, "reason": "synthetic_mode"}
+        final_result["discord_final_attempted"] = False
+    elif not render_success:
+        print("  Skipping Discord notification — render did not succeed.")
+        stages["discord_final"] = {"sent": False, "reason": "render_not_successful"}
+        final_result["discord_final_attempted"] = False
+    else:
         msg = f"[{run_id}] Job complete. Render: {stages['render_output'].get('output', 'unknown')}"
         notify(msg)
-    elif not is_synthetic:
-        blocker_msg = "Check run reports for details."
-        for stage_name, stage_data in stages.items():
-            if isinstance(stage_data, dict) and stage_data.get("blocker"):
-                blocker_msg = stage_data["blocker"]
-                break
-        msg = f"[{run_id}] Job complete. No render output. Blocker: {blocker_msg}"
-        notify(msg)
-    stages["discord_final"] = {"sent": True}
+        stages["discord_final"] = {"sent": True}
+        final_result["discord_final_attempted"] = True
 
     # Write final manifest
     ac.write_artifact_manifest(run_id)
 
-    _write_success_status(stages, run_dir)
+    # Write final_result
+    final_result_path = run_dir / "final_result.json"
+    with open(final_result_path, "w") as f:
+        json.dump(final_result, f, indent=2)
+    stages["final_result"] = final_result
 
-    if not render_status:
+    _write_success_status(stages, run_dir, final_result)
+
+    if not render_success or not qa_passed or not final_success or fallback_used:
+        print(f"\n  Pipeline FAILED — final_success={final_success}, qa_passed={qa_passed}, fallback_used={fallback_used}")
         sys.exit(1)
 
 
@@ -499,22 +633,39 @@ def _run_synthetic_stages(run_id, run_dir, outputs_dir, stages, job_path, title,
     import shutil
     has_ffmpeg = shutil.which("ffmpeg") is not None
 
-    # Generate synthetic test video (testsrc, 5s, 640x480)
+    # Generate synthetic test fixture with video (testsrc) AND audio (sine wave, AAC)
     syn_video = assets_dir / "synthetic_test_video.mp4"
     if has_ffmpeg:
         import subprocess as sp
         sp.run([
-            "ffmpeg", "-y", "-f", "lavfi", "-i",
-            "testsrc=duration=5:size=640x480:rate=30",
-            "-f", "lavfi", "-i",
-            "sine=frequency=440:duration=5",
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "testsrc=duration=5:size=640x480:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+            "-map", "0:v",
+            "-map", "1:a",
             "-c:v", "libx264", "-preset", "ultrafast",
-            "-c:a", "aac",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+            "-shortest",
             str(syn_video),
         ], capture_output=True, timeout=30)
 
     if syn_video.is_file() and syn_video.stat().st_size > 0:
         print(f"  Synthetic video: {syn_video} ({syn_video.stat().st_size} bytes)")
+        # ffprobe the fixture and require video + audio
+        probe_cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", str(syn_video)]
+        try:
+            probe_proc = sp.run(probe_cmd, capture_output=True, text=True, timeout=15)
+            if probe_proc.returncode == 0:
+                probe_data = json.loads(probe_proc.stdout)
+                has_v = any(s.get("codec_type") == "video" for s in probe_data.get("streams", []))
+                has_a = any(s.get("codec_type") == "audio" for s in probe_data.get("streams", []))
+                print(f"  Fixture: video={has_v}, audio={has_a}, streams={len(probe_data.get('streams', []))}")
+                if not has_v or not has_a:
+                    print("  ERROR: Fixture missing video or audio stream — regenerating")
+                    if syn_video.is_file():
+                        syn_video.unlink()
+        except Exception:
+            pass
     else:
         print("  WARN: Could not generate synthetic video with ffmpeg")
         syn_video.write_text("placeholder")
@@ -649,12 +800,26 @@ def _write_session_summary(run_id, job_path, title, theme, stages, run_dir):
         f.write(f"Output: {output}\n")
 
 
-def _write_success_status(stages, run_dir):
-    render_status = stages.get("render_output", {}).get("render_success", False)
+def _write_success_status(stages, run_dir, final_result=None):
+    if final_result:
+        all_ok = final_result.get("all_required_true", False)
+        render_status = all_ok
+    else:
+        render_status = stages.get("render_output", {}).get("render_success", False)
+
     print(f"\n{'='*60}")
     print(f"  RUN COMPLETE")
     print(f"  Summary: {run_dir / 'session_summary.md'}")
-    print(f"  Render success: {render_status}")
+    if final_result:
+        print(f"  openmontage_success: {final_result.get('openmontage_success')}")
+        print(f"  pipeline_success: {final_result.get('pipeline_success')}")
+        print(f"  final_success: {final_result.get('final_success')}")
+        print(f"  qa_passed: {final_result.get('qa_passed')}")
+        print(f"  fallback_used: {final_result.get('fallback_used')}")
+    if render_status:
+        print(f"  Render success: True")
+    else:
+        print(f"  Render success: False")
     print(f"{'='*60}")
 
 

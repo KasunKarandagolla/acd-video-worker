@@ -1,0 +1,39 @@
+job_id: hermes_artifact_canary_2026
+input_mode: title_theme_only
+
+title: "Historical Fact Verification — 2014 World Cup Final"
+theme: "Germany vs Argentina, 2014 FIFA World Cup Final, July 13 2014, 1-0 (Mario Götze 113')"
+
+sourcing:
+  mode: none
+  allow_search: false
+  allow_download: false
+
+hermes:
+  use_exact_prompt: true
+  fact_packet:
+    competition: "2014 FIFA World Cup"
+    match_date: "2014-07-13"
+    team_a: "Germany"
+    team_b: "Argentina"
+    score: "1-0"
+    stage_or_round: "Final"
+    venue: "Estádio do Maracanã, Rio de Janeiro"
+    verification_status: "verified"
+    confidence: "high"
+    key_events:
+      - "Mario Götze scored in the 113th minute"
+      - "Bastian Schweinsteiger was named Man of the Match"
+      - "Germany's fourth World Cup title"
+    evidence_sources:
+      - "FIFA official match report"
+      - "BBC Sport match report"
+    evidence_claims:
+      - "Germany defeated Argentina 1-0 in the 2014 World Cup Final"
+      - "Mario Götze scored the only goal in extra time"
+
+output:
+  save_run_report: true
+  save_memory_update: false
+  push_memory_to_github: false
+  notify_discord: false

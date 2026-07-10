@@ -52,7 +52,16 @@ def hydrate():
 
 
 def _is_run_successful(run_dir: Path) -> bool:
-    """Check whether the run was successful (Hermes invoked, render OK)."""
+    """Check whether the run was successful using the final_result.json."""
+    final_result = run_dir / "final_result.json"
+    if final_result.is_file():
+        try:
+            with open(final_result) as f:
+                fr = json.load(f)
+            return bool(fr.get("all_required_true", False))
+        except Exception:
+            pass
+
     hermes_report = run_dir / "hermes_run_report.json"
     if hermes_report.is_file():
         try:
@@ -79,10 +88,19 @@ def _is_run_successful(run_dir: Path) -> bool:
     return True
 
 
+def _is_synthetic_mode() -> bool:
+    return os.environ.get("PIPELINE_SYNTHETIC_E2E", "0") == "1"
+
+
 def collect(run_id):
     if not run_id:
         print("ERROR: --run-id is required for collect")
         sys.exit(1)
+
+    # Never collect memory in synthetic mode
+    if _is_synthetic_mode():
+        print("PIPELINE_SYNTHETIC_E2E=1: memory collection skipped.")
+        return
 
     run_dir = RUNS_DIR / run_id
     if not run_dir.is_dir():
@@ -193,6 +211,11 @@ def collect(run_id):
 
 
 def push(run_id=None):
+    # Never push memory in synthetic mode
+    if _is_synthetic_mode():
+        print("PIPELINE_SYNTHETIC_E2E=1: memory push skipped.")
+        return
+
     token = os.environ.get("GITHUB_TOKEN", "")
     repo_url = os.environ.get("PRIVATE_REPO_URL", "")
 

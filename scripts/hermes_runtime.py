@@ -667,6 +667,30 @@ def _validate_match_fact_lock(data: dict) -> list:
     return errors
 
 
+def _get_hermes_timeout() -> int:
+    """Get configurable Hermes turn timeout from environment variable."""
+    try:
+        return int(os.environ.get("HERMES_TURN_TIMEOUT_SECONDS", "120"))
+    except (ValueError, TypeError):
+        return 120
+
+
+def _is_transient_error(error_type: str, error_message: str) -> bool:
+    """Check if an error is transient and should be retried."""
+    if error_type == "timeout":
+        return True
+    if error_type == "conversation_failed":
+        transient_patterns = ["429", "500", "502", "503", "504", "rate limit", "too many requests",
+                               "temporarily unavailable", "service unavailable", "internal server error",
+                               "gateway timeout", "bad gateway", "connection refused", "connection reset",
+                               "timeout", "timed out"]
+        msg_lower = (error_message or "").lower()
+        for pattern in transient_patterns:
+            if pattern in msg_lower:
+                return True
+    return False
+
+
 def run_hermes_turn(
     title: str,
     theme: str,
@@ -796,7 +820,7 @@ def run_hermes_turn(
         child_env["LLM_MODEL"] = model
         proc = subprocess.run(
             [python, "-c", code],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=_get_hermes_timeout(),
             env=child_env,
         )
         stdout = proc.stdout or ""
@@ -864,13 +888,51 @@ def run_hermes_turn(
         result["details"]["brief_interpretation"] = {"path": str(brief_path)}
 
     except subprocess.TimeoutExpired:
+        timeout_val = _get_hermes_timeout()
         result["error_type"] = "timeout"
-        result["error_message"] = "Hermes conversation timed out after 120s"
+        result["error_message"] = f"Hermes conversation timed out after {timeout_val}s"
     except Exception as e:
         result["error_type"] = "exception"
         result["error_message"] = str(e)
 
     return result
+
+
+def run_hermes_turn_with_retry(
+    title: str,
+    theme: str,
+    run_id: str,
+    run_dir: Path,
+    smoke_test: bool = False,
+    max_retries: int = 1,
+) -> dict:
+    """Wrapper around run_hermes_turn with retry for transient errors.
+
+    Retries only on timeout or transient HTTP errors (429, 5xx).
+    Does NOT retry on schema or programming errors.
+    """
+    from copy import deepcopy
+    first_result = run_hermes_turn(title, theme, run_id, run_dir, smoke_test=smoke_test)
+    first_result["retry_attempted"] = False
+    if first_result.get("success", False):
+        return first_result
+
+    error_type = first_result.get("error_type", "")
+    error_message = first_result.get("error_message", "")
+    if not _is_transient_error(error_type, error_message):
+        return first_result
+
+    if max_retries <= 0:
+        return first_result
+
+    print(f"  [RETRY] Transient error ({error_type}), retrying (max_retries={max_retries})...")
+    import time as _time
+    _time.sleep(5)
+    retry_result = run_hermes_turn(title, theme, run_id, run_dir, smoke_test=smoke_test)
+    retry_result["retry_attempted"] = True
+    retry_result["first_error_type"] = deepcopy(first_result.get("error_type"))
+    retry_result["first_error_message"] = deepcopy(first_result.get("error_message"))
+    return retry_result
 
 
 def invoke_hermes(title: str, theme: str, run_id: str, run_dir: Path) -> dict:
@@ -1005,7 +1067,7 @@ def invoke_hermes(title: str, theme: str, run_id: str, run_dir: Path) -> dict:
         child_env["LLM_MODEL"] = model
         proc = subprocess.run(
             [python, "-c", run_code],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=_get_hermes_timeout(),
             env=child_env,
         )
         stdout = proc.stdout or ""
