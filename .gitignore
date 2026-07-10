@@ -11,3 +11,5 @@ __pycache__/
 *.pyc
 .kaggle/
 .ipynb_checkpoints/
+.runtime/
+.venvs/
