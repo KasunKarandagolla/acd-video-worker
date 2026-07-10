@@ -192,14 +192,15 @@ def test_openmontage_deterministic_selection() -> dict:
                 selected_tool = rt
                 selection_rule = "matched_manifest_required"
                 break
-        if not selected_tool:
-            compose_tools = [t for t in all_tools if "compose" in t.lower() or "edit" in t.lower()]
-            if compose_tools:
-                selected_tool = compose_tools[0]
-                selection_rule = "matched_compose_edit_name"
         if not selected_tool and "video_compose" in all_tools:
             selected_tool = "video_compose"
-            selection_rule = "matched_video_compose_name"
+            selection_rule = "matched_video_compose"
+        if not selected_tool and "hyperframes_compose" in all_tools:
+            selected_tool = "hyperframes_compose"
+            selection_rule = "matched_hyperframes_compose"
+        if not selected_tool and "video_stitch" in all_tools:
+            selected_tool = "video_stitch"
+            selection_rule = "matched_video_stitch"
 
         return {
             "test": "openmontage_deterministic_selection",

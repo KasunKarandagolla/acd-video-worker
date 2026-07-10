@@ -146,20 +146,25 @@ def _run_registry_discovery(om_path: Path, required_tools: list = None) -> dict:
                 result["compose_tool_support_status"] = "matched_manifest_required"
                 return result
 
-        # Priority 2: compose or edit tool (prefer exact name match)
-        compose_tools = [t for t in result["registered_tools"] if "compose" in t.lower() or "edit" in t.lower()]
-        if compose_tools:
-            result["selected_compose_tool"] = compose_tools[0]
-            result["compose_tool_support_status"] = "matched_compose_edit_name"
-            return result
-
-        # Priority 3: exact video_compose
+        # Priority 2: exact video_compose
         if "video_compose" in result["registered_tools"]:
             result["selected_compose_tool"] = "video_compose"
-            result["compose_tool_support_status"] = "matched_video_compose_name"
+            result["compose_tool_support_status"] = "matched_video_compose"
             return result
 
-        # No compatible tool — block
+        # Priority 3: hyperframes_compose
+        if "hyperframes_compose" in result["registered_tools"]:
+            result["selected_compose_tool"] = "hyperframes_compose"
+            result["compose_tool_support_status"] = "matched_hyperframes_compose"
+            return result
+
+        # Priority 4: video_stitch
+        if "video_stitch" in result["registered_tools"]:
+            result["selected_compose_tool"] = "video_stitch"
+            result["compose_tool_support_status"] = "matched_video_stitch"
+            return result
+
+        # No compatible tool — block (never select analysis/grading/transcription/trimming/audio/enhancement)
         result["compose_tool_support_status"] = "blocked_no_compatible_tool"
 
     except Exception as e:

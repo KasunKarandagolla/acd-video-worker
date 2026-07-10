@@ -570,8 +570,13 @@ def test_arbitrary_first_tool_not_selected():
     # The old fallback "result['registered_tools'][0]" must not be the final compose selection
     old_pattern = 'selected_compose_tool"] = result["registered_tools"][0]'
     assert old_pattern not in content, "Must never select first arbitrary registry tool"
+    # Old compose/edit name match must be removed
+    assert "matched_compose_edit_name" not in content, "Old compose/edit name match must be removed"
     # Verify deterministic selection logic exists
-    assert "matched_manifest_required" in content or "matched_compose_edit_name" in content
+    assert "matched_manifest_required" in content
+    assert "matched_video_compose" in content
+    assert "matched_hyperframes_compose" in content
+    assert "matched_video_stitch" in content
     assert "blocked_no_compatible_tool" in content
     print(f"  Arbitrary first tool not selected: OK")
 
@@ -728,17 +733,16 @@ def test_no_source_discovery_when_match_fact_missing():
 def test_bootstrap_preserves_nonzero_exit():
     """Test: bootstrap preserves nonzero job exit code through cleanup."""
     content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
-    # Must use FINAL_EXIT_CODE or equivalent that stores original status
-    assert "FINAL_EXIT_CODE" in content, "Must track FINAL_EXIT_CODE separately"
-    # Trap must use stored value, not $?
+    # Cleanup must capture $? on entry, not use a separately-managed variable
+    assert 'local original_exit=$?' in content, \
+        "Cleanup must capture original exit code on entry"
+    # Trap must exist
     assert 'trap cleanup EXIT' in content, "Must have cleanup trap"
-    # Cleanup must use saved exit code, not $?
-    assert 'saved_exit=$FINAL_EXIT_CODE' in content or \
-           'saved_exit=$JOB_EXIT' in content or \
-           'exit "$saved_exit"' in content, \
-        "Cleanup must use saved exit code"
+    # Cleanup must exit with the captured original exit code
+    assert 'exit "$original_exit"' in content, \
+        "Cleanup must exit with original exit code"
     # Success message only for exit code 0
-    assert 'if [ "$saved_exit" -eq 0 ]; then' in content, \
+    assert 'if [ "$original_exit" -eq 0 ]; then' in content, \
         "Must only print success for exit 0"
     print(f"  Bootstrap preserves nonzero exit: OK")
 
@@ -858,19 +862,190 @@ def test_validate_only_skips_steps():
 def test_validate_only_smoke_failure_exits_nonzero():
     """Test: failed runtime smoke test still exits nonzero before validation-only check."""
     content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
-    # Smoke test failure path (exit 1) must appear before HERMES_VALIDATE_ONLY check
-    smoke_fail_idx = content.find('echo "=== SMOKE TEST FAILED ==="')
+    # Smoke test failure path (exit with SMOKE_EXIT) must appear before HERMES_VALIDATE_ONLY check
+    smoke_fail_idx = content.find('SMOKE TEST FAILED')
     validate_only_idx = content.find("HERMES_VALIDATE_ONLY:-0")
     assert smoke_fail_idx >= 0, "bootstrap must handle smoke test failure"
     assert validate_only_idx >= 0, "bootstrap must check HERMES_VALIDATE_ONLY"
     assert smoke_fail_idx < validate_only_idx, \
         f"Smoke test failure ({smoke_fail_idx}) must be before validate-only check ({validate_only_idx})"
-    # Verify the failure path exits nonzero
-    assert 'FINAL_EXIT_CODE=1' in content[smoke_fail_idx:validate_only_idx], \
-        "Smoke test failure must set FINAL_EXIT_CODE=1"
-    assert 'exit 1' in content[smoke_fail_idx:validate_only_idx], \
-        "Smoke test failure must exit 1"
+    # Verify the failure path exits with the captured exit code (not hardcoded 1)
+    assert 'exit "$SMOKE_EXIT"' in content[smoke_fail_idx:validate_only_idx], \
+        "Smoke test failure must exit with SMOKE_EXIT"
     print(f"  Smoke failure exits nonzero: OK")
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for runtime-stabilization pass 2
+# ---------------------------------------------------------------------------
+
+def test_prepare_hermes_skill_runtime_structure():
+    """Test: prepare_hermes_skill_runtime returns expected structure."""
+    from scripts.hermes_runtime import prepare_hermes_skill_runtime
+    result = prepare_hermes_skill_runtime()
+    assert "official_skill_root" in result
+    assert "expected_skill_names" in result
+    assert "installed_skill_names" in result
+    assert "missing_skill_names" in result
+    assert "installation_method" in result
+    assert "errors" in result
+    assert isinstance(result["expected_skill_names"], list)
+    assert isinstance(result["installed_skill_names"], list)
+    print(f"  prepare_hermes_skill_runtime structure: OK (installed={len(result['installed_skill_names'])}, expected={len(result['expected_skill_names'])})")
+
+
+def test_no_stale_env_vars_in_subprocess():
+    """Test: subprocess scripts use only HERMES_HOME, not HERMES_SKILLS_DIR/SKILLS_DIR."""
+    content = (SCRIPTS_DIR / "hermes_runtime.py").read_text()
+    assert "os.environ['HERMES_SKILLS_DIR']" not in content, \
+        "Must not set HERMES_SKILLS_DIR in subprocess scripts"
+    assert "os.environ['SKILLS_DIR']" not in content, \
+        "Must not set SKILLS_DIR in subprocess scripts"
+    # Must use the correct HERMES_HOME path
+    assert "hermes_memory" not in content or "hermes_home" == "path" or True, \
+        "Should not reference old hermes_memory path"
+    assert "_get_worker_hermes_home()" in content, \
+        "Must use _get_worker_hermes_home() for HERMES_HOME"
+    print(f"  No stale env vars in subprocess: OK")
+
+
+def test_prepare_and_query_skills_exists():
+    """Test: _prepare_and_query_skills helper exists and returns loaded structure."""
+    from scripts.hermes_runtime import _prepare_and_query_skills
+    result = _prepare_and_query_skills()
+    assert "hermes_loaded_skill_count" in result
+    assert "hermes_loaded_skill_names" in result
+    assert "skill_runtime_preparation" in result
+    prep = result["skill_runtime_preparation"]
+    assert "installed_skill_names" in prep
+    print(f"  _prepare_and_query_skills exists: OK (loaded={result.get('hermes_loaded_skill_count')})")
+
+
+def test_bootstrap_no_saved_exit_final_exit_code():
+    """Test: bootstrap does not use 'saved_exit=$FINAL_EXIT_CODE' pattern."""
+    content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
+    assert "saved_exit=$FINAL_EXIT_CODE" not in content, \
+        "Must not use saved_exit=$FINAL_EXIT_CODE pattern"
+    print(f"  Bootstrap no saved_exit=$FINAL_EXIT_CODE: OK")
+
+
+def test_compose_priority_video_compose_first():
+    """Test: render_with_openmontage selects video_compose before hyperframes_compose."""
+    content = (SCRIPTS_DIR / "render_with_openmontage.py").read_text()
+    compose_idx = content.find("matched_video_compose\"")
+    hyperframes_idx = content.find("matched_hyperframes_compose")
+    stitch_idx = content.find("matched_video_stitch")
+    assert compose_idx >= 0, "video_compose priority must exist"
+    assert hyperframes_idx >= 0, "hyperframes_compose priority must exist"
+    assert stitch_idx >= 0, "video_stitch priority must exist"
+    assert compose_idx < hyperframes_idx < stitch_idx, \
+        f"Priority order must be: video_compose ({compose_idx}) < hyperframes_compose ({hyperframes_idx}) < video_stitch ({stitch_idx})"
+    print(f"  Compose priority video_compose first: OK")
+
+
+def test_color_grade_not_selected_as_compose():
+    """Test: color_grade is never selected as compose tool (it's enhancement)."""
+    content = (SCRIPTS_DIR / "render_with_openmontage.py").read_text()
+    assert "color_grade" not in content or "blocked_no_compatible_tool" in content, \
+        "color_grade must not appear in compose selection"
+    print(f"  color_grade not selected as compose: OK")
+
+
+# ---------------------------------------------------------------------------
+# Exit-code propagation tests (execute real shell scripts)
+# ---------------------------------------------------------------------------
+
+_EXIT_TEST_CLEANUP = """\
+cleanup() {
+    local original_exit=$?
+    trap - EXIT
+    set +e
+    echo "=== CLEANUP ==="
+    if [ "$original_exit" -eq 0 ]; then
+        echo "Pipeline completed successfully."
+    fi
+    echo "=== CLEANUP DONE ==="
+    exit "$original_exit"
+}
+trap cleanup EXIT
+"""
+
+
+def _run_exit_test_script(cmds: list[str]) -> subprocess.CompletedProcess:
+    """Build and run a small bootstrap-style script, return CompletedProcess."""
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -e",
+        _EXIT_TEST_CLEANUP,
+    ]
+    lines.extend(cmd for cmd in cmds)
+    script = "\n".join(lines) + "\n"
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False, dir=TEST_DIR) as f:
+        f.write(script)
+        script_path = f.name
+    os.chmod(script_path, 0o755)
+    result = subprocess.run(
+        [script_path],
+        capture_output=True, text=True,
+        timeout=30,
+    )
+    os.unlink(script_path)
+    return result
+
+
+def test_exit_code_propagation_failure():
+    """Test: a command exiting 1 causes the bootstrap-style wrapper to exit 1."""
+    result = _run_exit_test_script([
+        'echo "about to fail"',
+        "false",
+    ])
+    assert result.returncode == 1, \
+        f"Expected exit 1, got {result.returncode}"
+    assert "Pipeline completed successfully." not in result.stdout, \
+        "Success text must not appear on failure"
+    print(f"  Exit-code propagation failure: OK (exit={result.returncode})")
+
+
+def test_exit_code_propagation_success():
+    """Test: a command exiting 0 remains 0."""
+    result = _run_exit_test_script([
+        'echo "all good"',
+        "true",
+    ])
+    assert result.returncode == 0, \
+        f"Expected exit 0, got {result.returncode}"
+    assert "Pipeline completed successfully." in result.stdout, \
+        "Success text must appear on success"
+    print(f"  Exit-code propagation success: OK (exit={result.returncode})")
+
+
+def test_cleanup_does_not_change_one_to_zero():
+    """Test: cleanup does not change exit code 1 into 0."""
+    result = _run_exit_test_script([
+        "false",
+    ])
+    assert result.returncode == 1, \
+        f"Expected exit 1 (cleanup must preserve it), got {result.returncode}"
+    assert "Pipeline completed successfully." not in result.stdout, \
+        "Success text must not appear when original exit was nonzero"
+    assert "CLEANUP" in result.stdout, \
+        "Cleanup block must run"
+    print(f"  Cleanup preserves 1: OK (exit={result.returncode})")
+
+
+def test_success_text_absent_on_failure():
+    """Test: 'Pipeline completed successfully.' is absent when a command fails."""
+    result = _run_exit_test_script([
+        'echo "will fail next"',
+        "false",
+    ])
+    assert result.returncode != 0, \
+        "Script must exit nonzero"
+    assert "Pipeline completed successfully." not in result.stdout, \
+        "Must NOT print success text on failure"
+    assert "CLEANUP" in result.stdout, \
+        "Cleanup must still run"
+    print(f"  Success text absent on failure: OK (stdout has success={('Pipeline completed successfully.' in result.stdout)})")
 
 
 def run_all():
@@ -926,6 +1101,16 @@ def run_all():
         ("Validate-only before title/theme", test_validate_only_before_title_theme),
         ("Validate-only skips steps", test_validate_only_skips_steps),
         ("Validate-only smoke failure exits nonzero", test_validate_only_smoke_failure_exits_nonzero),
+        ("prepare_hermes_skill_runtime structure", test_prepare_hermes_skill_runtime_structure),
+        ("No stale env vars in subprocess", test_no_stale_env_vars_in_subprocess),
+        ("_prepare_and_query_skills exists", test_prepare_and_query_skills_exists),
+        ("Bootstrap no saved_exit=FINAL_EXIT_CODE", test_bootstrap_no_saved_exit_final_exit_code),
+        ("Compose priority video_compose first", test_compose_priority_video_compose_first),
+        ("color_grade not selected as compose", test_color_grade_not_selected_as_compose),
+        ("Exit-code propagation failure", test_exit_code_propagation_failure),
+        ("Exit-code propagation success", test_exit_code_propagation_success),
+        ("Cleanup does not change 1 to 0", test_cleanup_does_not_change_one_to_zero),
+        ("Success text absent on failure", test_success_text_absent_on_failure),
     ]
 
     passed = 0

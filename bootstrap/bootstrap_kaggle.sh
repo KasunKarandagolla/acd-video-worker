@@ -25,16 +25,21 @@ notify() {
 }
 
 cleanup() {
-    local saved_exit=$FINAL_EXIT_CODE
+    local original_exit=$?
+    trap - EXIT
+    set +e
+
     echo ""
     echo "=== CLEANUP ==="
-    if [ "$saved_exit" -eq 0 ]; then
+    if [ "$original_exit" -eq 0 ]; then
         notify "Worker completed successfully."
+        echo "Pipeline completed successfully."
     else
-        notify "Worker failed at stage: $CURRENT_STAGE (exit code $saved_exit)"
+        notify "Worker failed at stage: $CURRENT_STAGE (exit code $original_exit)"
     fi
     echo "=== CLEANUP DONE ==="
-    exit "$saved_exit"
+
+    exit "$original_exit"
 }
 trap cleanup EXIT
 
@@ -139,22 +144,16 @@ echo "Search capability preflight: $SEARCH_STATUS — proceeding."
 
 CURRENT_STAGE="runtime_smoke_test"
 log_stage "Runtime smoke test"
+set +e
 python3 -m scripts.runtime_smoke_test
-SMOKE_STATUS=$(python3 -c "
-import json
-try:
-    with open('state/runs/runtime_smoke_test.json') as f:
-        d = json.load(f)
-    print(d.get('smoke_test_passed', False))
-except Exception:
-    print('false')
-")
-if [ "$SMOKE_STATUS" != "True" ]; then
-    echo "=== SMOKE TEST FAILED ==="
+SMOKE_EXIT=$?
+set -e
+
+if [[ "$SMOKE_EXIT" -ne 0 ]]; then
     CURRENT_STAGE="smoke_test_failed"
-    notify "Smoke test failed — blocking job start"
-    FINAL_EXIT_CODE=1
-    exit 1
+    notify "Runtime smoke test failed with exit code $SMOKE_EXIT"
+    echo "=== SMOKE TEST FAILED (exit code $SMOKE_EXIT) ==="
+    exit "$SMOKE_EXIT"
 fi
 echo "Smoke test passed — proceeding to job."
 
@@ -190,5 +189,3 @@ python3 scripts/memory_sync.py push --run-id "$RUN_ID"
 
 CURRENT_STAGE="worker_complete"
 log_stage "Worker complete"
-echo "Pipeline completed successfully."
-FINAL_EXIT_CODE=0

@@ -3,9 +3,8 @@
 
 Invokes AIAgent from the cloned Hermes-Agent repo via its isolated venv.
 Configures NVIDIA NIM provider, loads V7 football-emotion skills through
-Hermes' actual skill-discovery mechanism (agent/skill_commands.py:
-scan_skill_commands, tools/skills_tool.py:_find_all_skills), runs one
-real conversation turn, and records detailed evidence.
+Hermes' actual skill-discovery mechanism (tools/skills_tool.py:_find_all_skills),
+runs one real conversation turn, and records detailed evidence.
 
 A Hermes run is invalid unless:
   - AIAgent is imported from the cloned Hermes repo (not a substitute)
@@ -19,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +26,8 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 HERMES_VENV = Path("/kaggle/working/.venvs/hermes")
 HERMES_REPO = BASE_DIR / "external" / "Hermes-Agent"
+
+_HERMES_HOME = BASE_DIR / "state" / "hermes_home"
 
 
 def _hermes_venv_python() -> str:
@@ -61,6 +63,144 @@ def _get_hermes_commit() -> str:
     if lock_file.is_file():
         return lock_file.read_text().strip()
     return "unknown"
+
+
+def _get_worker_hermes_home() -> Path:
+    """Return the HERMES_HOME path for this worker.
+
+    Hermes discovers skills at $HERMES_HOME/skills/.  We use a dedicated
+    directory under state/ so the Hermes config/skills are scoped to this
+    worker and never interfere with the user's ~/.hermes.
+    """
+    return _HERMES_HOME
+
+
+def _hermes_skill_root() -> Path:
+    """Return the official Hermes skill root ($HERMES_HOME/skills/)."""
+    return _get_worker_hermes_home() / "skills"
+
+
+# ---------------------------------------------------------------------------
+# V7 source paths (never modified)
+# ---------------------------------------------------------------------------
+
+_V7_SKILLS_SOURCE = BASE_DIR / "skills" / "football-emotion" / "skills"
+
+
+def _discover_v7_skill_names() -> list[str]:
+    """Return sorted list of V7 skill directory names that contain SKILL.md."""
+    if not _V7_SKILLS_SOURCE.is_dir():
+        return []
+    names = []
+    for d in sorted(_V7_SKILLS_SOURCE.iterdir()):
+        if d.is_dir() and (d / "SKILL.md").is_file():
+            names.append(d.name)
+    return names
+
+
+# ---------------------------------------------------------------------------
+# prepare_hermes_skill_runtime — canonical skill-runtime preparation
+# ---------------------------------------------------------------------------
+
+
+def prepare_hermes_skill_runtime() -> dict:
+    """Discover the official Hermes skill directory and expose every V7 skill.
+
+    Creates $HERMES_HOME/skills/ and symlinks each V7 skill directory
+    containing SKILL.md directly under it.  Never modifies the V7 source
+    package.  Replaces stale links/copies deterministically.
+
+    Returns structured evidence:
+        official_skill_root
+        expected_skill_names
+        installed_skill_names
+        missing_skill_names
+        installation_method
+        errors
+    """
+    result = {
+        "official_skill_root": None,
+        "expected_skill_names": [],
+        "installed_skill_names": [],
+        "missing_skill_names": [],
+        "installation_method": None,
+        "errors": [],
+    }
+
+    skill_root = _hermes_skill_root()
+    result["official_skill_root"] = str(skill_root)
+
+    expected = _discover_v7_skill_names()
+    result["expected_skill_names"] = expected
+
+    skill_root.mkdir(parents=True, exist_ok=True)
+
+    installed = []
+    missing = []
+    errors = []
+
+    for name in expected:
+        source = _V7_SKILLS_SOURCE / name
+        link = skill_root / name
+        if not source.is_dir():
+            missing.append(name)
+            errors.append(f"V7 source directory missing: {source}")
+            continue
+        try:
+            if link.is_symlink() or link.exists():
+                if link.is_symlink():
+                    if link.readlink() == source:
+                        installed.append(name)
+                        continue
+                link.unlink()
+            os.symlink(source, link, target_is_directory=True)
+            installed.append(name)
+        except OSError as e:
+            errors.append(f"Cannot symlink {name}: {e}")
+            try:
+                if not link.exists():
+                    shutil.copytree(source, link, dirs_exist_ok=True)
+                    installed.append(name)
+                else:
+                    missing.append(name)
+            except OSError as e2:
+                errors.append(f"Cannot copy {name}: {e2}")
+                missing.append(name)
+
+    result["installed_skill_names"] = installed
+    result["missing_skill_names"] = missing
+    result["installation_method"] = "symlink" if not missing else "symlink_with_fallback_copy"
+    result["errors"] = errors
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Environment configuration — must run BEFORE any Hermes module import
+# ---------------------------------------------------------------------------
+
+
+def _hermes_env() -> dict:
+    """Return environment dict configured for the Hermes runtime.
+
+    Must be used before importing any Hermes module (agent.skill_commands,
+    agent.skill_utils, tools.skills_tool, run_agent).
+    """
+    env = dict(os.environ)
+    env["HERMES_HOME"] = str(_get_worker_hermes_home())
+    return env
+
+
+def _set_hermes_env() -> None:
+    """Set HERMES_HOME in the current process environment.
+
+    Call BEFORE any Hermes import that caches get_hermes_home() result.
+    """
+    os.environ["HERMES_HOME"] = str(_get_worker_hermes_home())
+
+
+# ---------------------------------------------------------------------------
+# Hermes source inspection (does not import Hermes modules)
+# ---------------------------------------------------------------------------
 
 
 def _detect_skill_loader() -> dict:
@@ -106,22 +246,21 @@ def _detect_skill_loader() -> dict:
 
 
 def _discover_v7_skills() -> dict:
-    """Discover V7 skills through Hermes' actual skill-discovery mechanism."""
+    """Discover V7 skills through filesystem inspection."""
     result = {
-        "v7_skills_base": str(BASE_DIR / "skills" / "football-emotion"),
-        "v7_skills_dir_exists": (BASE_DIR / "skills" / "football-emotion" / "skills").is_dir(),
+        "v7_skills_base": str(_V7_SKILLS_SOURCE),
+        "v7_skills_dir_exists": _V7_SKILLS_SOURCE.is_dir(),
         "v7_skill_dirs": [],
         "v7_skill_names": [],
         "v7_skill_count": 0,
         "discovery_method": None,
         "discovery_error": None,
     }
-    skills_base = BASE_DIR / "skills" / "football-emotion" / "skills"
-    if not skills_base.is_dir():
+    if not _V7_SKILLS_SOURCE.is_dir():
         result["discovery_error"] = "V7 skills directory not found"
         return result
 
-    for d in sorted(skills_base.iterdir()):
+    for d in sorted(_V7_SKILLS_SOURCE.iterdir()):
         if d.is_dir():
             result["v7_skill_dirs"].append(d.name)
             skill_md = d / "SKILL.md"
@@ -166,9 +305,11 @@ def _check_venv_hermes_import() -> dict:
 
     python = _hermes_venv_python()
     hermes_repo_str = str(HERMES_REPO)
+    hermes_home = str(_get_worker_hermes_home())
     script_lines = [
-        "import sys",
+        "import sys, os",
         f"sys.path.insert(0, '{hermes_repo_str}')",
+        f"os.environ['HERMES_HOME'] = '{hermes_home}'",
         "from run_agent import AIAgent",
         "print(f'AIAgent imported from {AIAgent.__module__}')",
     ]
@@ -192,60 +333,76 @@ def _check_venv_hermes_import() -> dict:
     return result
 
 
-def _query_hermes_loaded_skills() -> dict:
-    """Run a subprocess that imports AIAgent and reports which skills it loaded.
+def _prepare_and_query_skills() -> dict:
+    """Prepare skill runtime and query loaded skills. Returns combined result."""
+    prep = prepare_hermes_skill_runtime()
+    loaded = _query_hermes_loaded_skills()
+    loaded["skill_runtime_preparation"] = prep
+    return loaded
 
-    This is separate from filesystem SKILL.md scanning — it proves that
-    Hermes' own skill-loader actually found and registered the skills.
+
+def _query_hermes_loaded_skills() -> dict:
+    """Query the official Hermes skill loader for all loaded skill names.
+
+    Runs the pinned Hermes ``_find_all_skills()`` (/ scan_skill_commands()) inside
+    the Hermes venv with the exact production environment so we capture what
+    Hermes itself sees — not a filesystem walk.
     """
     result = {
         "hermes_loaded_skill_count": 0,
         "hermes_loaded_skill_names": [],
         "hermes_skill_loader_function": None,
         "hermes_skill_loader_output": None,
+        "loader_module": None,
+        "official_skill_root": None,
         "error": None,
+        "exception_type": None,
+        "exception_message": None,
+        "traceback": None,
+        "stderr": None,
     }
 
     if not HERMES_VENV.is_dir() or not HERMES_REPO.is_dir():
         result["error"] = "Hermes venv or repo not available"
         return result
-    if not (HERMES_REPO / "run_agent.py").is_file():
-        result["error"] = "Hermes run_agent.py not found"
-        return result
 
-    v7_skills_base = str(BASE_DIR / "skills" / "football-emotion" / "skills")
     python = _hermes_venv_python()
     hermes_repo_str = str(HERMES_REPO)
+    hermes_home_str = str(_get_worker_hermes_home())
+    result["official_skill_root"] = str(_hermes_skill_root())
 
     code = (
         "import sys, json, os\n"
         f"sys.path.insert(0, '{hermes_repo_str}')\n"
-        "os.environ['HERMES_SKILLS_DIR'] = " + repr(v7_skills_base) + "\n"
-        "os.environ['HERMES_HOME'] = " + repr(str(BASE_DIR / "state" / "hermes_memory")) + "\n"
-        "os.environ['SKILLS_DIR'] = " + repr(v7_skills_base) + "\n"
+        f"os.environ['HERMES_HOME'] = '{hermes_home_str}'\n"
         "try:\n"
-        "    from run_agent import AIAgent\n"
-        "    agent = AIAgent(provider='nvidia', quiet_mode=True, skip_context_files=True, skip_memory=True)\n"
-        "    loader_info = getattr(agent, 'skill_loader', None) or getattr(agent, 'skill_manager', None)\n"
-        "    if loader_info is None:\n"
-        "        # Try to detect skill attributes on the agent\n"
-        "        attrs = [a for a in dir(agent) if 'skill' in a.lower()]\n"
-        "        print('SKILL_ATTRS:' + ','.join(attrs))\n"
-        "    else:\n"
-        "        print('SKILL_LOADER:' + str(type(loader_info).__name__))\n"
-        "    # Try to find loaded_skills or similar\n"
-        "    loaded = getattr(agent, 'loaded_skills', None) or getattr(agent, 'skills', None) or getattr(agent, '_skills', None)\n"
-        "    if loaded and isinstance(loaded, list):\n"
-        "        names = [s.get('name', str(s))[:80] if isinstance(s, dict) else str(s)[:80] for s in loaded]\n"
-        "        print('LOADED_SKILLS:' + json.dumps(names))\n"
-        "    elif loaded and isinstance(loaded, dict):\n"
-        "        names = list(loaded.keys())[:50]\n"
-        "        print('LOADED_SKILLS:' + json.dumps(names))\n"
+        "    from tools.skills_tool import _find_all_skills\n"
+        "    from tools.skills_tool import SKILLS_DIR\n"
+        "    print(f'LOADER_MODULE: tools.skills_tool')\n"
+        "    print(f'LOADER_FUNCTION: _find_all_skills')\n"
+        "    print(f'OFFICIAL_SKILL_ROOT: {SKILLS_DIR}')\n"
+        "    all_skills = _find_all_skills()\n"
+        "    if all_skills and isinstance(all_skills, list):\n"
+        "        names = [s.get('name', '') for s in all_skills if isinstance(s, dict)]\n"
+        "        print(f'LOADED_SKILLS:{json.dumps(names)}')\n"
+        "        print(f'LOADED_COUNT:{len(names)}')\n"
         "    else:\n"
         "        print('LOADED_SKILLS:[]')\n"
+        "        print('LOADED_COUNT:0')\n"
+        "    # Fallback: try scan_skill_commands too\n"
+        "    try:\n"
+        "        from agent.skill_commands import scan_skill_commands\n"
+        "        cmds = scan_skill_commands()\n"
+        "        cmd_names = sorted(set(v.get('name','') for v in cmds.values()))\n"
+        "        print(f'SCAN_COMMANDS_COUNT:{len(cmd_names)}')\n"
+        "    except Exception as sce:\n"
+        "        print(f'SCAN_COMMANDS_ERROR:{sce}')\n"
         "    print('SKILL_CHECK_DONE')\n"
         "except Exception as e:\n"
-        "    print(f'ERROR: {e}')\n"
+        "    import traceback\n"
+        "    print(f'EXCEPTION_TYPE:{type(e).__name__}')\n"
+        "    print(f'EXCEPTION_MESSAGE:{e}')\n"
+        "    print(f'TRACEBACK:{traceback.format_exc()}')\n"
         "    print('SKILL_CHECK_DONE')\n"
     )
 
@@ -255,14 +412,18 @@ def _query_hermes_loaded_skills() -> dict:
             capture_output=True, text=True, timeout=30
         )
         stdout = proc.stdout or ""
-        result["hermes_skill_loader_output"] = stdout[:1000]
+        stderr = proc.stderr or ""
+        result["stderr"] = stderr[:1000]
+        result["hermes_skill_loader_output"] = stdout[:2000]
 
         for line in stdout.split("\n"):
             line = line.strip()
-            if line.startswith("SKILL_ATTRS:"):
-                result["hermes_skill_loader_function"] = line[len("SKILL_ATTRS:"):]
-            elif line.startswith("SKILL_LOADER:"):
-                result["hermes_skill_loader_function"] = line[len("SKILL_LOADER:"):]
+            if line.startswith("LOADER_MODULE:"):
+                result["loader_module"] = line[len("LOADER_MODULE:"):]
+            elif line.startswith("LOADER_FUNCTION:"):
+                result["hermes_skill_loader_function"] = line[len("LOADER_FUNCTION:"):]
+            elif line.startswith("OFFICIAL_SKILL_ROOT:"):
+                pass
             elif line.startswith("LOADED_SKILLS:"):
                 raw = line[len("LOADED_SKILLS:"):]
                 try:
@@ -272,8 +433,26 @@ def _query_hermes_loaded_skills() -> dict:
                         result["hermes_loaded_skill_count"] = len(names)
                 except Exception:
                     pass
+            elif line.startswith("LOADED_COUNT:"):
+                try:
+                    result["hermes_loaded_skill_count"] = int(line[len("LOADED_COUNT:"):])
+                except Exception:
+                    pass
+            elif line.startswith("EXCEPTION_TYPE:"):
+                result["exception_type"] = line[len("EXCEPTION_TYPE:"):]
+            elif line.startswith("EXCEPTION_MESSAGE:"):
+                result["exception_message"] = line[len("EXCEPTION_MESSAGE:"):]
+            elif line.startswith("TRACEBACK:"):
+                result["traceback"] = line[len("TRACEBACK:"):]
     except Exception as e:
         result["error"] = str(e)[:300]
+        result["exception_type"] = type(e).__name__
+        result["exception_message"] = str(e)
+
+    if result.get("exception_type") and not result.get("hermes_loaded_skill_names"):
+        result["error"] = (
+            f"{result['exception_type']}: {result['exception_message']}"
+        )
 
     return result
 
@@ -355,10 +534,11 @@ def run_hermes_turn(
         result["error_message"] = venv_check.get("import_error", "unknown")
         return result
 
-    loaded = _query_hermes_loaded_skills()
+    loaded = _prepare_and_query_skills()
     result["hermes_loaded_skill_count"] = loaded.get("hermes_loaded_skill_count", 0)
     result["details"]["hermes_loaded_skill_names"] = loaded.get("hermes_loaded_skill_names", [])
     result["details"]["hermes_skill_loader_function"] = loaded.get("hermes_skill_loader_function")
+    result["details"]["skill_runtime_preparation"] = loaded.get("skill_runtime_preparation")
 
     if result["hermes_loaded_skill_count"] == 0:
         result["error_type"] = "zero_skills_loaded"
@@ -395,9 +575,7 @@ def run_hermes_turn(
     script_lines = [
         "import sys, json, os",
         f"sys.path.insert(0, '{hermes_repo_str}')",
-        f"os.environ['HERMES_SKILLS_DIR'] = {repr(v7_skills_base)}",
-        f"os.environ['HERMES_HOME'] = {repr(str(BASE_DIR / 'state' / 'hermes_memory'))}",
-        f"os.environ['SKILLS_DIR'] = {repr(v7_skills_base)}",
+        f"os.environ['HERMES_HOME'] = {repr(str(_get_worker_hermes_home()))}",
         "from run_agent import AIAgent",
         f"agent = AIAgent(",
         f"    base_url={repr(base_url)},",
@@ -503,6 +681,10 @@ def invoke_hermes(title: str, theme: str, run_id: str, run_dir: Path) -> dict:
 
     v7 = result["v7_skills"]
     result["selected_skills"] = v7.get("v7_skill_names", [])
+
+    prep = prepare_hermes_skill_runtime()
+    result["skill_runtime_preparation"] = prep
+
     if v7.get("v7_skill_count", 0) == 0:
         result["blocker"] = "Zero V7 skills discovered. Cannot continue."
         result["errors"].append(f"No SKILL.md files found in {v7.get('v7_skills_base')}/skills/")
@@ -518,11 +700,12 @@ def invoke_hermes(title: str, theme: str, run_id: str, run_dir: Path) -> dict:
 
     result["hermes_available"] = True
 
-    loaded_skills = _query_hermes_loaded_skills()
+    loaded_skills = _prepare_and_query_skills()
     result["hermes_loaded_skill_count"] = loaded_skills.get("hermes_loaded_skill_count", 0)
     result["hermes_loaded_skill_names"] = loaded_skills.get("hermes_loaded_skill_names", [])
     result["hermes_skill_loader_function"] = loaded_skills.get("hermes_skill_loader_function")
     result["hermes_skill_loader_output"] = loaded_skills.get("hermes_skill_loader_output")
+    result["skill_runtime_preparation"] = loaded_skills.get("skill_runtime_preparation")
 
     if loaded_skills.get("hermes_loaded_skill_count", 0) == 0:
         result["blocker"] = "Hermes loaded zero skills. Skills present on filesystem but Hermes did not load them."
@@ -537,8 +720,6 @@ def invoke_hermes(title: str, theme: str, run_id: str, run_dir: Path) -> dict:
     python = _hermes_venv_python()
     hermes_repo_str = str(HERMES_REPO)
     api_key = os.environ.get("LLM_API_KEY") or os.environ.get("NVIDIA_API_KEY", "")
-
-    v7_skills_base = str(BASE_DIR / "skills" / "football-emotion" / "skills")
 
     system_prompt = (
         "You are the ACD Video Worker editorial reasoning agent. "
@@ -558,9 +739,7 @@ def invoke_hermes(title: str, theme: str, run_id: str, run_dir: Path) -> dict:
     run_code = (
         "import sys, json, os\n"
         f"sys.path.insert(0, '{hermes_repo_str}')\n"
-        "os.environ['HERMES_SKILLS_DIR'] = " + repr(v7_skills_base) + "\n"
-        "os.environ['HERMES_HOME'] = " + repr(str(BASE_DIR / "state" / "hermes_memory")) + "\n"
-        "os.environ['SKILLS_DIR'] = " + repr(v7_skills_base) + "\n"
+        "os.environ['HERMES_HOME'] = " + repr(str(_get_worker_hermes_home())) + "\n"
         "from run_agent import AIAgent\n"
         "agent = AIAgent(\n"
         "    base_url=" + repr(endpoint["base_url"]) + ",\n"
