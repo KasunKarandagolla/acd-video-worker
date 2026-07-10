@@ -16,3 +16,6 @@ __pycache__/
 
 # Runtime-generated Hermes home
 state/hermes_home/
+
+# Runtime-generated execution reports
+state/runs/
