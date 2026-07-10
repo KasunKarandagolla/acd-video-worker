@@ -13,3 +13,6 @@ __pycache__/
 .ipynb_checkpoints/
 .runtime/
 .venvs/
+
+# Runtime-generated Hermes home
+state/hermes_home/
