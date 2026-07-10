@@ -1,0 +1,481 @@
+{
+  "registry_version": "1.0.0",
+  "description": "Authoritative pipeline stage registry for acd-video-worker. Every stage must be defined here. No stage may invent its own filenames or independently search directories.",
+  "stages": [
+    {
+      "stage_id": 1,
+      "stage_name": "environment",
+      "producer": "bootstrap/check_environment.sh",
+      "required_inputs": [],
+      "produced_outputs": [],
+      "exact_output_paths": [],
+      "success_criteria": "All required tools (python3, git, ffmpeg, ffprobe, yt-dlp, unzip) available",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["Missing required tool"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["external_repo_checkout"]
+    },
+    {
+      "stage_id": 2,
+      "stage_name": "external_repo_checkout",
+      "producer": "bootstrap/clone_repos.sh",
+      "required_inputs": ["locks/pinned_versions.json", "locks/HERMES_AGENT_PINNED_COMMIT.txt", "locks/OPENMONTAGE_PINNED_COMMIT.txt"],
+      "produced_outputs": ["Hermes-Agent cloned", "OpenMontage cloned"],
+      "exact_output_paths": ["external/Hermes-Agent/run_agent.py", "external/OpenMontage/pipeline_defs/"],
+      "success_criteria": "Both repos cloned at pinned commits with verified SHA",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["Clone failed", "SHA mismatch", "Repo not found"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["dependency_installation"]
+    },
+    {
+      "stage_id": 3,
+      "stage_name": "dependency_installation",
+      "producer": "bootstrap/install_runtime_dependencies.sh -> scripts/install_deps.py",
+      "required_inputs": ["external/Hermes-Agent/", "external/OpenMontage/"],
+      "produced_outputs": ["Hermes venv created", "Hermes deps installed", "OpenMontage deps installed", "Import verification"],
+      "exact_output_paths": ["state/runs/runtime_dependency_report.json"],
+      "success_criteria": "virtualenv created, all pip installs succeed, wrapt and AIAgent importable in venv",
+      "valid_statuses": ["complete"],
+      "blocking_conditions": ["virtualenv install failed", "pip install failed", "wrapt not importable", "AIAgent not importable"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["skill_installation"]
+    },
+    {
+      "stage_id": 4,
+      "stage_name": "skill_installation",
+      "producer": "bootstrap/install_skills.sh",
+      "required_inputs": ["packages/football_emotion_skill_system_v7_final_runtime.zip"],
+      "produced_outputs": ["V7 skills extracted", "skill validation report"],
+      "exact_output_paths": ["skills/football-emotion/skills/", "state/runs/skill_install_report.md"],
+      "success_criteria": "23 V7 skill directories present with SKILL.md files",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["Extraction failed", "Less than 23 skills", "Validation failed"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["llm_check"]
+    },
+    {
+      "stage_id": 5,
+      "stage_name": "llm_check",
+      "producer": "scripts/llm_key_check.py",
+      "required_inputs": ["LLM_API_KEY env", "LLM_BASE_URL env", "LLM_MODEL env"],
+      "produced_outputs": ["LLM endpoint accessibility report"],
+      "exact_output_paths": ["state/runs/llm_key_check.json"],
+      "success_criteria": "LLM endpoint responds with 200 and non-empty assistant reply",
+      "valid_statuses": ["available"],
+      "blocking_conditions": ["API key not set", "Endpoint not accessible after retries", "HTTP 503 exhausted"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["memory_hydrate"]
+    },
+    {
+      "stage_id": 6,
+      "stage_name": "memory_hydrate",
+      "producer": "scripts/memory_sync.py hydrate",
+      "required_inputs": [],
+      "produced_outputs": ["Memory files synced to Hermes location"],
+      "exact_output_paths": ["state/hermes_memory/MEMORY.md", "state/hermes_memory/USER.md", "state/hermes_memory/learned_patterns.jsonl"],
+      "success_criteria": "Memory directory exists with MEMORY.md, USER.md, learned_patterns.jsonl",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": [],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["repo_preflight"]
+    },
+    {
+      "stage_id": 7,
+      "stage_name": "repo_preflight",
+      "producer": "scripts/repo_preflight.py",
+      "required_inputs": ["external/Hermes-Agent/", "external/OpenMontage/"],
+      "produced_outputs": ["Repo inspection report"],
+      "exact_output_paths": ["state/runs/repo_preflight.json", "state/runs/repo_preflight.md"],
+      "success_criteria": "Both repos exist, git repos, pinned commits match",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["Hermes-Agent missing", "OpenMontage missing"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["search_preflight"]
+    },
+    {
+      "stage_id": 8,
+      "stage_name": "search_preflight",
+      "producer": "scripts/search_capability_preflight.py",
+      "required_inputs": ["SERPER_API_KEY or TAVILY_API_KEY or BRAVE_SEARCH_API_KEY or googlesearch module"],
+      "produced_outputs": ["Search capability report"],
+      "exact_output_paths": ["state/runs/search_capability_preflight.json", "state/runs/search_capability_preflight.md"],
+      "success_criteria": "At least one search provider returns results with retrieved URLs",
+      "valid_statuses": ["available"],
+      "blocking_conditions": ["No search provider", "Retrieval-only (limited)", "Blocked"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["hermes_reasoning"]
+    },
+    {
+      "stage_id": 9,
+      "stage_name": "hermes_reasoning",
+      "producer": "scripts/hermes_runtime.py run_hermes_turn()",
+      "required_inputs": ["title", "theme", "run_dir", "LLM_API_KEY env", "LLM_BASE_URL env", "LLM_MODEL env", "external/Hermes-Agent/", "skills/football-emotion/skills/"],
+      "produced_outputs": ["Hermes conversation result", "match_fact_lock.json", "brief_interpretation.json", "hermes_raw_response.json", "hermes_run_report.json"],
+      "exact_output_paths": [
+        "state/runs/<run_id>/hermes_artifacts/match_fact_lock.json",
+        "state/runs/<run_id>/hermes_artifacts/brief_interpretation.json",
+        "state/runs/<run_id>/hermes_artifacts/hermes_raw_response.json",
+        "state/runs/<run_id>/hermes_run_report.json"
+      ],
+      "output_schemas": {
+        "match_fact_lock.json": {
+          "type": "object",
+          "required": ["status", "competition", "match_date", "team_a", "team_b", "score", "stage_or_round", "evidence_sources", "evidence_claims", "verification_status", "confidence", "unresolved_conflicts", "generated_by", "timestamp_utc"],
+          "properties": {
+            "status": {"type": "string", "enum": ["verified", "creative_hypothesis"]},
+            "competition": {"type": "string"},
+            "match_date": {"type": "string"},
+            "team_a": {"type": "string"},
+            "team_b": {"type": "string"},
+            "score": {"type": "string"},
+            "stage_or_round": {"type": "string"},
+            "evidence_sources": {"type": "array"},
+            "evidence_claims": {"type": "array"},
+            "verification_status": {"type": "string", "enum": ["verified", "creative_hypothesis"]},
+            "confidence": {"type": "string"},
+            "unresolved_conflicts": {"type": "array"},
+            "generated_by": {"type": "string"},
+            "timestamp_utc": {"type": "string"}
+          }
+        },
+        "brief_interpretation.json": {
+          "type": "object",
+          "required": ["title", "theme", "emotional_arc"],
+          "properties": {
+            "title": {"type": "string"},
+            "theme": {"type": "string"},
+            "emotional_arc": {"type": "string"}
+          }
+        }
+      },
+      "success_criteria": "AIAgent imported, conversation executed, nonempty response, session/trace exists, Hermes-loaded skill count > 0, match_fact_lock.json written and schema-valid",
+      "valid_statuses": ["verified", "creative_hypothesis"],
+      "blocking_conditions": ["repo_not_found", "endpoint_configuration_error", "aiagent_not_importable", "zero_skills_loaded", "conversation_failed", "timeout", "exception", "hermes_artifact_contract_error"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["match_fact_lock"]
+    },
+    {
+      "stage_id": 10,
+      "stage_name": "match_fact_lock",
+      "producer": "scripts/run_title_theme_job.py (gate check)",
+      "required_inputs": ["state/runs/<run_id>/hermes_artifacts/match_fact_lock.json"],
+      "produced_outputs": ["match_fact_lock gate status"],
+      "exact_output_paths": ["state/runs/<run_id>/hermes_artifacts/match_fact_lock.json"],
+      "success_criteria": "match_fact_lock.json exists, has valid schema, verification_status is 'verified' or 'creative_hypothesis'",
+      "valid_statuses": ["verified", "creative_hypothesis"],
+      "blocking_conditions": ["match_fact_lock.json not found", "Invalid JSON", "verification_status not verified/creative_hypothesis"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["source_discovery"]
+    },
+    {
+      "stage_id": 11,
+      "stage_name": "source_discovery",
+      "producer": "scripts/source_discovery.py",
+      "required_inputs": ["state/runs/<run_id>/hermes_artifacts/match_fact_lock.json", "job yaml"],
+      "produced_outputs": ["Source candidates", "Source discovery report"],
+      "exact_output_paths": ["state/runs/<run_id>/source_candidates.json", "state/runs/<run_id>/source_discovery_report.md"],
+      "output_schemas": {
+        "source_candidates.json": {
+          "type": "object",
+          "required": ["run_id", "total_candidates", "candidates"],
+          "properties": {
+            "candidates": {"type": "array"}
+          }
+        }
+      },
+      "success_criteria": "yt-dlp search returns candidates, deduplication runs, match relevance filtering applies",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["No source candidates found", "yt-dlp unavailable", "All candidates irrelevant"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["source_verification"]
+    },
+    {
+      "stage_id": 12,
+      "stage_name": "source_verification",
+      "producer": "scripts/source_discovery.py (inline)",
+      "required_inputs": ["state/runs/<run_id>/source_candidates.json"],
+      "produced_outputs": ["Source verification report"],
+      "exact_output_paths": ["state/runs/<run_id>/source_verification.json"],
+      "output_schemas": {
+        "source_verification.json": {
+          "type": "object",
+          "required": ["verified_sources"],
+          "properties": {
+            "verified_sources": {"type": "array"}
+          }
+        }
+      },
+      "success_criteria": "Verified sources identified",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["No verified sources"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["downloads"]
+    },
+    {
+      "stage_id": 13,
+      "stage_name": "downloads",
+      "producer": "scripts/download_sources.py",
+      "required_inputs": ["state/runs/<run_id>/source_candidates.json"],
+      "produced_outputs": ["Downloaded assets", "Download report"],
+      "exact_output_paths": ["state/runs/<run_id>/downloaded_assets.json", "state/runs/<run_id>/download_report.md"],
+      "output_schemas": {
+        "downloaded_assets.json": {
+          "type": "object",
+          "required": ["run_id", "downloads"],
+          "properties": {
+            "downloads": {"type": "array"},
+            "errors": {"type": "array"}
+          }
+        }
+      },
+      "success_criteria": "yt-dlp downloads succeed, files mapped to source_ids, partial files cleaned, dedup by hash",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["yt-dlp not found", "All downloads failed", "Storage limit exceeded", "No downloadable sources"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["media_analysis"]
+    },
+    {
+      "stage_id": 14,
+      "stage_name": "media_analysis",
+      "producer": "scripts/media_analysis.py",
+      "required_inputs": ["state/runs/<run_id>/assets/raw/"],
+      "produced_outputs": ["Media probe", "Visual scene analysis", "Audio analysis", "Contact sheet"],
+      "exact_output_paths": [
+        "state/runs/<run_id>/analysis/media_probe.json",
+        "state/runs/<run_id>/analysis/visual_scene_analysis.json",
+        "state/runs/<run_id>/analysis/audio_analysis.json",
+        "state/runs/<run_id>/analysis/contact_sheet_manifest.json",
+        "state/runs/<run_id>/analysis/media_analysis_report.md"
+      ],
+      "output_schemas": {
+        "media_probe.json": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["file", "streams", "format"]
+          }
+        },
+        "visual_scene_analysis.json": {
+          "type": "object",
+          "required": ["run_id", "files_analyzed", "probes"]
+        },
+        "audio_analysis.json": {
+          "type": "object",
+          "required": ["run_id", "files_analyzed", "audio_streams"]
+        }
+      },
+      "success_criteria": "ffprobe runs on all assets, streams parsed correctly, frames sampled, loudness measured",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["No video files found", "ffprobe not available", "ffprobe fails on all files"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["editorial_artifact_generation"]
+    },
+    {
+      "stage_id": 15,
+      "stage_name": "editorial_artifact_generation",
+      "producer": "Various scripts (timestamp, clip scoring, arc revision, story plan, etc.)",
+      "required_inputs": ["state/runs/<run_id>/analysis/"],
+      "produced_outputs": [
+        "timestamp_candidates.json",
+        "clip_scores.json",
+        "arc_revision_gate.json",
+        "story_plan.json",
+        "audio_music_plan.json",
+        "commentary_rights_check.json",
+        "visual_cohesion_plan.json",
+        "graphics_text_plan.json",
+        "assembly_plan.json",
+        "fact_provenance_gate.json",
+        "editorial_journey_state.json"
+      ],
+      "exact_output_paths": [
+        "state/runs/<run_id>/hermes_artifacts/timestamp_candidates.json",
+        "state/runs/<run_id>/hermes_artifacts/clip_scores.json",
+        "state/runs/<run_id>/hermes_artifacts/arc_revision_gate.json",
+        "state/runs/<run_id>/hermes_artifacts/story_plan.json",
+        "state/runs/<run_id>/hermes_artifacts/audio_music_plan.json",
+        "state/runs/<run_id>/hermes_artifacts/commentary_rights_check.json",
+        "state/runs/<run_id>/hermes_artifacts/visual_cohesion_plan.json",
+        "state/runs/<run_id>/hermes_artifacts/graphics_text_plan.json",
+        "state/runs/<run_id>/hermes_artifacts/assembly_plan.json",
+        "state/runs/<run_id>/hermes_artifacts/fact_provenance_gate.json",
+        "state/runs/<run_id>/hermes_artifacts/editorial_journey_state.json"
+      ],
+      "output_schemas": {
+        "timestamp_candidates.json": {"type": "object", "required": ["timestamps"]},
+        "clip_scores.json": {"type": "object", "required": ["scores"]},
+        "arc_revision_gate.json": {"type": "object", "required": ["arc_decision", "status"]},
+        "story_plan.json": {"type": "object", "required": ["structure", "segments"]},
+        "audio_music_plan.json": {"type": "object", "required": ["audio_plan", "music_tracks"]},
+        "commentary_rights_check.json": {"type": "object", "required": ["rights_status", "commentary_status"]},
+        "visual_cohesion_plan.json": {"type": "object", "required": ["style_guide", "grade_decisions"]},
+        "graphics_text_plan.json": {"type": "object", "required": ["text_elements", "graphic_elements"]},
+        "assembly_plan.json": {"type": "object", "required": ["structure", "total_duration_seconds"]},
+        "fact_provenance_gate.json": {"type": "object", "required": ["verification_summary", "provenance_trail"]},
+        "editorial_journey_state.json": {"type": "object", "required": ["current_stage", "artifacts_produced", "artifacts_pending"]}
+      },
+      "success_criteria": "All 16 required artifacts exist and pass schema validation",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["Missing artifacts", "Schema validation failure", "Unverified match facts"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["artifact_gate"]
+    },
+    {
+      "stage_id": 16,
+      "stage_name": "artifact_gate",
+      "producer": "scripts/editorial_artifact_gate.py",
+      "required_inputs": [
+        "state/runs/<run_id>/hermes_artifacts/match_fact_lock.json",
+        "state/runs/<run_id>/hermes_artifacts/brief_interpretation.json",
+        "state/runs/<run_id>/source_candidates.json",
+        "state/runs/<run_id>/source_verification.json",
+        "state/runs/<run_id>/analysis/media_probe.json",
+        "state/runs/<run_id>/analysis/visual_scene_analysis.json",
+        "state/runs/<run_id>/hermes_artifacts/timestamp_candidates.json",
+        "state/runs/<run_id>/hermes_artifacts/clip_scores.json",
+        "state/runs/<run_id>/hermes_artifacts/arc_revision_gate.json",
+        "state/runs/<run_id>/hermes_artifacts/story_plan.json",
+        "state/runs/<run_id>/hermes_artifacts/audio_music_plan.json",
+        "state/runs/<run_id>/hermes_artifacts/commentary_rights_check.json",
+        "state/runs/<run_id>/hermes_artifacts/visual_cohesion_plan.json",
+        "state/runs/<run_id>/hermes_artifacts/graphics_text_plan.json",
+        "state/runs/<run_id>/hermes_artifacts/assembly_plan.json",
+        "state/runs/<run_id>/hermes_artifacts/fact_provenance_gate.json",
+        "state/runs/<run_id>/hermes_artifacts/editorial_journey_state.json"
+      ],
+      "produced_outputs": ["Artifact gate result"],
+      "exact_output_paths": ["state/runs/<run_id>/artifact_gate_result.json", "state/runs/<run_id>/artifact_gate_result.md"],
+      "success_criteria": "All 16 artifacts present, schema-valid, match_fact verified",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["Missing artifacts", "Invalid artifacts", "Match facts not verified"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["openmontage_execution"]
+    },
+    {
+      "stage_id": 17,
+      "stage_name": "openmontage_execution",
+      "producer": "scripts/render_with_openmontage.py",
+      "required_inputs": [
+        "job yaml",
+        "state/runs/<run_id>/downloaded_assets.json",
+        "state/runs/<run_id>/source_candidates.json",
+        "external/OpenMontage/"
+      ],
+      "produced_outputs": ["OpenMontage render output", "Execution report"],
+      "exact_output_paths": [
+        "outputs/<run_id>/final_openmontage_render.mp4",
+        "state/runs/<run_id>/openmontage_render_plan.json",
+        "state/runs/<run_id>/openmontage_execution_report.json",
+        "state/runs/<run_id>/openmontage_execution_report.md",
+        "state/runs/<run_id>/openmontage_artifact_manifest.json"
+      ],
+      "success_criteria": "Pipeline selected, loaded through pipeline_loader, video_compose tool registered and executed, ffprobe validation passes",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["OpenMontage not found", "No compatible compose tool", "video_compose.execute() fails", "Output file not found", "ffprobe validation fails"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["output_validation"]
+    },
+    {
+      "stage_id": 18,
+      "stage_name": "output_validation",
+      "producer": "scripts/qa_check.py",
+      "required_inputs": ["outputs/<run_id>/final_openmontage_render.mp4", "state/runs/<run_id>/hermes_artifacts/match_fact_lock.json"],
+      "produced_outputs": ["QA report"],
+      "exact_output_paths": ["state/runs/<run_id>/full_qa_report.json", "state/runs/<run_id>/full_qa_report.md"],
+      "success_criteria": "ffprobe valid, has video stream, has audio stream, duration > 5s, loudness in range -25 to -10 LUFS, factual claims checked",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["No render output", "No video stream", "Output too short", "No audio stream", "Loudness outside range"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["qa"]
+    },
+    {
+      "stage_id": 19,
+      "stage_name": "qa",
+      "producer": "scripts/run_title_theme_job.py (session summary)",
+      "required_inputs": ["All stage results"],
+      "produced_outputs": ["Session summary"],
+      "exact_output_paths": ["state/runs/<run_id>/session_summary.md"],
+      "success_criteria": "Summary written with all stage results",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": [],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["memory_collection"]
+    },
+    {
+      "stage_id": 20,
+      "stage_name": "memory_collection",
+      "producer": "scripts/memory_sync.py collect",
+      "required_inputs": ["state/runs/<run_id>"],
+      "produced_outputs": ["Memory patterns collected"],
+      "exact_output_paths": ["state/runs/<run_id>/memory_update_report.md", "state/hermes_memory/learned_patterns.jsonl"],
+      "success_criteria": "Memory collected exactly once (uses .memory_collected marker), patterns deduplicated, failed runs skipped",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["Run directory not found"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["github_push"]
+    },
+    {
+      "stage_id": 21,
+      "stage_name": "github_push",
+      "producer": "scripts/memory_sync.py push",
+      "required_inputs": ["GITHUB_TOKEN env", "PRIVATE_REPO_URL env"],
+      "produced_outputs": ["Git push of run artifacts and memory"],
+      "exact_output_paths": [],
+      "success_criteria": "Git add, commit, push succeed for memory and run directory",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": ["GITHUB_TOKEN not set", "PRIVATE_REPO_URL not set", "Git push failed"],
+      "expected_exit_code": 0,
+      "allowed_next_stages": ["discord_final_notification"]
+    },
+    {
+      "stage_id": 22,
+      "stage_name": "discord_final_notification",
+      "producer": "scripts/run_title_theme_job.py -> scripts/discord_notify.py",
+      "required_inputs": ["DISCORD_WEBHOOK_URL env"],
+      "produced_outputs": ["Discord notification"],
+      "exact_output_paths": [],
+      "success_criteria": "Webhook POST succeeds with status 200 or 204",
+      "valid_statuses": ["passed"],
+      "blocking_conditions": [],
+      "expected_exit_code": 0,
+      "allowed_next_stages": []
+    }
+  ],
+  "artifact_index": {
+    "match_fact_lock.json": {"producer": "hermes_reasoning", "consumers": ["match_fact_lock", "source_discovery", "artifact_gate", "output_validation"], "path": "state/runs/<run_id>/hermes_artifacts/match_fact_lock.json"},
+    "brief_interpretation.json": {"producer": "hermes_reasoning", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/hermes_artifacts/brief_interpretation.json"},
+    "hermes_raw_response.json": {"producer": "hermes_reasoning", "consumers": [], "path": "state/runs/<run_id>/hermes_artifacts/hermes_raw_response.json"},
+    "hermes_run_report.json": {"producer": "hermes_reasoning", "consumers": ["memory_collection"], "path": "state/runs/<run_id>/hermes_run_report.json"},
+    "source_candidates.json": {"producer": "source_discovery", "consumers": ["downloads", "openmontage_execution"], "path": "state/runs/<run_id>/source_candidates.json"},
+    "source_verification.json": {"producer": "source_verification", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/source_verification.json"},
+    "downloaded_assets.json": {"producer": "downloads", "consumers": ["openmontage_execution"], "path": "state/runs/<run_id>/downloaded_assets.json"},
+    "media_probe.json": {"producer": "media_analysis", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/analysis/media_probe.json"},
+    "visual_scene_analysis.json": {"producer": "media_analysis", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/analysis/visual_scene_analysis.json"},
+    "audio_analysis.json": {"producer": "media_analysis", "consumers": [], "path": "state/runs/<run_id>/analysis/audio_analysis.json"},
+    "timestamp_candidates.json": {"producer": "editorial_artifact_generation", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/hermes_artifacts/timestamp_candidates.json"},
+    "clip_scores.json": {"producer": "editorial_artifact_generation", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/hermes_artifacts/clip_scores.json"},
+    "arc_revision_gate.json": {"producer": "editorial_artifact_generation", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/hermes_artifacts/arc_revision_gate.json"},
+    "story_plan.json": {"producer": "editorial_artifact_generation", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/hermes_artifacts/story_plan.json"},
+    "audio_music_plan.json": {"producer": "editorial_artifact_generation", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/hermes_artifacts/audio_music_plan.json"},
+    "commentary_rights_check.json": {"producer": "editorial_artifact_generation", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/hermes_artifacts/commentary_rights_check.json"},
+    "visual_cohesion_plan.json": {"producer": "editorial_artifact_generation", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/hermes_artifacts/visual_cohesion_plan.json"},
+    "graphics_text_plan.json": {"producer": "editorial_artifact_generation", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/hermes_artifacts/graphics_text_plan.json"},
+    "assembly_plan.json": {"producer": "editorial_artifact_generation", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/hermes_artifacts/assembly_plan.json"},
+    "fact_provenance_gate.json": {"producer": "editorial_artifact_generation", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/hermes_artifacts/fact_provenance_gate.json"},
+    "editorial_journey_state.json": {"producer": "editorial_artifact_generation", "consumers": ["artifact_gate"], "path": "state/runs/<run_id>/hermes_artifacts/editorial_journey_state.json"},
+    "artifact_gate_result.json": {"producer": "artifact_gate", "consumers": [], "path": "state/runs/<run_id>/artifact_gate_result.json"},
+    "final_openmontage_render.mp4": {"producer": "openmontage_execution", "consumers": ["output_validation"], "path": "outputs/<run_id>/final_openmontage_render.mp4"},
+    "full_qa_report.json": {"producer": "output_validation", "consumers": [], "path": "state/runs/<run_id>/full_qa_report.json"},
+    "session_summary.md": {"producer": "qa", "consumers": [], "path": "state/runs/<run_id>/session_summary.md"},
+    "artifact_manifest.json": {"producer": "hermes_reasoning", "consumers": ["*"], "path": "state/runs/<run_id>/artifact_manifest.json"},
+    "failure_summary.json": {"producer": "any", "consumers": [], "path": "state/runs/<run_id>/failure_summary.json"}
+  },
+  "forbidden_statuses_for_production": ["pending", "pending_discovery", "creative_hypothesis", "unverified"],
+  "mode_boundaries": {
+    "smoke_test": {"required_artifacts": ["match_fact_lock.json", "brief_interpretation.json"]},
+    "production": {"required_artifacts": ["*"]},
+    "hermes_artifact_canary": {"required_artifacts": ["match_fact_lock.json", "brief_interpretation.json", "hermes_run_report.json", "artifact_manifest.json"]},
+    "synthetic_e2e": {"required_artifacts": ["*"], "note": "Uses synthetic fixtures instead of YouTube/media sources"}
+  }
+}

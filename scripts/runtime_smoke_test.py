@@ -288,7 +288,7 @@ def main():
                 print(f"  FAIL: {t['test']} — {t.get('detail', '')[:100]}")
         sys.exit(1)
 
-    print("All smoke tests passed — proceeding to job.")
+    print("All smoke tests passed.")
 
 
 if __name__ == "__main__":

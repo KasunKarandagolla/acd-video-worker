@@ -70,7 +70,7 @@ def _is_run_successful(run_dir: Path) -> bool:
         try:
             with open(render_report) as f:
                 rr = json.load(f)
-            if not rr.get("render_result", {}).get("success", False):
+            if not rr.get("openmontage_success", False) and not rr.get("final_success", False):
                 return False
         except Exception:
             return False
@@ -126,8 +126,7 @@ def collect(run_id):
         try:
             with open(render_report) as f:
                 rr = json.load(f)
-            pattern["render_success"] = rr.get("render_result", {}).get("success", False)
-            pattern["render_engine"] = rr.get("render_result", {}).get("engine")
+            pattern["render_success"] = rr.get("openmontage_success", False) or rr.get("final_success", False)
         except Exception:
             pass
 

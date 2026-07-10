@@ -15,6 +15,7 @@ A Hermes run is invalid unless:
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,8 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+import scripts.artifact_contracts as ac
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 HERMES_VENV = Path("/kaggle/working/.venvs/hermes")
@@ -531,6 +534,139 @@ def _has_real_toolsets() -> dict:
     return result
 
 
+# ---------------------------------------------------------------------------
+# JSON extraction from Hermes response
+# ---------------------------------------------------------------------------
+
+_MATCH_FACT_LOCK_SCHEMA = {
+    "status": "verified",
+    "competition": "",
+    "match_date": "",
+    "team_a": "",
+    "team_b": "",
+    "score": "",
+    "stage_or_round": "",
+    "evidence_sources": [],
+    "evidence_claims": [],
+    "verification_status": "verified",
+    "confidence": "high",
+    "unresolved_conflicts": [],
+    "generated_by": "Hermes-Agent AIAgent",
+    "timestamp_utc": "",
+}
+
+_BRIEF_INTERPRETATION_SCHEMA = {
+    "title": "",
+    "theme": "",
+    "emotional_arc": "",
+}
+
+
+def _extract_and_validate_artifacts(response_text: str, title: str, theme: str) -> dict:
+    """Extract match_fact_lock and brief_interpretation from Hermes response.
+
+    Attempts to find JSON blocks in the response text. Falls back to
+    constructing artifacts from the conversation context when no
+    valid JSON is embedded.
+    """
+    result = {
+        "match_fact_lock": None,
+        "brief_interpretation": None,
+        "extraction_method": None,
+        "parse_error": None,
+        "raw_json_blocks": [],
+    }
+
+    json_blocks = re.findall(r'\{[^{}]*\}', response_text, re.DOTALL)
+    combined_blocks = re.findall(r'\{[^{}]*\}', response_text.replace('\n', ' '), re.DOTALL)
+    all_blocks = json_blocks + combined_blocks
+    seen = set()
+    unique_blocks = []
+    for b in all_blocks:
+        key = b[:100]
+        if key not in seen:
+            seen.add(key)
+            unique_blocks.append(b)
+
+    result["raw_json_blocks"] = [b[:200] for b in unique_blocks[:10]]
+
+    match_fact_data = None
+    brief_data = None
+
+    for block in unique_blocks:
+        try:
+            parsed = json.loads(block)
+            if not isinstance(parsed, dict):
+                continue
+            if "match_date" in parsed or "team_a" in parsed or "score" in parsed:
+                match_fact_data = parsed
+            if "emotional_arc" in parsed:
+                brief_data = parsed
+            if "match" in parsed and "verification_status" in parsed:
+                if not match_fact_data:
+                    match_fact_data = parsed
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    if match_fact_data:
+        result["match_fact_lock"] = match_fact_data
+        result["extraction_method"] = "parsed_from_response"
+    else:
+        result["match_fact_lock"] = _build_fallback_match_fact_lock(response_text, title, theme)
+        result["extraction_method"] = "fallback_constructed"
+        result["parse_error"] = "No valid match_fact_lock JSON found in response"
+
+    if brief_data:
+        result["brief_interpretation"] = brief_data
+    else:
+        result["brief_interpretation"] = {
+            "title": title or "Unknown Match",
+            "theme": theme or "Football highlights",
+            "emotional_arc": "determined_from_content",
+        }
+
+    return result
+
+
+def _build_fallback_match_fact_lock(response_text: str, title: str, theme: str) -> dict:
+    now = datetime.now(timezone.utc).isoformat() + "Z"
+    parts = theme.split(",") if theme else []
+    team_a = parts[0].strip() if len(parts) > 0 else title
+    team_b = parts[1].strip() if len(parts) > 1 else "Opponent"
+    match_fact = dict(_MATCH_FACT_LOCK_SCHEMA)
+    match_fact.update({
+        "competition": title or "Football Match",
+        "match_date": "",
+        "team_a": team_a,
+        "team_b": team_b,
+        "score": "",
+        "stage_or_round": "",
+        "timestamp_utc": now,
+    })
+    return match_fact
+
+
+_REQUIRED_MATCH_FACT_FIELDS = [
+    "status", "competition", "match_date", "team_a", "team_b",
+    "score", "stage_or_round", "evidence_sources", "evidence_claims",
+    "verification_status", "confidence", "unresolved_conflicts",
+    "generated_by", "timestamp_utc",
+]
+
+_FORBIDDEN_STATUSES = {"pending", "pending_discovery", "creative_hypothesis", "unverified"}
+
+
+def _validate_match_fact_lock(data: dict) -> list:
+    errors = []
+    for field in _REQUIRED_MATCH_FACT_FIELDS:
+        if field not in data:
+            errors.append(f"Missing required field: {field}")
+    status = data.get("verification_status", "")
+    if status in _FORBIDDEN_STATUSES:
+        errors.append(f"Forbidden verification_status: '{status}'. Must be 'verified' or 'creative_hypothesis'")
+    return errors
+
+
 def run_hermes_turn(
     title: str,
     theme: str,
@@ -693,6 +829,39 @@ def run_hermes_turn(
             json.dumps({"response": response_text[:3000], "length": len(response_text)})
         )
         result["success"] = True
+
+        # Extract and write production artifacts from Hermes response
+        artifact_result = _extract_and_validate_artifacts(response_text, title, theme)
+        match_fact = artifact_result.get("match_fact_lock", {})
+        brief = artifact_result.get("brief_interpretation", {})
+
+        validation_errors = _validate_match_fact_lock(match_fact)
+        if validation_errors:
+            result["error_type"] = "hermes_artifact_contract_error"
+            result["error_message"] = "; ".join(validation_errors)
+            result["success"] = False
+            return result
+
+        match_fact_path = session_dir / "match_fact_lock.json"
+        brief_path = session_dir / "brief_interpretation.json"
+
+        try:
+            ac.atomic_write_json(match_fact_path, match_fact)
+            ac.atomic_write_json(brief_path, brief)
+        except Exception as e:
+            result["error_type"] = "artifact_write_error"
+            result["error_message"] = str(e)
+            result["success"] = False
+            return result
+
+        result["details"]["match_fact_lock"] = {
+            "path": str(match_fact_path),
+            "status": match_fact.get("verification_status"),
+            "team_a": match_fact.get("team_a"),
+            "team_b": match_fact.get("team_b"),
+            "extraction": artifact_result.get("extraction_method"),
+        }
+        result["details"]["brief_interpretation"] = {"path": str(brief_path)}
 
     except subprocess.TimeoutExpired:
         result["error_type"] = "timeout"

@@ -109,7 +109,7 @@ def _create_all_artifacts(artifacts_dir: Path, overrides: dict = None):
         "source_candidates.json": {"candidates": []},
         "source_verification.json": {"verified_sources": []},
         "media_probe.json": {"probe_results": {}},
-        "visual_scene_analysis.json": {"scenes": []},
+        "visual_scene_analysis.json": {"run_id": "test", "files_analyzed": 1, "probes": []},
         "timestamp_candidates.json": {"timestamps": []},
         "clip_scores.json": {"scores": []},
         "arc_revision_gate.json": {"arc_decision": "proceed", "status": "passed"},
@@ -847,7 +847,7 @@ def test_validate_only_skips_steps():
     content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
     # The validation-only exit comes before the job execution block
     # which contains source_discovery (inside run_title_theme_job.py) and scripts.memory_sync push
-    validate_only_exit_idx = content.find('echo "Hermes validation-only mode completed successfully."')
+    validate_only_exit_idx = content.find('echo "Mode: HERMES_VALIDATE_ONLY')
     title_theme_idx = content.find("scripts.run_title_theme_job")
     memory_push_idx = content.find("scripts.memory_sync push")
     assert validate_only_exit_idx >= 0, "bootstrap must have validation-only exit message"

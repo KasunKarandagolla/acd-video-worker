@@ -55,10 +55,11 @@ ARTIFACT_SCHEMAS = {
         "required_fields": ["verified_sources"],
     },
     "media_probe.json": {
-        "required_fields": ["probe_results"],
+        "required_fields": [],
+        "note": "Schema: list of probe dicts (produced by media_analysis.py as JSON array)",
     },
     "visual_scene_analysis.json": {
-        "required_fields": ["scenes"],
+        "required_fields": ["run_id", "files_analyzed", "probes"],
     },
     "timestamp_candidates.json": {
         "required_fields": ["timestamps"],

@@ -32,7 +32,7 @@ fi
 # Verifying environment pip, Installing Hermes dependencies,
 # Installing required OpenMontage dependencies
 echo "Checking virtualenv"
-python3 scripts/install_deps.py
+python3 -m scripts.install_deps
 
 # --- Source venv for verification ---
 if [ -f "$HERMES_VENV/bin/activate" ]; then

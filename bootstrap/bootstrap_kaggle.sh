@@ -155,12 +155,16 @@ if [[ "$SMOKE_EXIT" -ne 0 ]]; then
     echo "=== SMOKE TEST FAILED (exit code $SMOKE_EXIT) ==="
     exit "$SMOKE_EXIT"
 fi
-echo "Smoke test passed — proceeding to job."
+echo "Smoke test passed."
 
 if [[ "${HERMES_VALIDATE_ONLY:-0}" == "1" ]]; then
-    echo "Hermes validation-only mode completed successfully."
+    echo "Mode: HERMES_VALIDATE_ONLY — validation complete. No production job."
     FINAL_EXIT_CODE=0
     exit 0
+fi
+
+if [[ "${HERMES_ARTIFACT_CANARY:-0}" == "1" ]]; then
+    echo "Mode: HERMES_ARTIFACT_CANARY — will stop after Hermes artifact validation."
 fi
 
 CURRENT_STAGE="title_theme_job"
