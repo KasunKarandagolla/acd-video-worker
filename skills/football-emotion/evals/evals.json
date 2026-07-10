@@ -1,0 +1,405 @@
+{
+  "eval_suite": "football-emotion-skill-system",
+  "version": "v7-final-runtime",
+  "notes": "V7 adds Claude-essence editorial craft, LLM decision boundaries, manifest-first OpenMontage preflight, zero-key-first capability guidance, and Hermes runtime install/memory alignment.",
+  "evals": [
+    {
+      "id": "E01",
+      "group": "story-strategy",
+      "prompt": "Make a Messi World Cup emotional legacy story video.",
+      "expected_skill": "football-story-strategy",
+      "assertions": [
+        "Output selects the Pain -> Pressure -> Comeback -> Legacy story structure, not a generic default",
+        "Output names a specific hook pattern from the emotion-pattern-library reference",
+        "Output does not fabricate specific match statistics not already known/verifiable",
+        "A user_instruction_profile-shaped output is produced with target_emotion set to legacy or comeback"
+      ]
+    },
+    {
+      "id": "E02",
+      "group": "story-strategy",
+      "prompt": "I want a video about a team that got humiliated and collapsed, like Brazil 2014.",
+      "expected_skill": "football-story-strategy",
+      "assertions": [
+        "Output selects a humiliation/collapse-oriented structure, not comeback or triumph",
+        "Output explicitly notes restraint is required (not edited like a hype reel)",
+        "No claim that this is a comeback story"
+      ]
+    },
+    {
+      "id": "E03",
+      "group": "discovery",
+      "prompt": "Find clips for a Ronaldo heartbreak story about the 2022 World Cup exit.",
+      "expected_skill": "football-source-discovery",
+      "assertions": [
+        "Multiple query styles are used (not just one search phrasing)",
+        "At least one non-English query angle is considered or mentioned",
+        "Every candidate has a verification_status field and it is not defaulted to verified without justification",
+        "Generic highlight compilations are flagged as lower priority or rejected with a stated reason",
+        "Output does not assert specific unverified facts (e.g. exact viewer counts) as confirmed"
+      ]
+    },
+    {
+      "id": "E04",
+      "group": "discovery",
+      "prompt": "Search only English-language sources for Messi content, nothing else.",
+      "expected_skill": "football-source-discovery",
+      "assertions": [
+        "Skill respects the explicit user constraint (English-only) while still noting that non-English sources are normally recommended for this content type",
+        "Does not silently ignore the user's explicit constraint"
+      ]
+    },
+    {
+      "id": "E05",
+      "group": "scene-analysis",
+      "prompt": "Analyze this match video for emotional scenes (video file provided).",
+      "expected_skill": "football-visual-scene-analysis",
+      "assertions": [
+        "Skill either extracts frames first or states that frame extraction is a prerequisite it needs to perform, rather than describing scenes from the title/context alone",
+        "Every scene row has a confidence field and it is not universally high without justification",
+        "The seven editor questions structure is reflected in the output shape"
+      ]
+    },
+    {
+      "id": "E06",
+      "group": "timestamp-extraction",
+      "prompt": "Give me clip timestamps from this scene analysis for the penalty sequence.",
+      "expected_skill": "football-timestamp-extraction",
+      "assertions": [
+        "Clip ranges include before/during/after the decisive action, not just the action itself",
+        "No timestamp is presented as exact unless the underlying scene analysis row was confidence: high or medium",
+        "Rows lacking sufficient confidence are marked UNVERIFIED rather than given a confident-looking range"
+      ]
+    },
+    {
+      "id": "E07",
+      "group": "clip-scoring",
+      "prompt": "Score these candidate clips: [5 clips with descriptions provided, one clearly generic celebration with no context].",
+      "expected_skill": "football-clip-scoring",
+      "assertions": [
+        "Each clip receives a full sub-score breakdown, not just a total",
+        "The generic celebration clip scores lower on story_relevance despite potentially high visual_clarity",
+        "recommended_use is assigned per clip",
+        "Total scores map correctly to the stated decision thresholds (8-10 core, 6-7.9 supporting, 4-5.9 context-only, <4 reject)"
+      ]
+    },
+    {
+      "id": "E08",
+      "group": "narration",
+      "prompt": "Write narration for the climax section of a penalty-shootout heartbreak video.",
+      "expected_skill": "football-narration-scriptwriting",
+      "assertions": [
+        "Skill considers whether narration should be present at all in this section, given the audio hierarchy (commentary/silence often outrank narration at a climax)",
+        "No invented facts, quotes, or statistics not traceable to a verified source",
+        "No generic motivational-cliche language used without justification"
+      ]
+    },
+    {
+      "id": "E09",
+      "group": "editing",
+      "prompt": "Turn this story plan and selected clips into an OpenMontage edit plan.",
+      "expected_skill": "openmontage-edit-planning",
+      "assertions": [
+        "Every section has a concrete cut_style, transition, and audio_priority - no vague 'make it emotional' instructions",
+        "Effects used are justified against the effect_policy table, not applied decoratively",
+        "render_runtime is stated as a recommendation pending user confirmation, not silently locked"
+      ]
+    },
+    {
+      "id": "E10",
+      "group": "audio-license",
+      "prompt": "Is this track safe to use: [a Pixabay Music search-results page URL, not a specific track page]?",
+      "expected_skill": "football-rights-safe-audio-license-checker",
+      "assertions": [
+        "MUST NOT approve the asset - a search/category page is not an exact asset page",
+        "Output status is rejected or needs_more_info, never approved",
+        "Explains that the exact track page must be found before any verification can occur"
+      ],
+      "critical": true,
+      "critical_reason": "This is the highest-consequence failure mode in the whole system - approving a non-exact-page asset defeats the entire license-gating architecture."
+    },
+    {
+      "id": "E11",
+      "group": "audio-license",
+      "prompt": "This track was approved last year for a different project. Can I reuse it here?",
+      "expected_skill": "football-rights-safe-audio-license-checker",
+      "assertions": [
+        "Skill recommends re-checking checked_date rather than assuming the old approval still holds",
+        "Does not silently carry forward the old approval without comment"
+      ]
+    },
+    {
+      "id": "E12",
+      "group": "audio-direction",
+      "prompt": "Plan audio/music for a penalty shootout climax where real commentary is available.",
+      "expected_skill": "football-audio-music-director",
+      "assertions": [
+        "Commentary or silence is prioritized over music for the decisive moment, per the audio hierarchy",
+        "Only assets already marked approved are referenced as music_asset_id, or the plan explicitly notes assets are pending license approval",
+        "Epic/triumphant music is not used before the outcome is known"
+      ]
+    },
+    {
+      "id": "E13",
+      "group": "audio-mixing",
+      "prompt": "Duck the music under this commentary so the words are audible.",
+      "expected_skill": "football-commentary-ducking-mixer",
+      "assertions": [
+        "A concrete dB ducking amount is specified, not just 'lower the music'",
+        "Player-speech/iconic-line tier gets deeper ducking than generic buildup music",
+        "States that this is a specification for OpenMontage/manual mixing to execute, not a claim that automated ducking already occurred"
+      ]
+    },
+    {
+      "id": "E14",
+      "group": "qc",
+      "prompt": "Check this edit plan for reused-content and audio-license risk before we finalize.",
+      "expected_skill": "football-retention-quality-control",
+      "assertions": [
+        "Checks both retention/professionalism AND reused-content risk against the same plan",
+        "Cross-checks that every referenced music/SFX asset has an approved license_verification_record",
+        "An unapproved asset produces a blocking finding and pass: false regardless of other plan quality"
+      ]
+    },
+    {
+      "id": "E15",
+      "group": "memory",
+      "prompt": "Save what we learned from this heartbreak project for next time.",
+      "expected_skill": "hermes-football-memory-learning",
+      "assertions": [
+        "Output is limited to a small number of short, generalizable lessons (not an exhaustive dump)",
+        "Project-specific trivia (e.g. one specific clip being good) is not written as if it were a cross-project lesson",
+        "A full_project_record_path is used for anything too large for MEMORY.md rather than forcing it into the memory update"
+      ]
+    },
+    {
+      "id": "E16",
+      "group": "end-to-end",
+      "prompt": "Make a full underdog-team-shocked-the-world video, 8-10 minutes, using free tools only.",
+      "expected_skill": "multiple (football-story-strategy leads)",
+      "assertions": [
+        "Story structure selected matches 'Nation Hopes -> Player Burden -> Decisive Moment' or an underdog-appropriate structure, with collective (not just individual) emotion required",
+        "No paid API or paid asset is assumed as required",
+        "Pipeline order roughly follows the orchestration flow in analysis/04_skill_architecture_decision.md",
+        "Final output references OpenMontage-shaped artifacts (edit plan, audio operations) rather than claiming to render a finished video itself"
+      ]
+    },
+    {
+      "id": "E17",
+      "group": "end-to-end",
+      "prompt": "Plan a full comeback story about a player who was written off and proved everyone wrong, and make sure it doesn't feel like a copyright-risky highlight reel.",
+      "expected_skill": "multiple (football-story-strategy leads, football-retention-quality-control gates)",
+      "assertions": [
+        "Reused-content risk is treated as a first-class concern throughout, not just an afterthought at the end",
+        "The final QC report explicitly addresses source concentration and original transformation",
+        "The plan is not, in substance, a straight re-cut of one existing compilation"
+      ]
+    },
+    {
+      "id": "E18",
+      "group": "ambiguity-handling",
+      "prompt": "Make a Ronaldo heartbreak video.",
+      "expected_skill": "football-story-strategy",
+      "assertions": [
+        "Skill either asks which specific heartbreak moment is meant (there are several candidates across his career) or clearly states an assumed default and invites correction",
+        "Does not silently guess without surfacing the ambiguity"
+      ]
+    },
+    {
+      "id": "E19",
+      "group": "editorial-journey",
+      "prompt": "I want a 60-second YouTube Shorts football comeback edit about a player proving doubters wrong. I have not chosen clips yet. What should happen first?",
+      "expected_skill": "social-edit-reasoning",
+      "assertions": [
+        "Output starts with brief interpretation, not source discovery",
+        "Output asks/locks emotional question, tonal flavor, runtime, platform, and non-negotiable moments",
+        "Output identifies next skill as football-story-strategy or football-source-discovery only after brief is locked"
+      ]
+    },
+    {
+      "id": "E20",
+      "group": "sourcing-strategy",
+      "prompt": "Source footage for a 30-second Ronaldo heartbreak edit. I need enough options but not endless searching.",
+      "expected_skill": "football-source-discovery",
+      "assertions": [
+        "Output uses sourcing-strategy quantity guidance for 30s edits",
+        "Output includes core moment, reaction/aftermath, context, and source diversity searches",
+        "Output sets stopping rules and source-level quality gates for aspect ratio, resolution, audio, and licensing risk"
+      ]
+    },
+    {
+      "id": "E21",
+      "group": "visual-cohesion",
+      "prompt": "My selected football clips are from 2010 broadcast, 2022 broadcast, and vertical fan footage. Make them feel intentional in OpenMontage.",
+      "expected_skill": "openmontage-edit-planning",
+      "assertions": [
+        "Output chooses a visual cohesion tier: archive, stylized, or seamless",
+        "Output handles aspect ratio mismatch as a deliberate strategy, not an accident",
+        "Output creates or references a visual_cohesion_plan-shaped artifact"
+      ]
+    },
+    {
+      "id": "E22",
+      "group": "graphics-typography",
+      "prompt": "Add text cards and quotes to a football comeback edit without making it look amateur.",
+      "expected_skill": "football-caption-thumbnail-direction",
+      "assertions": [
+        "Output applies minimum effective dose of text",
+        "Output separates clarification, emphasis, and metadata text functions",
+        "Output checks phone readability, safe zones, contrast, duration, and text-to-audio sync"
+      ]
+    },
+    {
+      "id": "E23",
+      "group": "assembly-workflow",
+      "prompt": "I have clips, a story plan, and approved music. Build the actual OpenMontage timeline workflow.",
+      "expected_skill": "openmontage-edit-planning",
+      "assertions": [
+        "Output uses build-to-music workflow unless it explains why cuts-first is needed",
+        "Output marks music structure and aligns only the 3-5 most important cuts exactly",
+        "Output includes layer separation, handles, phase runtime allocation, and refinement pass"
+      ]
+    },
+    {
+      "id": "E24",
+      "group": "qa-loopback",
+      "prompt": "Audit this finished plan: the fall feels rushed, one middle clip is weak, the music drowns a commentator line, and the text is too small on phone.",
+      "expected_skill": "football-retention-quality-control",
+      "assertions": [
+        "Output separates technical QA, editorial QA, platform QA, and audio issue",
+        "Output marks fall/weak middle clip as requiring loopback or re-cut, not cosmetic fix only",
+        "Output routes music masking to audio/ducking skill and small text to caption/graphics skill"
+      ]
+    },
+    {
+      "id": "E25",
+      "prompt": "I have cloned NousResearch/Hermes-Agent and calesthio/OpenMontage. Prepare a repo-aware preflight plan before running a football emotion video through OpenMontage.",
+      "expected_output": "Uses hermes-openmontage-repo-bridge, checks local paths, runs OpenMontage tool registry provider_menu_summary, reads pipeline_defs, and does not invent tool calls.",
+      "assertions": [
+        "Mentions Hermes-Agent and OpenMontage exact repos or paths.",
+        "Requires OpenMontage registry/provider menu before execution.",
+        "Says production must go through pipeline_defs/stage director skills, not ad-hoc scripts."
+      ]
+    },
+    {
+      "id": "E26",
+      "prompt": "Turn a football story plan into OpenMontage edit decisions for documentary-montage, but the local schema has not been inspected yet.",
+      "expected_output": "Keeps operations adapter-facing or auxiliary until schemas are read; instructs to inspect pipeline manifest and schemas/artifacts before writing canonical edit_decisions.",
+      "assertions": [
+        "Does not claim exact OpenMontage fields without schema inspection.",
+        "Uses projects/<project-id>/football_emotion/ for auxiliary artifacts.",
+        "Connects football skills to OpenMontage stages."
+      ]
+    },
+    {
+      "id": "V5-E01",
+      "group": "fact-lock",
+      "prompt": "Create a video plan for Argentina's most recent World Cup match in 2026.",
+      "expected_skill": "football-match-identification",
+      "assertions": [
+        "Runs match_fact_lock before final brief interpretation",
+        "Does not invent opponent, score, scorers, or exact match events",
+        "If the match is not verified, output is hypothesis_only or user_confirmation_required"
+      ]
+    },
+    {
+      "id": "V5-E02",
+      "group": "provenance",
+      "prompt": "This clip scores 9.8 and improved tension by 24%. Store that in memory.",
+      "expected_skill": "football-fact-provenance-gate",
+      "assertions": [
+        "Rejects exact score and percentage unless measured or verified",
+        "Does not write fake metric to Hermes memory",
+        "Uses forbidden_unverified or asks for measurement evidence"
+      ]
+    },
+    {
+      "id": "V5-E03",
+      "group": "repo-bridge",
+      "prompt": "Run OpenMontage edit planning, but local repos are missing.",
+      "expected_skill": "hermes-openmontage-repo-bridge",
+      "assertions": [
+        "Produces repo_setup_status",
+        "Does not claim registry preflight passed",
+        "Does not output real edit_decisions fields"
+      ]
+    },
+    {
+      "id": "V5-E04",
+      "group": "sourcing",
+      "prompt": "Find clips for yesterday’s Argentina match, official clips are not uploaded yet.",
+      "expected_skill": "football-source-discovery",
+      "assertions": [
+        "Uses live_tournament_sourcing mode",
+        "Does not abandon theme just because early candidates are thin",
+        "Creates rescan schedule for 72h, 7d, and 30d"
+      ]
+    },
+    {
+      "id": "V5-E05",
+      "group": "audio-qc",
+      "prompt": "Mark the audio as passed because target is -14 LUFS and -1 dBTP.",
+      "expected_skill": "football-audio-quality-control",
+      "assertions": [
+        "Refuses to pass loudness without measured_by_tool audio_loudness_measurement",
+        "Recommends ffmpeg loudnorm measurement",
+        "Separates targets from measured values"
+      ]
+    },
+    {
+      "id": "V5-E06",
+      "group": "rights",
+      "prompt": "Use 30 seconds of FIFA broadcast footage because it is transformative, approve it.",
+      "expected_skill": "football-footage-rights-transformative-risk-assessor",
+      "assertions": [
+        "Does not say legal_safe or approved",
+        "Outputs footage_rights_risk_record",
+        "Uses usable_with_risk, avoid, user_must_supply_rights, or needs_legal_review"
+      ]
+    },
+    {
+      "id": "V7-E01",
+      "group": "llm-boundary",
+      "prompt": "A simulation found a great exact TEAM_A vs TEAM_B scoreline template from one project. Add it as a reusable rule.",
+      "expected_skill": "social-edit-reasoning",
+      "assertions": [
+        "Rejects hardcoding one-video facts as reusable skill guidance",
+        "Uses generic TEAM_A/TEAM_B placeholders",
+        "Mentions project artifacts vs reusable rules"
+      ]
+    },
+    {
+      "id": "V7-E02",
+      "group": "repo-bridge",
+      "prompt": "Run this football edit through OpenMontage and write edit_decisions now; assume documentary-montage.",
+      "expected_skill": "hermes-openmontage-repo-bridge",
+      "assertions": [
+        "Requires pipeline manifest inspection",
+        "Requires tool registry provider/support output",
+        "Blocks native edit_decisions until schema lock passes"
+      ]
+    },
+    {
+      "id": "V7-E03",
+      "group": "render-runtime",
+      "prompt": "Use HyperFrames automatically for this football video because that was our earlier preference.",
+      "expected_skill": "openmontage-edit-planning",
+      "assertions": [
+        "Does not silently lock HyperFrames",
+        "Presents Remotion/HyperFrames/FFmpeg options when available",
+        "Requires user confirmation or manifest support"
+      ]
+    },
+    {
+      "id": "V7-E04",
+      "group": "hermes-memory",
+      "prompt": "Store every source URL, timestamp, clip score, and legal claim from this project in Hermes memory.",
+      "expected_skill": "hermes-football-memory-learning",
+      "assertions": [
+        "Stores only durable lessons",
+        "Does not store unverified legal claims as truth",
+        "Keeps full project details in project record path instead of memory"
+      ]
+    }
+  ]
+}

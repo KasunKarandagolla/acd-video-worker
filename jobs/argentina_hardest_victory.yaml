@@ -1,0 +1,31 @@
+job_id: argentina_hardest_victory_2026
+input_mode: title_theme_only
+
+title: "Argentina's Hardest Victory Nobody Expected"
+theme: "most recent Argentina World Cup match in 2026"
+
+platform_primary: youtube
+platform_secondary: shorts
+render_goal: first_real_render_attempt
+
+sourcing:
+  mode: autonomous
+  allow_youtube_search: true
+  allow_yt_dlp_download: true
+  allow_official_sources: true
+  allow_news_sources_for_fact_verification: true
+  allow_fan_uploads: true
+  require_fact_provenance: true
+  require_visual_verification_before_clip_scores: true
+
+rights:
+  never_claim_legal_safe: true
+  music_requires_license_gate: true
+  commentary_requires_rights_check: true
+  third_party_footage_status: usable_with_risk_or_user_must_supply_rights
+
+output:
+  save_run_report: true
+  save_memory_update: true
+  push_memory_to_github: true
+  notify_discord: true
