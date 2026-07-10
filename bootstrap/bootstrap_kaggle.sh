@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
 STAGE_LOG="state/runs/bootstrap_stages.log"
 mkdir -p state/runs
 
@@ -130,7 +134,7 @@ echo "Search capability preflight: $SEARCH_STATUS — proceeding."
 
 CURRENT_STAGE="runtime_smoke_test"
 log_stage "Runtime smoke test"
-python3 scripts/runtime_smoke_test.py
+python3 -m scripts.runtime_smoke_test
 SMOKE_STATUS=$(python3 -c "
 import json
 try:

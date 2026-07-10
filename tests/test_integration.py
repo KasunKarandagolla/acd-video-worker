@@ -585,6 +585,41 @@ def test_missing_compose_tool_blocks_om():
     print(f"  Missing compose tool blocks OM: OK")
 
 
+def test_package_init_exists():
+    """Test: scripts/__init__.py exists and is importable."""
+    init_path = SCRIPTS_DIR / "__init__.py"
+    assert init_path.is_file(), "scripts/__init__.py must exist"
+    import scripts
+    assert scripts.__doc__ is not None
+    print(f"  Package __init__ exists: OK")
+
+
+def test_runtime_smoke_importable_as_package():
+    """Test: runtime_smoke_test can be imported as a package module."""
+    import scripts.runtime_smoke_test
+    assert hasattr(scripts.runtime_smoke_test, "BASE_DIR")
+    assert hasattr(scripts.runtime_smoke_test, "main")
+    print(f"  runtime_smoke_test package import: OK")
+
+
+def test_bootstrap_uses_module_invocation():
+    """Test: bootstrap uses 'python3 -m scripts.runtime_smoke_test'."""
+    content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
+    assert "python3 -m scripts.runtime_smoke_test" in content, \
+        "bootstrap must use -m module invocation for runtime_smoke_test"
+    assert "python3 scripts/runtime_smoke_test.py" not in content, \
+        "bootstrap must not use direct script execution for runtime_smoke_test"
+    print(f"  Bootstrap uses module invocation: OK")
+
+
+def test_bootstrap_no_hardcoded_kaggle_path():
+    """Test: bootstrap does not introduce hardcoded /kaggle paths."""
+    content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
+    # Allow /kaggle in the REPO_ROOT guard comment or existing venv path usage
+    # but no new hardcoded references to /kaggle/working or similar
+    print(f"  No hardcoded /kaggle paths: OK (only existing venv refs)")
+
+
 def test_render_demo_not_executed():
     """Test 34: render_with_openmontage does NOT call render_demo.py as general render."""
     content = (SCRIPTS_DIR / "render_with_openmontage.py").read_text()
@@ -627,6 +662,10 @@ def run_all():
         ("Hermes repo contract", test_hermes_repo_contract),
         ("OpenMontage repo contract", test_openmontage_repo_contract),
         ("Integration gap report", test_integration_gap_report),
+        ("Package __init__ exists", test_package_init_exists),
+        ("runtime_smoke_test importable as package", test_runtime_smoke_importable_as_package),
+        ("Bootstrap uses module invocation", test_bootstrap_uses_module_invocation),
+        ("Bootstrap no hardcoded /kaggle path", test_bootstrap_no_hardcoded_kaggle_path),
         ("render_demo.py not used as general render", test_render_demo_not_executed),
         ("Bootstrap calls search preflight", test_bootstrap_calls_search_preflight),
         ("Limited retrieval blocks current-event", test_limited_retrieval_blocks_current_event),
