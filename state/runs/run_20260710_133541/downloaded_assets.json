@@ -1,0 +1,41 @@
+{
+  "run_id": "run_20260710_133541",
+  "assets_dir": "/kaggle/working/acd-video-worker/state/runs/run_20260710_133541/assets/raw",
+  "total_attempted": 15,
+  "downloads": [
+    {
+      "source_id": "S6VlvNCju6A",
+      "canonical_url": "https://youtube.com/watch?v=S6VlvNCju6A",
+      "status": "downloaded_but_file_not_found",
+      "stderr": ""
+    },
+    {
+      "source_id": "qx7SNaSI56E",
+      "canonical_url": "https://youtube.com/watch?v=qx7SNaSI56E",
+      "status": "downloaded_but_file_not_found",
+      "stderr": ""
+    },
+    {
+      "source_id": "gV9zffYWyD0",
+      "canonical_url": "https://youtube.com/watch?v=gV9zffYWyD0",
+      "status": "downloaded_but_file_not_found",
+      "stderr": ""
+    },
+    {
+      "source_id": "-FPyC0RvhtM",
+      "canonical_url": "https://youtube.com/watch?v=-FPyC0RvhtM",
+      "status": "downloaded_but_file_not_found",
+      "stderr": ""
+    },
+    {
+      "source_id": "ECN3cLPDYo8",
+      "canonical_url": "https://youtube.com/watch?v=ECN3cLPDYo8",
+      "status": "downloaded_but_file_not_found",
+      "stderr": ""
+    }
+  ],
+  "errors": [],
+  "max_sources": 5,
+  "max_storage_gb": 2.0,
+  "blocker": null
+}
