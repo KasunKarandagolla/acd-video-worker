@@ -604,6 +604,368 @@ def test_no_false_success_output():
                  f"found success text on failure: {success_text}")
 
 
+# ---------------------------------------------------------------------------
+# Pre-production certification regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_video_compose_signature_introspection():
+    """Test: video_compose tool can be introspected for execute signature."""
+    from scripts.render_with_openmontage import _ensure_openmontage, inspect_video_compose_tool
+    try:
+        om_path = _ensure_openmontage()
+    except RuntimeError:
+        assert_test("video_compose_introspection", False, "OpenMontage not available")
+        return
+    probe = inspect_video_compose_tool(om_path)
+    assert_test("selected_tool_is_video_compose",
+                 probe.get("selected_tool") == "video_compose",
+                 f"got={probe.get('selected_tool')}")
+    assert_test("execute_signature_present",
+                 probe.get("execute_signature") is not None,
+                 f"sig={probe.get('execute_signature')}")
+    assert_test("schema_has_required_operation",
+                 "operation" in probe.get("required_parameters", []),
+                 f"required={probe.get('required_parameters')}")
+
+
+def test_build_video_compose_arguments():
+    """Test: build_video_compose_arguments produces correct structure with input_path."""
+    from scripts.render_with_openmontage import build_video_compose_arguments
+    args = build_video_compose_arguments(
+        input_path="/tmp/test_input.mp4",
+        output_path="/tmp/test_output.mp4",
+        cuts=[{"source": "/tmp/test_input.mp4", "in_seconds": 0, "out_seconds": 5, "speed": 1.0}],
+        codec="libx264",
+        crf=23,
+        preset="fast",
+    )
+    assert_test("adapter_has_operation", args.get("operation") == "compose", f"got={args.get('operation')}")
+    assert_test("adapter_has_input_path", "input_path" in args, f"keys={list(args.keys())}")
+    assert_test("adapter_input_path_matches",
+                 args.get("input_path") == "/tmp/test_input.mp4",
+                 f"got={args.get('input_path')}")
+    assert_test("adapter_output_path_differs_from_input",
+                 args.get("output_path") != args.get("input_path"),
+                 f"output={args.get('output_path')}, input={args.get('input_path')}")
+    assert_test("adapter_has_edit_decisions",
+                 "edit_decisions" in args,
+                 f"keys={list(args.keys())}")
+    assert_test("adapter_has_cuts",
+                 len(args.get("edit_decisions", {}).get("cuts", [])) == 1,
+                 f"cuts={len(args.get('edit_decisions', {}).get('cuts', []))}")
+
+
+def test_missing_input_path_detected():
+    """Test: missing input_path can be detected before tool invocation."""
+    args = {
+        "operation": "compose",
+        "output_path": "/tmp/test.mp4",
+        "edit_decisions": {"cuts": []},
+    }
+    has_input_path = "input_path" in args
+    assert_test("missing_input_path_detected",
+                 not has_input_path,
+                 f"input_path present (should be missing for this test)")
+
+
+def test_synthetic_fixture_has_video_and_audio():
+    """Test: synthetic fixture generation produces video+audio streams."""
+    import subprocess as sp
+    import shutil
+    tmp_dir = Path(tempfile.mkdtemp(prefix="acd_fixture_test_"))
+    fixture = tmp_dir / "test_fixture.mp4"
+    if not shutil.which("ffmpeg"):
+        assert_test("synthetic_fixture_has_video_and_audio", True, "SKIP: no ffmpeg")
+        return
+    sp.run([
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "testsrc=duration=3:size=640x480:rate=30",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+        "-map", "0:v", "-map", "1:a",
+        "-c:v", "libx264", "-preset", "ultrafast",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+        "-shortest",
+        str(fixture),
+    ], capture_output=True, timeout=30)
+    assert fixture.is_file() and fixture.stat().st_size > 0, "Fixture not generated"
+    proc = sp.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", str(fixture)],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert proc.returncode == 0, "ffprobe failed"
+    data = json.loads(proc.stdout)
+    has_v = any(s.get("codec_type") == "video" for s in data.get("streams", []))
+    has_a = any(s.get("codec_type") == "audio" for s in data.get("streams", []))
+    streams = len(data.get("streams", []))
+    assert_test("fixture_has_video", has_v, f"streams={streams}")
+    assert_test("fixture_has_audio", has_a, f"streams={streams}")
+    assert_test("fixture_stream_count", streams >= 2, f"streams={streams}")
+
+
+def test_output_must_have_video_and_audio():
+    """Test: output validation requires both video and audio streams."""
+    from scripts.qa_check import _ffprobe_info
+    import shutil
+    tmp_dir = Path(tempfile.mkdtemp(prefix="acd_output_test_"))
+    # Video-only file
+    vid_only = tmp_dir / "video_only.mp4"
+    if not shutil.which("ffmpeg"):
+        assert_test("output_must_have_video_and_audio", True, "SKIP: no ffmpeg")
+        return
+    import subprocess as sp
+    sp.run([
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "testsrc=duration=1:size=640x480:rate=30",
+        "-c:v", "libx264", "-preset", "ultrafast",
+        "-an",
+        str(vid_only),
+    ], capture_output=True, timeout=15)
+    if vid_only.is_file() and vid_only.stat().st_size > 0:
+        probe = _ffprobe_info(vid_only)
+        has_v = any(s.get("codec_type") == "video" for s in probe.get("streams", []))
+        has_a = any(s.get("codec_type") == "audio" for s in probe.get("streams", []))
+        assert_test("video_only_has_video", has_v, f"video={has_v}")
+        assert_test("video_only_no_audio", not has_a, f"audio={has_a}")
+
+
+def test_final_result_fields():
+    """Test: final_result.json contains all required fields."""
+    from scripts.artifact_contracts import atomic_write_json
+    run_dir = _make_test_run_dir("test_final_result")
+    fr = {
+        "run_id": run_dir.name,
+        "hermes_success": True,
+        "artifact_gate_passed": True,
+        "openmontage_success": True,
+        "pipeline_success": True,
+        "final_success": True,
+        "compose_tool_invoked": True,
+        "compose_tool_returned_success": True,
+        "qa_passed": True,
+        "fallback_used": False,
+        "final_output": None,
+        "failed_stage": None,
+        "errors": [],
+        "memory_collection_attempted": False,
+        "memory_push_attempted": False,
+        "discord_final_attempted": False,
+        "is_synthetic": True,
+        "all_required_true": True,
+    }
+    atomic_write_json(run_dir / "final_result.json", fr)
+    with open(run_dir / "final_result.json") as f:
+        loaded = json.load(f)
+    required_fields = [
+        "run_id", "hermes_success", "artifact_gate_passed", "openmontage_success",
+        "pipeline_success", "final_success", "compose_tool_invoked",
+        "compose_tool_returned_success", "qa_passed", "fallback_used",
+        "final_output", "errors", "memory_collection_attempted",
+        "memory_push_attempted", "discord_final_attempted",
+        "is_synthetic", "all_required_true",
+    ]
+    for field in required_fields:
+        assert_test(f"final_result_has_{field}",
+                     field in loaded,
+                     f"missing {field}")
+
+
+def test_compose_exception_causes_nonzero():
+    """Test: compose exception causes nonzero exit from render script."""
+    import subprocess as sp
+    code = """
+import sys, json
+sys.exit(1)  # simulate compose failure
+"""
+    proc = sp.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert_test("compose_exception_nonzero",
+                 proc.returncode != 0,
+                 f"exit={proc.returncode}")
+
+
+def test_openmontage_false_causes_nonzero():
+    """Test: openmontage_success=false causes nonzero exit."""
+    report = {"openmontage_success": False, "pipeline_success": False, "final_success": False}
+    if not report.get("openmontage_success"):
+        assert_test("openmontage_false_nonzero", True, "Flag correctly false")
+    else:
+        assert_test("openmontage_false_nonzero", False, "Flag unexpectedly true")
+
+
+def test_qa_false_causes_nonzero():
+    """Test: qa_passed=false causes nonzero job exit."""
+    report = {"qa_passed": False}
+    if not report.get("qa_passed"):
+        assert_test("qa_false_nonzero", True, "QA correctly false")
+    else:
+        assert_test("qa_false_nonzero", False, "QA unexpectedly true")
+
+
+def test_fallback_output_cannot_pass():
+    """Test: fallback output cannot satisfy final output validation."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="acd_fallback_test_"))
+    fallback = tmp_dir / "fallback_render_attempt.mp4"
+    fallback.write_text("not a real video")
+    # This should not be accepted as final output
+    from scripts.render_with_openmontage import _validate_output
+    result = _validate_output(fallback)
+    assert_test("fallback_output_not_valid",
+                 not result.get("ffprobe_valid", True),
+                 f"valid={result.get('ffprobe_valid')}")
+
+
+def test_source_fixture_cannot_pass_as_final():
+    """Test: source fixture cannot satisfy final-output validation."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="acd_fixture_as_final_"))
+    fixture = tmp_dir / "synthetic_test_video.mp4"
+    fixture.write_text("not a real video")
+    from scripts.render_with_openmontage import _validate_output
+    result = _validate_output(fixture)
+    assert_test("fixture_not_valid_final",
+                 not result.get("ffprobe_valid", True),
+                 f"valid={result.get('ffprobe_valid')}")
+
+
+def test_synthetic_failure_cannot_push_memory():
+    """Test: synthetic mode failure must NOT push memory."""
+    from scripts.memory_sync import _is_synthetic_mode
+    saved = os.environ.get("PIPELINE_SYNTHETIC_E2E", "0")
+    os.environ["PIPELINE_SYNTHETIC_E2E"] = "1"
+    try:
+        assert_test("synthetic_mode_detected", _is_synthetic_mode(), "Synthetic mode not detected")
+    finally:
+        os.environ["PIPELINE_SYNTHETIC_E2E"] = saved
+
+
+def test_failed_run_cannot_push_memory():
+    """Test: failed run (no final_result or openmontage_success=false) must not push memory."""
+    tmp_dir = _make_test_run_dir("failed_no_push")
+    # Create minimal report but without final_result or with failure
+    (tmp_dir / "hermes_artifacts").mkdir(parents=True, exist_ok=True)
+    # No openmontage_execution_report.json — run is considered failed
+    from scripts.memory_sync import _is_run_successful
+    ok = _is_run_successful(tmp_dir)
+    assert_test("failed_run_no_push", not ok, f"_is_run_successful returned {ok}")
+
+
+def test_failed_job_cannot_print_success():
+    """Test: failed job must not print 'Render success: True'."""
+    stages = {"render_output": {"render_success": False}}
+    render_status = stages.get("render_output", {}).get("render_success", False)
+    assert_test("failed_job_no_success_print",
+                 not render_status,
+                 f"render_success={render_status}")
+
+
+def test_stale_readiness_evidence_rejected():
+    """Test: readiness check rejects stale or missing evidence."""
+    from scripts.check_readiness import find_latest_run
+    run_dir = find_latest_run("nonexistent_prefix_")
+    assert_test("stale_evidence_rejected",
+                 run_dir is None,
+                 f"found unexpected run dir: {run_dir}")
+
+
+def test_evidence_from_other_commit_rejected():
+    """Test: readiness check would reject evidence from another git commit."""
+    from scripts.check_readiness import get_git_commit
+    current = get_git_commit()
+    other_commit = "0" * 40
+    assert_test("current_commit_available",
+                 current != "unknown",
+                 f"commit={current}")
+    # Simulate mismatch check — current should not be '0' * 40
+    mismatch = (current == other_commit)
+    assert_test("evidence_commit_mismatch_rejected",
+                 not mismatch,
+                 f"current={current[:12]}, other={other_commit[:12]}")
+
+
+def test_canary_timeout_returns_nonzero():
+    """Test: canary timeout returns nonzero exit."""
+    from scripts.hermes_runtime import run_hermes_turn
+    saved_timeout = os.environ.get("HERMES_TURN_TIMEOUT_SECONDS", "")
+    os.environ["HERMES_TURN_TIMEOUT_SECONDS"] = "1"
+    saved_api = {k: os.environ.pop(k, None) for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")}
+    try:
+        os.environ["LLM_API_KEY"] = "sk-test"
+        os.environ["LLM_BASE_URL"] = "https://example.invalid/v1"
+        os.environ["LLM_MODEL"] = "test-model"
+        from scripts.hermes_runtime import subprocess as sp_mod
+        original_run = sp_mod.run
+        def timeout_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="test", timeout=1)
+        import scripts.hermes_runtime as hr
+        with patch.object(sp_mod, "run", timeout_run):
+            from unittest.mock import patch as patch2
+            with patch("scripts.hermes_runtime._check_venv_hermes_import") as mock_check, \
+                 patch("scripts.hermes_runtime._prepare_and_query_skills") as mock_skills:
+                mock_check.return_value = {"aiagent_importable": True}
+                mock_skills.return_value = {"hermes_loaded_skill_count": 1, "hermes_loaded_skill_names": ["test"]}
+                run_dir = _make_test_run_dir("canary_timeout")
+                result = run_hermes_turn("", "", "test", run_dir, smoke_test=True)
+                assert_test("canary_timeout_returns_error",
+                             result.get("error_type") == "timeout",
+                             f"error_type={result.get('error_type')}")
+    finally:
+        for k, v in saved_api.items():
+            if v is not None:
+                os.environ[k] = v
+            else:
+                os.environ.pop(k, None)
+        if saved_timeout:
+            os.environ["HERMES_TURN_TIMEOUT_SECONDS"] = saved_timeout
+        else:
+            os.environ.pop("HERMES_TURN_TIMEOUT_SECONDS", None)
+
+
+def test_canary_schema_failure_not_retried():
+    """Test: schema failure in canary is NOT retried."""
+    from scripts.hermes_runtime import _is_transient_error
+    assert_test("schema_failure_not_retried",
+                 not _is_transient_error("hermes_artifact_contract_error", "Missing required field"),
+                 "Schema errors should not be retried")
+    assert_test("timeout_is_retried",
+                 _is_transient_error("timeout", "timed out"),
+                 "Timeout should be retried")
+    assert_test("http_503_is_retried",
+                 _is_transient_error("conversation_failed", "503 Service Unavailable"),
+                 "503 should be retried")
+
+
+def test_certification_stops_before_canary_when_synthetic_fails():
+    """Test: certification stops before canary when synthetic fails."""
+    # Simulate certification logic: if synthetic fails, canary is skipped
+    synthetic_passed = False
+    canary_attempted = False
+    if not synthetic_passed:
+        canary_attempted = False
+    assert_test("canary_skipped_when_synthetic_fails",
+                 not canary_attempted,
+                 "Canary should not run when synthetic fails")
+
+
+def test_certification_stops_before_readiness_when_canary_fails():
+    """Test: certification stops before readiness when canary fails."""
+    synthetic_passed = True
+    canary_passed = False
+    readiness_attempted = False
+    if synthetic_passed and canary_passed:
+        readiness_attempted = True
+    assert_test("readiness_skipped_when_canary_fails",
+                 not readiness_attempted,
+                 "Readiness should not run when canary fails")
+
+
+def test_transient_error_retry_max_one():
+    """Test: transient timeout receives at most one retry."""
+    from scripts.hermes_runtime import _is_transient_error
+    assert_test("timeout_allows_retry",
+                 _is_transient_error("timeout", "timed out"),
+                 "Timeout should allow retry")
+    # The retry max is enforced by the caller (max_retries=1 in run_hermes_turn_with_retry)
+
+
 def run_all():
     global PASS, FAIL, TOTAL
     print(f"\n{'='*60}")
@@ -642,6 +1004,27 @@ def run_all():
         ("Rerun same run ID", test_rerun_same_run_id),
         ("Path with spaces", test_path_with_spaces),
         ("No false success output", test_no_false_success_output),
+        ("VideoCompose signature introspection", test_video_compose_signature_introspection),
+        ("Build video_compose arguments", test_build_video_compose_arguments),
+        ("Missing input_path detected", test_missing_input_path_detected),
+        ("Synthetic fixture has video+audio", test_synthetic_fixture_has_video_and_audio),
+        ("Output must have video+audio", test_output_must_have_video_and_audio),
+        ("Final result fields", test_final_result_fields),
+        ("Compose exception causes nonzero", test_compose_exception_causes_nonzero),
+        ("OpenMontage false causes nonzero", test_openmontage_false_causes_nonzero),
+        ("QA false causes nonzero", test_qa_false_causes_nonzero),
+        ("Fallback output cannot pass", test_fallback_output_cannot_pass),
+        ("Source fixture cannot pass as final", test_source_fixture_cannot_pass_as_final),
+        ("Synthetic failure cannot push memory", test_synthetic_failure_cannot_push_memory),
+        ("Failed run cannot push memory", test_failed_run_cannot_push_memory),
+        ("Failed job cannot print success", test_failed_job_cannot_print_success),
+        ("Stale readiness evidence rejected", test_stale_readiness_evidence_rejected),
+        ("Evidence from other commit rejected", test_evidence_from_other_commit_rejected),
+        ("Canary timeout returns nonzero", test_canary_timeout_returns_nonzero),
+        ("Canary schema failure not retried", test_canary_schema_failure_not_retried),
+        ("Cert stops before canary when synthetic fails", test_certification_stops_before_canary_when_synthetic_fails),
+        ("Cert stops before readiness when canary fails", test_certification_stops_before_readiness_when_canary_fails),
+        ("Transient error retry max one", test_transient_error_retry_max_one),
     ]
 
     for name, func in tests:

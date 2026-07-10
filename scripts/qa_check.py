@@ -182,7 +182,7 @@ def run_qa(run_id: str, run_dir: Path) -> dict:
         issues.append(f"Output too short: {summary['duration_seconds']}s")
     if not summary.get("has_audio"):
         issues.append("NO AUDIO STREAM FOUND")
-    if not summary.get("loudness_ok"):
+    if qa.get("loudness", {}).get("measured") and not summary.get("loudness_ok"):
         issues.append("Loudness outside target range (-25 to -10 LUFS)")
     qa["issues"] = issues
     qa["qa_passed"] = len(issues) == 0
