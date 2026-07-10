@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
-"""Orchestrator: runs the full title/theme job pipeline.
+"""Orchestrator: runs the full title/theme job pipeline — fail-fast.
 
-Real order:
-1. repo_setup_status
-2. skill_system_status
-3. llm_api_status
-4. Hermes runtime start
-5. match_fact_lock
-6. source discovery and verification
-7. proxy download
-8. visual/audio analysis
-9. timestamp extraction and clip scoring
-10. arc revision
-11. story/audio/visual/graphics plans
-12. artifact gate
-13. OpenMontage artifact conversion
-14. OpenMontage render
-15. QA
-16. session summary
-17. one memory update
-18. one GitHub push
-19. Discord final status
+Critical gates that must pass or the job stops immediately:
+1. Hermes runtime success
+2. match_fact_lock.json exists and is valid
+
+If either gate fails, the job exits nonzero and does NOT run:
+- source discovery
+- downloads
+- media analysis
+- artifact gate
+- OpenMontage
+- any downstream stage
 """
 import json
 import os
@@ -49,7 +40,7 @@ def run_script(script_name, args=None, stage_label=None):
     print(f"{'='*60}")
     result = subprocess.run(cmd, capture_output=False, text=True)
     if result.returncode != 0:
-        print(f"WARN: {script_name} exited with code {result.returncode}")
+        print(f"FAIL: {script_name} exited with code {result.returncode}")
     return result.returncode
 
 
@@ -122,34 +113,47 @@ def main():
         stages["llm_api_status"] = {"accessible": False, "api_key_set": False}
     print(f"  LLM accessible: {stages['llm_api_status'].get('accessible', False)}")
 
-    # Stage 4: Hermes runtime start
+    # Stage 4: Hermes runtime — canonical run_hermes_turn
     notify(f"[{run_id}] Stage 4/19: Hermes runtime")
-    rc = run_script("hermes_runtime.py", [title, theme, run_id], "hermes_runtime")
-    stages["hermes_runtime"] = {"exit_code": rc}
+    from scripts.hermes_runtime import run_hermes_turn
+    hermes_result = run_hermes_turn(title, theme, run_id, run_dir)
+    stages["hermes_runtime"] = hermes_result
+
+    print(f"  Hermes success: {hermes_result.get('success', False)}")
+    if not hermes_result.get("success"):
+        print(f"  Hermes FAILED: {hermes_result.get('error_type')}: {hermes_result.get('error_message')}")
+        print("  Job stopped — Hermes runtime failure.")
+        notify(f"[{run_id}] Hermes runtime FAILED: {hermes_result.get('error_type')}")
+        sys.exit(1)
+
     hermes_report = run_dir / "hermes_run_report.json"
     if hermes_report.is_file():
         with open(hermes_report) as f:
             hr = json.load(f)
-        stages["hermes_runtime"]["hermes_invoked"] = hr.get("hermes_invoked", False)
         stages["hermes_runtime"]["session_id"] = hr.get("session_id")
-        stages["hermes_runtime"]["blocker"] = hr.get("blocker")
 
-    # Stage 5: match_fact_lock (created by Hermes, verify it exists)
+    # Stage 5: match_fact_lock — required gate
     notify(f"[{run_id}] Stage 5/19: match fact lock")
     match_fact = run_dir / "hermes_artifacts" / "match_fact_lock.json"
-    if match_fact.is_file():
-        with open(match_fact) as f:
-            mf = json.load(f)
-        stages["match_fact_lock"] = {
-            "status": mf.get("verification_status", "unknown"),
-            "match": mf.get("match"),
-            "opponent": mf.get("opponent"),
-            "date": mf.get("date"),
-        }
-        print(f"  Match facts: {mf.get('match')} vs {mf.get('opponent')} ({mf.get('verification_status')})")
-    else:
-        stages["match_fact_lock"] = {"status": "missing", "note": "Match facts not produced by Hermes"}
-        print("  WARN: match_fact_lock.json not found")
+    if not match_fact.is_file():
+        print("  FAIL: match_fact_lock.json not found. Job stopped.")
+        notify(f"[{run_id}] match_fact_lock.json missing — job stopped")
+        sys.exit(1)
+
+    with open(match_fact) as f:
+        mf = json.load(f)
+    stages["match_fact_lock"] = {
+        "status": mf.get("verification_status", "unknown"),
+        "match": mf.get("match"),
+        "opponent": mf.get("opponent"),
+        "date": mf.get("date"),
+    }
+    print(f"  Match facts: {mf.get('match')} vs {mf.get('opponent')} ({mf.get('verification_status')})")
+
+    if mf.get("verification_status") not in ("verified", "creative_hypothesis"):
+        print(f"  FAIL: match_fact_lock verification_status='{mf.get('verification_status')}' is not valid. Job stopped.")
+        notify(f"[{run_id}] match_fact_lock invalid status: {mf.get('verification_status')}")
+        sys.exit(1)
 
     # Stage 6: source discovery and verification
     notify(f"[{run_id}] Stage 6/19: source discovery")
@@ -303,6 +307,9 @@ def main():
     print(f"  Summary: {summary_path}")
     print(f"  Render success: {render_status}")
     print(f"{'='*60}")
+
+    if not render_status:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -2,11 +2,8 @@
 """Runtime smoke test — verifies all integration points without full render.
 
 Tests:
-- Hermes dependencies import
-- AIAgent import from cloned repo
-- NVIDIA provider configuration
-- one tiny real Hermes conversation
-- V7 skill discovery count
+- canonical run_hermes_turn with smoke_test=True (exercises AIAgent import,
+  NVIDIA provider, real conversation, V7 skill discovery, Hermes loaded skills)
 - memory path visibility
 - search capability
 - OpenMontage pipeline loader import
@@ -54,16 +51,6 @@ def test_hermes_deps_import() -> dict:
     return {"test": "hermes_deps_import", "passed": r["success"], "detail": r["stdout"] or r["stderr"]}
 
 
-def test_aiagent_import() -> dict:
-    code = (
-        "import sys; sys.path.insert(0, " + repr(str(HERMES_REPO)) + "); "
-        "from run_agent import AIAgent; "
-        "print('OK: ' + AIAgent.__module__)"
-    )
-    r = _subprocess_python(code, venv=True)
-    return {"test": "aiagent_import", "passed": r["success"], "detail": r["stdout"] or r["stderr"]}
-
-
 def test_nvidia_provider_config() -> dict:
     api_key = os.environ.get("LLM_API_KEY") or os.environ.get("NVIDIA_API_KEY", "")
     base_url = os.environ.get("LLM_BASE_URL") or "https://integrate.api.nvidia.com/v1"
@@ -76,61 +63,35 @@ def test_nvidia_provider_config() -> dict:
     }
 
 
-def test_tiny_conversation() -> dict:
-    api_key = os.environ.get("LLM_API_KEY") or os.environ.get("NVIDIA_API_KEY", "")
-    base_url = os.environ.get("LLM_BASE_URL") or "https://integrate.api.nvidia.com/v1"
-    model = os.environ.get("LLM_MODEL") or "nvidia/llama-3.1-nemotron-70b-instruct"
-    if not api_key:
-        return {"test": "tiny_conversation", "passed": False, "detail": "No API key"}
-
-    code = (
-        "import sys; sys.path.insert(0, " + repr(str(HERMES_REPO)) + "); "
-        "from run_agent import AIAgent; "
-        "agent = AIAgent("
-        f"base_url={repr(base_url)}, "
-        f"api_key={repr(api_key)}, "
-        f"model={repr(model)}, "
-        "provider='nvidia', "
-        "quiet_mode=True, skip_context_files=True, skip_memory=True); "
-        "resp = agent.run_conversation('Say hello in one word.'); "
-        "print(str(resp)[:200])"
-    )
-    r = _subprocess_python(code, venv=True, timeout=60)
-    passed = r["success"] and len(r["stdout"]) > 0 and "ERROR" not in r["stdout"].upper()
-    return {"test": "tiny_conversation", "passed": passed, "detail": r["stdout"][:200] if passed else (r["stdout"] or r["stderr"])[:200]}
-
-
-def test_v7_skill_discovery() -> dict:
-    skills_base = BASE_DIR / "skills" / "football-emotion" / "skills"
-    if not skills_base.is_dir():
-        return {"test": "v7_skill_discovery", "passed": False, "detail": "Skills dir not found", "count": 0}
-    count = 0
-    names = []
-    for d in sorted(skills_base.iterdir()):
-        if d.is_dir() and (d / "SKILL.md").is_file():
-            count += 1
-            names.append(d.name)
-    return {"test": "v7_skill_discovery", "passed": count > 0, "count": count, "names": names, "detail": f"{count} skills"}
-
-
-def test_hermes_loaded_skills() -> dict:
-    """Check Hermes' actual loaded skill count (separate from filesystem scan)."""
-    from scripts.hermes_runtime import _query_hermes_loaded_skills, _discover_v7_skills
-    v7 = _discover_v7_skills()
-    v7_present = v7.get("v7_skill_count", 0)
-    loaded = _query_hermes_loaded_skills()
-    loaded_count = loaded.get("hermes_loaded_skill_count", 0)
-    loaded_names = loaded.get("hermes_loaded_skill_names", [])
-    loader_fn = loaded.get("hermes_skill_loader_function")
+def test_hermes_turn() -> dict:
+    """Use the canonical production run_hermes_turn with smoke_test=True."""
+    from scripts.hermes_runtime import run_hermes_turn
+    run_id = "smoke_test_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_dir = BASE_DIR / "state" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    result = run_hermes_turn("", "", run_id, run_dir, smoke_test=True)
+    passed = result.get("success", False)
     return {
-        "test": "hermes_loaded_skills",
-        "passed": v7_present > 0,
-        "v7_skills_present_count": v7_present,
-        "hermes_loaded_skill_count": loaded_count,
-        "hermes_loaded_skill_names": loaded_names,
-        "hermes_skill_loader_function": loader_fn,
-        "hermes_skill_loader_output": loaded.get("hermes_skill_loader_output"),
-        "detail": f"V7 present: {v7_present}, Hermes loaded: {loaded_count}, loader fn: {loader_fn}",
+        "test": "hermes_turn",
+        "passed": passed,
+        "aiagent_importable": result.get("aiagent_importable", False),
+        "conversation_executed": result.get("conversation_executed", False),
+        "response_nonempty": result.get("response_nonempty", False),
+        "session_or_trace_exists": result.get("session_or_trace_exists", False),
+        "v7_skills_present_count": result.get("v7_skills_present_count", 0),
+        "hermes_loaded_skill_count": result.get("hermes_loaded_skill_count", 0),
+        "error_type": result.get("error_type"),
+        "error_message": result.get("error_message"),
+        "detail": (
+            f"success={result.get('success')}, "
+            f"aiagent={result.get('aiagent_importable')}, "
+            f"conversation={result.get('conversation_executed')}, "
+            f"nonempty={result.get('response_nonempty')}, "
+            f"session={result.get('session_or_trace_exists')}, "
+            f"v7_skills={result.get('v7_skills_present_count')}, "
+            f"hermes_loaded={result.get('hermes_loaded_skill_count')}, "
+            f"error={result.get('error_type', 'none')}"
+        ),
     }
 
 
@@ -256,19 +217,17 @@ def test_openmontage_deterministic_selection() -> dict:
 
 
 def main():
-    v7_test = test_v7_skill_discovery()
-    hermes_skills_test = test_hermes_loaded_skills()
+    hermes_turn_result = test_hermes_turn()
     om_det_test = test_openmontage_deterministic_selection()
+    mem_test = test_memory_path()
+    search_test = test_search_capability()
 
     tests = [
         test_hermes_deps_import(),
-        test_aiagent_import(),
         test_nvidia_provider_config(),
-        test_tiny_conversation(),
-        v7_test,
-        hermes_skills_test,
-        test_memory_path(),
-        test_search_capability(),
+        hermes_turn_result,
+        mem_test,
+        search_test,
         test_om_pipeline_loader(),
         test_tool_registry_discovery(),
         test_schema_availability(),
@@ -285,12 +244,16 @@ def main():
         "tests_passed": passed_count,
         "tests_total": total,
         "tests": tests,
-        "v7_skills_present_count": v7_test.get("count", 0),
-        "v7_skill_names": v7_test.get("names", []),
-        "hermes_loaded_skill_count": hermes_skills_test.get("hermes_loaded_skill_count", 0),
-        "hermes_loaded_skill_names": hermes_skills_test.get("hermes_loaded_skill_names", []),
-        "hermes_skill_loader_function": hermes_skills_test.get("hermes_skill_loader_function"),
-        "hermes_skill_loader_output": hermes_skills_test.get("hermes_skill_loader_output"),
+        "hermes_turn": {
+            "aiagent_importable": hermes_turn_result.get("aiagent_importable"),
+            "conversation_executed": hermes_turn_result.get("conversation_executed"),
+            "response_nonempty": hermes_turn_result.get("response_nonempty"),
+            "session_or_trace_exists": hermes_turn_result.get("session_or_trace_exists"),
+            "v7_skills_present_count": hermes_turn_result.get("v7_skills_present_count"),
+            "hermes_loaded_skill_count": hermes_turn_result.get("hermes_loaded_skill_count"),
+            "error_type": hermes_turn_result.get("error_type"),
+            "error_message": hermes_turn_result.get("error_message"),
+        },
         "selected_pipeline_manifest": om_det_test.get("selected_pipeline_manifest"),
         "pipeline_load_success": om_det_test.get("pipeline_load_success"),
         "required_tools": om_det_test.get("required_tools"),

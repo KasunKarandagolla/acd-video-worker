@@ -51,6 +51,34 @@ def hydrate():
     print(f"Memory directory: {MEMORY_DIR}")
 
 
+def _is_run_successful(run_dir: Path) -> bool:
+    """Check whether the run was successful (Hermes invoked, render OK)."""
+    hermes_report = run_dir / "hermes_run_report.json"
+    if hermes_report.is_file():
+        try:
+            with open(hermes_report) as f:
+                hr = json.load(f)
+            if not hr.get("hermes_invoked", False):
+                return False
+        except Exception:
+            return False
+    else:
+        return False
+
+    render_report = run_dir / "openmontage_execution_report.json"
+    if render_report.is_file():
+        try:
+            with open(render_report) as f:
+                rr = json.load(f)
+            if not rr.get("render_result", {}).get("success", False):
+                return False
+        except Exception:
+            return False
+    else:
+        return False
+    return True
+
+
 def collect(run_id):
     if not run_id:
         print("ERROR: --run-id is required for collect")
@@ -64,6 +92,12 @@ def collect(run_id):
     marker = run_dir / ".memory_collected"
     if marker.exists():
         print(f"Memory already collected for run {run_id}. Use --force to override.")
+        return
+
+    # Never learn from failed runs
+    if not _is_run_successful(run_dir):
+        print(f"Run {run_id} did not complete successfully. Skipping memory learning.")
+        marker.write_text(datetime.now(timezone.utc).isoformat() + "\n")
         return
 
     ensure_memory_dir()

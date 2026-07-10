@@ -594,6 +594,179 @@ def test_package_init_exists():
     print(f"  Package __init__ exists: OK")
 
 
+# ---------------------------------------------------------------------------
+# Regression tests for runtime-stabilization pass
+# ---------------------------------------------------------------------------
+
+def test_revisions_pinned():
+    """Test: external repository revisions are pinned in one authoritative config."""
+    pinned = BASE_DIR / "locks" / "pinned_versions.json"
+    assert pinned.is_file(), "pinned_versions.json must exist"
+    data = json.loads(pinned.read_text())
+    assert "hermes_agent" in data, "hermes_agent entry required"
+    assert "open_montage" in data, "open_montage entry required"
+    hermes_rev = data["hermes_agent"]["revision"]
+    om_rev = data["open_montage"]["revision"]
+    assert len(hermes_rev) == 40, f"Hermes revision must be full SHA: {hermes_rev}"
+    assert len(om_rev) == 40, f"OpenMontage revision must be full SHA: {om_rev}"
+    # Verify lock files match
+    hermes_lock = (BASE_DIR / "locks" / "HERMES_AGENT_PINNED_COMMIT.txt").read_text().strip()
+    om_lock = (BASE_DIR / "locks" / "OPENMONTAGE_PINNED_COMMIT.txt").read_text().strip()
+    assert hermes_lock == hermes_rev, f"Hermes lock ({hermes_lock}) != pinned ({hermes_rev})"
+    assert om_lock == om_rev, f"OM lock ({om_lock}) != pinned ({om_rev})"
+    print(f"  Revisions pinned: OK (hermes={hermes_rev[:12]}, om={om_rev[:12]})")
+
+
+def test_clone_repos_uses_pinned():
+    """Test: clone_repos.sh checks out pinned revisions, not remote HEAD."""
+    content = (BASE_DIR / "bootstrap" / "clone_repos.sh").read_text()
+    # Must contain checkout --detach with the revision
+    assert "checkout --detach" in content, "Must checkout detached HEAD"
+    # Must verify revision match
+    assert "rev-parse HEAD" in content, "Must verify HEAD revision"
+    assert "mismatch" in content.lower(), "Must fail on mismatch"
+    # Must not pull latest / follow default branch
+    assert "git pull" not in content, "Must not git pull"
+    assert "fetch" in content, "Should fetch to update refs"
+    print(f"  Clone repos uses pinned: OK")
+
+
+def test_hermes_venv_verifies_wrapt():
+    """Test: install_deps.py verifies wrapt and AIAgent in Hermes venv."""
+    content = (SCRIPTS_DIR / "install_deps.py").read_text()
+    # wrapt must be in the install list (as extra_pkgs item)
+    assert "'wrapt'" in content or '"wrapt"' in content, \
+        "wrapt must be in the install or verification list"
+    # Check verification block exists
+    assert "venv_import_verification" in content, "Must have import verification section"
+    assert "wrapt_importable" in content, "wrapt must be verified"
+    assert "aiagent_importable" in content, "AIAgent must be verified"
+    # Check results go to report
+    assert "runtime_dependency_report.json" in content or "runtime_dependency_report" in content, \
+        "Verification must write to runtime_dependency_report.json"
+    print(f"  Hermes venv verifies wrapt+AIAgent: OK")
+
+
+def test_no_semicolon_try():
+    """Test: no generated Python -c command contains '; try:' pattern."""
+    scripts = list(SCRIPTS_DIR.glob("*.py"))
+    found_issues = []
+    for sp in sorted(scripts):
+        content = sp.read_text()
+        for i, line in enumerate(content.split("\n"), 1):
+            stripped = line.strip()
+            if "; try:" in stripped.replace(" ", "").replace("\t", ""):
+                found_issues.append(f"{sp.name}:{i}: {stripped}")
+            if "; try" in stripped and not stripped.startswith("#"):
+                # Also catch semicolon before compound statements
+                if "; try" in stripped.replace(" ", "") or "; except" in stripped.replace(" ", ""):
+                    found_issues.append(f"{sp.name}:{i}: {stripped}")
+    assert len(found_issues) == 0, f"Semicolon-before-compound found:\n" + "\n".join(found_issues)
+    print(f"  No semicolon try patterns: OK")
+
+
+def test_smoke_test_uses_run_hermes_turn():
+    """Test: smoke test calls the canonical run_hermes_turn (not separate probes)."""
+    content = (SCRIPTS_DIR / "runtime_smoke_test.py").read_text()
+    assert "from scripts.hermes_runtime import run_hermes_turn" in content, \
+        "Smoke test must import and use run_hermes_turn"
+    assert "test_hermes_turn" in content, "Smoke test must define test_hermes_turn"
+    # Verify old separate tests are removed
+    assert "def test_aiagent_import" not in content, \
+        "Old separate aiagent_import test must be removed"
+    assert "def test_tiny_conversation" not in content, \
+        "Old separate tiny_conversation test must be removed"
+    assert "def test_v7_skill_discovery" not in content, \
+        "Old separate v7_skill_discovery test must be removed"
+    assert "def test_hermes_loaded_skills" not in content, \
+        "Old separate hermes_loaded_skills test must be removed"
+    print(f"  Smoke test uses run_hermes_turn: OK")
+
+
+def test_job_fails_fast_on_hermes_failure():
+    """Test: run_title_theme_job.py exits immediately when Hermes fails."""
+    content = (SCRIPTS_DIR / "run_title_theme_job.py").read_text()
+    # Must use run_hermes_turn
+    assert "run_hermes_turn" in content, "Must use run_hermes_turn"
+    # Must fail fast on Hermes failure
+    assert 'if not hermes_result.get("success")' in content or \
+           'if not hermes_result' in content, \
+        "Must check Hermes success"
+    assert "sys.exit(1)" in content, "Must exit nonzero on failure"
+    print(f"  Job fails fast on Hermes failure: OK")
+
+
+def test_no_source_discovery_when_hermes_fails():
+    """Test: source_discovery is not called when Hermes fails."""
+    content = (SCRIPTS_DIR / "run_title_theme_job.py").read_text()
+    # source_discovery call must come AFTER Hermes failure check
+    hermes_fail_idx = content.find('not hermes_result.get("success")')
+    source_idx = content.find("source_discovery")
+    assert hermes_fail_idx >= 0, "Hermes failure check must exist"
+    assert source_idx > hermes_fail_idx, \
+        f"source_discovery ({source_idx}) must be after Hermes failure check ({hermes_fail_idx})"
+    print(f"  No source discovery when Hermes fails: OK")
+
+
+def test_no_source_discovery_when_match_fact_missing():
+    """Test: source_discovery is not called when match_fact_lock is missing."""
+    content = (SCRIPTS_DIR / "run_title_theme_job.py").read_text()
+    # match_fact check must come before source_discovery
+    match_fact_idx = content.find("match_fact_lock.json")
+    source_idx = content.find("source_discovery")
+    assert match_fact_idx >= 0, "match_fact_lock check must exist"
+    assert match_fact_idx < source_idx, \
+        f"match_fact check ({match_fact_idx}) must be before source_discovery ({source_idx})"
+    # Must not have bypass behavior
+    assert "No match fact lock found" not in content, \
+        "Must not contain 'No match fact lock found' bypass"
+    assert "Using raw title/theme" not in content, \
+        "Must not contain raw title/theme bypass"
+    print(f"  No source discovery when match_fact missing: OK")
+
+
+def test_bootstrap_preserves_nonzero_exit():
+    """Test: bootstrap preserves nonzero job exit code through cleanup."""
+    content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
+    # Must use FINAL_EXIT_CODE or equivalent that stores original status
+    assert "FINAL_EXIT_CODE" in content, "Must track FINAL_EXIT_CODE separately"
+    # Trap must use stored value, not $?
+    assert 'trap cleanup EXIT' in content, "Must have cleanup trap"
+    # Cleanup must use saved exit code, not $?
+    assert 'saved_exit=$FINAL_EXIT_CODE' in content or \
+           'saved_exit=$JOB_EXIT' in content or \
+           'exit "$saved_exit"' in content, \
+        "Cleanup must use saved exit code"
+    # Success message only for exit code 0
+    assert 'if [ "$saved_exit" -eq 0 ]; then' in content, \
+        "Must only print success for exit 0"
+    print(f"  Bootstrap preserves nonzero exit: OK")
+
+
+def test_failed_memory_not_appended():
+    """Test: failed runs do not append learned_patterns.jsonl."""
+    content = (SCRIPTS_DIR / "memory_sync.py").read_text()
+    assert "_is_run_successful" in content, \
+        "Must check run success before learning"
+    assert "Skipping memory learning" in content, \
+        "Must skip learning on failed run"
+    # The patterns_file append should only happen when there are patterns from successful run
+    print(f"  Failed memory not appended: OK")
+
+
+def test_success_requires_real_conversation():
+    """Test: run_hermes_turn success requires real conversation and loaded skills."""
+    content = (SCRIPTS_DIR / "hermes_runtime.py").read_text()
+    # run_hermes_turn must verify conversation_executed and response_nonempty
+    assert "conversation_executed" in content, "Must track conversation execution"
+    assert "response_nonempty" in content, "Must track response nonempty"
+    assert 'if result["hermes_loaded_skill_count"] == 0' in content, \
+        "Must block when zero skills loaded"
+    assert "error_type" in content, "Must capture error_type"
+    assert "error_message" in content, "Must capture error_message"
+    print(f"  Success requires real conversation: OK")
+
+
 def test_runtime_smoke_importable_as_package():
     """Test: runtime_smoke_test can be imported as a package module."""
     import scripts.runtime_smoke_test
@@ -636,6 +809,70 @@ def test_render_demo_not_executed():
     print(f"  render_demo.py not used as general render: OK")
 
 
+# ---------------------------------------------------------------------------
+# Regression tests for validation-only mode
+# ---------------------------------------------------------------------------
+
+def test_validate_only_after_smoke_test():
+    """Test: HERMES_VALIDATE_ONLY is checked after runtime smoke test passes."""
+    content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
+    smoke_test_idx = content.find("python3 -m scripts.runtime_smoke_test")
+    validate_only_idx = content.find("HERMES_VALIDATE_ONLY:-0")
+    assert smoke_test_idx >= 0, "bootstrap must call runtime_smoke_test"
+    assert validate_only_idx >= 0, "bootstrap must check HERMES_VALIDATE_ONLY"
+    assert smoke_test_idx < validate_only_idx, \
+        f"HERMES_VALIDATE_ONLY check ({validate_only_idx}) must be after smoke test ({smoke_test_idx})"
+    print(f"  Validate-only after smoke test: OK (smoke={smoke_test_idx}, validate={validate_only_idx})")
+
+
+def test_validate_only_before_title_theme():
+    """Test: HERMES_VALIDATE_ONLY is checked before run_title_theme_job.py."""
+    content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
+    validate_only_idx = content.find("HERMES_VALIDATE_ONLY:-0")
+    title_theme_idx = content.find("scripts/run_title_theme_job.py")
+    assert validate_only_idx >= 0, "bootstrap must check HERMES_VALIDATE_ONLY"
+    assert title_theme_idx >= 0, "bootstrap must call run_title_theme_job.py"
+    assert validate_only_idx < title_theme_idx, \
+        f"HERMES_VALIDATE_ONLY check ({validate_only_idx}) must be before title/theme job ({title_theme_idx})"
+    print(f"  Validate-only before title/theme: OK (validate={validate_only_idx}, title_theme={title_theme_idx})")
+
+
+def test_validate_only_skips_steps():
+    """Test: validation-only mode does not invoke source discovery, rendering, or memory push."""
+    content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
+    # The validation-only exit comes before the job execution block
+    # which contains source_discovery (inside run_title_theme_job.py) and memory_sync.py push
+    validate_only_exit_idx = content.find('echo "Hermes validation-only mode completed successfully."')
+    title_theme_idx = content.find("scripts/run_title_theme_job.py")
+    memory_push_idx = content.find("memory_sync.py push")
+    assert validate_only_exit_idx >= 0, "bootstrap must have validation-only exit message"
+    assert title_theme_idx >= 0, "bootstrap must call run_title_theme_job.py"
+    assert memory_push_idx >= 0, "bootstrap must call memory_sync.py push"
+    assert validate_only_exit_idx < title_theme_idx, \
+        "Validation-only exit must be before title/theme job (which triggers source discovery and rendering)"
+    assert validate_only_exit_idx < memory_push_idx, \
+        "Validation-only exit must be before memory push"
+    print(f"  Validate-only skips steps: OK (exit={validate_only_exit_idx}, job={title_theme_idx}, push={memory_push_idx})")
+
+
+def test_validate_only_smoke_failure_exits_nonzero():
+    """Test: failed runtime smoke test still exits nonzero before validation-only check."""
+    content = (BASE_DIR / "bootstrap" / "bootstrap_kaggle.sh").read_text()
+    # Smoke test failure path (exit 1) must appear before HERMES_VALIDATE_ONLY check
+    smoke_fail_idx = content.find('echo "=== SMOKE TEST FAILED ==="')
+    validate_only_idx = content.find("HERMES_VALIDATE_ONLY:-0")
+    assert smoke_fail_idx >= 0, "bootstrap must handle smoke test failure"
+    assert validate_only_idx >= 0, "bootstrap must check HERMES_VALIDATE_ONLY"
+    assert smoke_fail_idx < validate_only_idx, \
+        f"Smoke test failure ({smoke_fail_idx}) must be before validate-only check ({validate_only_idx})"
+    # Verify the failure path exits nonzero
+    assert 'FINAL_EXIT_CODE=1' in content[smoke_fail_idx:validate_only_idx], \
+        "Smoke test failure must set FINAL_EXIT_CODE=1"
+    assert 'exit 1' in content[smoke_fail_idx:validate_only_idx], \
+        "Smoke test failure must exit 1"
+    print(f"  Smoke failure exits nonzero: OK")
+
+
 def run_all():
     tests = [
         ("Syntax check", check_syntax),
@@ -674,6 +911,21 @@ def run_all():
         ("Zero Hermes-loaded skills blocks run", test_zero_hermes_skills_blocks_run),
         ("Arbitrary first tool not selected", test_arbitrary_first_tool_not_selected),
         ("Missing compose tool blocks OM", test_missing_compose_tool_blocks_om),
+        ("Revisions pinned", test_revisions_pinned),
+        ("Clone repos uses pinned", test_clone_repos_uses_pinned),
+        ("Hermes venv verifies wrapt", test_hermes_venv_verifies_wrapt),
+        ("No semicolon try patterns", test_no_semicolon_try),
+        ("Smoke test uses run_hermes_turn", test_smoke_test_uses_run_hermes_turn),
+        ("Job fails fast on Hermes failure", test_job_fails_fast_on_hermes_failure),
+        ("No source discovery when Hermes fails", test_no_source_discovery_when_hermes_fails),
+        ("No source discovery when match_fact missing", test_no_source_discovery_when_match_fact_missing),
+        ("Bootstrap preserves nonzero exit", test_bootstrap_preserves_nonzero_exit),
+        ("Failed memory not appended", test_failed_memory_not_appended),
+        ("Success requires real conversation", test_success_requires_real_conversation),
+        ("Validate-only after smoke test", test_validate_only_after_smoke_test),
+        ("Validate-only before title/theme", test_validate_only_before_title_theme),
+        ("Validate-only skips steps", test_validate_only_skips_steps),
+        ("Validate-only smoke failure exits nonzero", test_validate_only_smoke_failure_exits_nonzero),
     ]
 
     passed = 0

@@ -8,6 +8,8 @@ cd "$REPO_ROOT"
 STAGE_LOG="state/runs/bootstrap_stages.log"
 mkdir -p state/runs
 
+FINAL_EXIT_CODE=0
+
 log_stage() {
     local msg="$1"
     echo ""
@@ -23,21 +25,21 @@ notify() {
 }
 
 cleanup() {
-    local exit_code=$?
+    local saved_exit=$FINAL_EXIT_CODE
     echo ""
     echo "=== CLEANUP ==="
-    if [ "$exit_code" -eq 0 ]; then
-        notify "✅ Worker completed successfully."
+    if [ "$saved_exit" -eq 0 ]; then
+        notify "Worker completed successfully."
     else
-        notify "❌ Worker failed at stage: $CURRENT_STAGE (exit code $exit_code)"
+        notify "Worker failed at stage: $CURRENT_STAGE (exit code $saved_exit)"
     fi
     echo "=== CLEANUP DONE ==="
-    exit "$exit_code"
+    exit "$saved_exit"
 }
 trap cleanup EXIT
 
 CURRENT_STAGE="worker_started"
-notify "🚀 Worker started on Kaggle"
+notify "Worker started on Kaggle"
 
 CURRENT_STAGE="environment_check"
 log_stage "Environment check"
@@ -83,6 +85,7 @@ except Exception:
     echo "LLM endpoint is not accessible after retries."
     CURRENT_STAGE="llm_blocked"
     notify "LLM blocked: $LLM_ERROR"
+    FINAL_EXIT_CODE=1
     exit 1
 fi
 
@@ -120,6 +123,7 @@ except Exception:
 ")
     CURRENT_STAGE="search_blocked"
     notify "Search capability blocked: $SEARCH_BLOCKER"
+    FINAL_EXIT_CODE=1
     exit 1
 fi
 # For current-event jobs, limited (retrieval-only) also blocks
@@ -128,6 +132,7 @@ if [ "$SEARCH_STATUS" = "limited" ]; then
     echo "=== SEARCH LIMITED — CURRENT-EVENT JOBS BLOCKED ==="
     CURRENT_STAGE="search_limited"
     notify "Search capability limited (retrieval-only, no real search query engine). Current-event jobs blocked."
+    FINAL_EXIT_CODE=1
     exit 1
 fi
 echo "Search capability preflight: $SEARCH_STATUS — proceeding."
@@ -148,16 +153,35 @@ if [ "$SMOKE_STATUS" != "True" ]; then
     echo "=== SMOKE TEST FAILED ==="
     CURRENT_STAGE="smoke_test_failed"
     notify "Smoke test failed — blocking job start"
+    FINAL_EXIT_CODE=1
     exit 1
 fi
 echo "Smoke test passed — proceeding to job."
+
+if [[ "${HERMES_VALIDATE_ONLY:-0}" == "1" ]]; then
+    echo "Hermes validation-only mode completed successfully."
+    FINAL_EXIT_CODE=0
+    exit 0
+fi
 
 CURRENT_STAGE="title_theme_job"
 log_stage "Running title/theme job"
 JOB_FILE="${1:-jobs/argentina_hardest_victory.yaml}"
 RUN_ID=$(python3 -c "import sys, datetime; print(datetime.datetime.utcnow().strftime('run_%Y%m%d_%H%M%S'))")
 export RUN_ID
+
+set +e
 python3 scripts/run_title_theme_job.py "$JOB_FILE" --run-id "$RUN_ID"
+JOB_EXIT=$?
+set -e
+
+if [ "$JOB_EXIT" -ne 0 ]; then
+    echo "=== TITLE/THEME JOB FAILED (exit code $JOB_EXIT) ==="
+    CURRENT_STAGE="title_theme_job_failed"
+    notify "Title/theme job failed — exit code $JOB_EXIT"
+    FINAL_EXIT_CODE=$JOB_EXIT
+    exit $JOB_EXIT
+fi
 
 CURRENT_STAGE="memory_collect"
 log_stage "Memory collect"
@@ -166,4 +190,5 @@ python3 scripts/memory_sync.py push --run-id "$RUN_ID"
 
 CURRENT_STAGE="worker_complete"
 log_stage "Worker complete"
-echo "All stages completed successfully."
+echo "Pipeline completed successfully."
+FINAL_EXIT_CODE=0

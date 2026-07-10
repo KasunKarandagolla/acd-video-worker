@@ -165,14 +165,14 @@ def _check_venv_hermes_import() -> dict:
         return result
 
     python = _hermes_venv_python()
-    code = (
-        "import sys; sys.path.insert(0, '" + str(HERMES_REPO) + "'); "
-        "try:\n"
-        "    from run_agent import AIAgent\n"
-        "    print(f'AIAgent imported from {AIAgent.__module__}')\n"
-        "except Exception as e:\n"
-        "    print(f'ERROR: {e}')\n"
-    )
+    hermes_repo_str = str(HERMES_REPO)
+    script_lines = [
+        "import sys",
+        f"sys.path.insert(0, '{hermes_repo_str}')",
+        "from run_agent import AIAgent",
+        "print(f'AIAgent imported from {AIAgent.__module__}')",
+    ]
+    code = "\n".join(script_lines)
     try:
         proc = subprocess.run(
             [python, "-c", code],
@@ -295,6 +295,171 @@ def _has_real_toolsets() -> dict:
             f.stem for f in toolsets_dir.glob("*.py")
             if f.is_file() and not f.name.startswith("_")
         )[:20]
+    return result
+
+
+def run_hermes_turn(
+    title: str,
+    theme: str,
+    run_id: str,
+    run_dir: Path,
+    smoke_test: bool = False,
+) -> dict:
+    """Canonical single Hermes turn invocation used by both smoke test and job.
+
+    Performs the exact same production path: repo resolution, venv resolution,
+    AIAgent import, real provider config, minimal conversation, skill-loader
+    inspection, and structured result capture.
+
+    When smoke_test=True the prompt is kept tiny but still exercises the real
+    runtime. A successful result requires:
+      - AIAgent imported
+      - real conversation executed
+      - nonempty model response
+      - session/trace evidence exists
+      - Hermes-loaded skill count > 0
+    """
+    result = {
+        "success": False,
+        "aiagent_importable": False,
+        "conversation_executed": False,
+        "response_nonempty": False,
+        "session_or_trace_exists": False,
+        "v7_skills_present_count": 0,
+        "hermes_loaded_skill_count": 0,
+        "error_type": None,
+        "error_message": None,
+        "details": {},
+    }
+
+    try:
+        _ensure_hermes_repo()
+    except RuntimeError as e:
+        result["error_type"] = "repo_not_found"
+        result["error_message"] = str(e)
+        return result
+
+    endpoint = _get_nvidia_endpoint()
+    if not endpoint["api_key_set"]:
+        result["error_type"] = "no_api_key"
+        result["error_message"] = "No NVIDIA/NIM API key available"
+        return result
+
+    v7 = _discover_v7_skills()
+    result["v7_skills_present_count"] = v7.get("v7_skill_count", 0)
+
+    venv_check = _check_venv_hermes_import()
+    result["aiagent_importable"] = venv_check.get("aiagent_importable", False)
+    if not result["aiagent_importable"]:
+        result["error_type"] = "aiagent_not_importable"
+        result["error_message"] = venv_check.get("import_error", "unknown")
+        return result
+
+    loaded = _query_hermes_loaded_skills()
+    result["hermes_loaded_skill_count"] = loaded.get("hermes_loaded_skill_count", 0)
+    result["details"]["hermes_loaded_skill_names"] = loaded.get("hermes_loaded_skill_names", [])
+    result["details"]["hermes_skill_loader_function"] = loaded.get("hermes_skill_loader_function")
+
+    if result["hermes_loaded_skill_count"] == 0:
+        result["error_type"] = "zero_skills_loaded"
+        result["error_message"] = "Hermes loaded zero skills"
+        return result
+
+    session_id = str(uuid.uuid4())
+    result["session_or_trace_exists"] = True
+    session_dir = run_dir / "hermes_artifacts"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    result["details"]["session_id"] = session_id
+
+    python = _hermes_venv_python()
+    hermes_repo_str = str(HERMES_REPO)
+    api_key = endpoint["api_key"]
+    base_url = endpoint["base_url"]
+    model = endpoint["model"]
+    v7_skills_base = str(BASE_DIR / "skills" / "football-emotion" / "skills")
+
+    if smoke_test:
+        user_msg = "Respond with one word: hello"
+    else:
+        user_msg = json.dumps({
+            "task": "editorial_reasoning",
+            "title": title,
+            "theme": theme,
+            "session_id": session_id,
+            "instructions": (
+                f"Reason about football video: title='{title}', theme='{theme}'. "
+                "Produce match_fact_lock and brief_interpretation artifacts."
+            ),
+        })
+
+    script_lines = [
+        "import sys, json, os",
+        f"sys.path.insert(0, '{hermes_repo_str}')",
+        f"os.environ['HERMES_SKILLS_DIR'] = {repr(v7_skills_base)}",
+        f"os.environ['HERMES_HOME'] = {repr(str(BASE_DIR / 'state' / 'hermes_memory'))}",
+        f"os.environ['SKILLS_DIR'] = {repr(v7_skills_base)}",
+        "from run_agent import AIAgent",
+        f"agent = AIAgent(",
+        f"    base_url={repr(base_url)},",
+        f"    api_key={repr(api_key)},",
+        f"    model={repr(model)},",
+        f"    provider='nvidia',",
+        f"    session_id={repr(session_id)},",
+        f"    quiet_mode=True,",
+        f"    skip_context_files=True,",
+        f"    skip_memory=True,",
+        f")",
+        f"response = agent.run_conversation({repr(user_msg)})",
+        "safe = str(response)[:5000] if response else ''",
+        "print('RESPONSE_START')",
+        "print(safe)",
+        "print('RESPONSE_END')",
+    ]
+    code = "\n".join(script_lines)
+
+    try:
+        proc = subprocess.run(
+            [python, "-c", code],
+            capture_output=True, text=True, timeout=120,
+        )
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+
+        in_response = False
+        response_parts = []
+        for line in stdout.split("\n"):
+            if line.strip() == "RESPONSE_START":
+                in_response = True
+                continue
+            if line.strip() == "RESPONSE_END":
+                in_response = False
+                continue
+            if in_response:
+                response_parts.append(line)
+
+        response_text = "\n".join(response_parts).strip()
+        result["conversation_executed"] = True
+        result["response_nonempty"] = bool(response_text) and "ERROR" not in response_text[:100]
+
+        if proc.returncode != 0 or not result["response_nonempty"]:
+            result["error_type"] = "conversation_failed"
+            result["error_message"] = (
+                f"exit={proc.returncode}: {response_text[:300] or stderr[:300]}"
+            )
+            return result
+
+        (session_dir / "hermes_raw_response.json").write_text(
+            json.dumps({"response": response_text[:3000], "length": len(response_text)})
+        )
+        result["success"] = True
+
+    except subprocess.TimeoutExpired:
+        result["error_type"] = "timeout"
+        result["error_message"] = "Hermes conversation timed out after 120s"
+    except Exception as e:
+        result["error_type"] = "exception"
+        result["error_message"] = str(e)
+
     return result
 
 

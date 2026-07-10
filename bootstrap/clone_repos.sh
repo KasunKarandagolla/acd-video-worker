@@ -3,38 +3,63 @@ set -e
 
 mkdir -p external locks
 
-echo "=== Cloning/Updating Hermes-Agent ==="
-if [ -d "external/Hermes-Agent/.git" ]; then
-    echo "Hermes-Agent already cloned, pulling latest..."
-    cd external/Hermes-Agent
-    git pull --ff-only 2>&1 || echo "WARN: could not fast-forward pull, skipping"
-    cd ../..
-else
-    echo "Cloning Hermes-Agent..."
-    git clone https://github.com/NousResearch/Hermes-Agent.git external/Hermes-Agent
+PINNED_FILE="locks/pinned_versions.json"
+if [ ! -f "$PINNED_FILE" ]; then
+    echo "ERROR: Pinned versions file not found: $PINNED_FILE"
+    exit 1
 fi
 
-HERMES_COMMIT=$(cd external/Hermes-Agent && git rev-parse HEAD 2>/dev/null || echo "unknown")
-echo "$HERMES_COMMIT" > locks/HERMES_AGENT_PINNED_COMMIT.txt
-echo "Hermes-Agent pinned commit: $HERMES_COMMIT"
+read_pinned_revision() {
+    local key="$1"
+    python3 -c "
+import json
+with open('$PINNED_FILE') as f:
+    cfg = json.load(f)
+print(cfg['$key']['revision'])
+"
+}
 
-echo ""
-echo "=== Cloning/Updating OpenMontage ==="
-if [ -d "external/OpenMontage/.git" ]; then
-    echo "OpenMontage already cloned, pulling latest..."
-    cd external/OpenMontage
-    git pull --ff-only 2>&1 || echo "WARN: could not fast-forward pull, skipping"
-    cd ../..
-else
-    echo "Cloning OpenMontage..."
-    git clone https://github.com/calesthio/OpenMontage.git external/OpenMontage
-fi
+pin_repo() {
+    local name="$1"
+    local dir="external/$name"
+    local key="$2"
+    local url="$3"
 
-OPENMONTAGE_COMMIT=$(cd external/OpenMontage && git rev-parse HEAD 2>/dev/null || echo "unknown")
-echo "$OPENMONTAGE_COMMIT" > locks/OPENMONTAGE_PINNED_COMMIT.txt
-echo "OpenMontage pinned commit: $OPENMONTAGE_COMMIT"
+    local REVISION
+    REVISION=$(read_pinned_revision "$key")
 
-echo ""
+    echo "=== $name (pinned to $REVISION) ==="
+
+    if [ -d "$dir/.git" ]; then
+        echo "Already cloned, fetching..."
+        git -C "$dir" fetch --tags --force origin 2>&1
+    else
+        echo "Cloning..."
+        git clone "$url" "$dir"
+    fi
+
+    git -C "$dir" checkout --detach "$REVISION" 2>&1
+
+    local HEAD_REV
+    HEAD_REV=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "")
+
+    if [ "$HEAD_REV" != "$REVISION" ]; then
+        echo "ERROR: $name revision mismatch!"
+        echo "  Expected: $REVISION"
+        echo "  Got:      $HEAD_REV"
+        exit 1
+    fi
+
+    echo "$HEAD_REV" > "locks/${name}_PINNED_COMMIT.txt"
+    echo "$name pinned commit: $HEAD_REV (verified)"
+    echo ""
+}
+
+HERMES_URL="https://github.com/NousResearch/Hermes-Agent.git"
+OM_URL="https://github.com/calesthio/OpenMontage.git"
+
+pin_repo "Hermes-Agent" "hermes_agent" "$HERMES_URL"
+pin_repo "OpenMontage" "open_montage" "$OM_URL"
+
 echo "Clone/update complete."
-echo "Hermes-Agent: $HERMES_COMMIT"
-echo "OpenMontage: $OPENMONTAGE_COMMIT"
+echo "All repos pinned to their locked revisions."

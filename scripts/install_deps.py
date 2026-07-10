@@ -216,7 +216,7 @@ def main() -> int:
                 f"Hermes requirements install failed: {r.stderr.strip()[:300]}"
             )
 
-    extra_pkgs = ["openai", "pydantic", "pyyaml", "requests", "jsonschema"]
+    extra_pkgs = ["openai", "pydantic", "pyyaml", "requests", "jsonschema", "wrapt"]
     cmd = [str(python_bin), "-m", "pip", "install"] + extra_pkgs
     dep_cmds.append(" ".join(cmd))
     r = _run_pip(python_bin, ["install"] + extra_pkgs)
@@ -248,6 +248,55 @@ def main() -> int:
         )
         _write_report(report)
         print(f"ERROR: {report['safe_error_summary']}")
+        return 1
+
+    print("Verifying Hermes venv imports...")
+    venv_python = str(python_bin)
+    hermes_repo_str = str(HERMES_REPO)
+    verify_results = {}
+
+    for mod_name in ["wrapt"]:
+        r = subprocess.run(
+            [venv_python, "-c", f"import {mod_name}; print({mod_name}.__version__)"],
+            capture_output=True, text=True, timeout=15
+        )
+        verify_results[f"{mod_name}_importable"] = r.returncode == 0
+        verify_results[f"{mod_name}_detail"] = r.stdout.strip() if r.returncode == 0 else r.stderr.strip()[:200]
+
+    r = subprocess.run(
+        [venv_python, "-c",
+         f"import sys; sys.path.insert(0, '{hermes_repo_str}');\n"
+         f"from run_agent import AIAgent;\n"
+         f"print(f'OK: {{AIAgent.__module__}}')"],
+        capture_output=True, text=True, timeout=15
+    )
+    verify_results["run_agent_importable"] = r.returncode == 0
+    verify_results["run_agent_detail"] = r.stdout.strip()[:200] if r.returncode == 0 else r.stderr.strip()[:200]
+
+    r = subprocess.run(
+        [venv_python, "-c",
+         f"import sys; sys.path.insert(0, '{hermes_repo_str}');\n"
+         f"from run_agent import AIAgent;\n"
+         f"print('AIAgent OK')"],
+        capture_output=True, text=True, timeout=15
+    )
+    verify_results["aiagent_importable"] = r.returncode == 0
+    verify_results["aiagent_detail"] = r.stdout.strip()[:200] if r.returncode == 0 else r.stderr.strip()[:200]
+
+    report["venv_import_verification"] = verify_results
+
+    if not verify_results.get("wrapt_importable"):
+        report["final_status"] = "failed"
+        report["safe_error_summary"] = "wrapt not importable in Hermes venv"
+        _write_report(report)
+        print(f"ERROR: wrapt not importable in Hermes venv")
+        return 1
+
+    if not verify_results.get("aiagent_importable"):
+        report["final_status"] = "failed"
+        report["safe_error_summary"] = f"AIAgent not importable in Hermes venv: {verify_results.get('aiagent_detail', '')}"
+        _write_report(report)
+        print(f"ERROR: AIAgent not importable in Hermes venv")
         return 1
 
     report["final_status"] = "complete"
