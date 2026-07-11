@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Dict, List
 
 from .source.discovery import SourceCandidate
 from .source.acquisition import AcquiredSource, AcquisitionAttempt
@@ -237,9 +237,10 @@ class CheckpointManager:
 class ArtifactValidator:
     """Validates artifacts against schemas."""
     
-    def __init__(self, openmontage_schemas_path: Path):
+    def __init__(self, openmontage_schemas_path: Path, strict_mode: bool = True):
         self.schemas_path = openmontage_schemas_path
         self._schema_cache: dict[str, dict] = {}
+        self.strict_mode = strict_mode
     
     def _load_schema(self, artifact_name: str) -> Optional[dict]:
         """Load JSON schema for artifact."""
@@ -353,6 +354,12 @@ class LoopbackController:
 
 # Skill invocation payloads for each stage
 STAGE_PROMPTS = {
+    StageName.REQUEST: """
+Initialize the production project with the user request.
+Validate the request and create initial project structure.
+Output: project initialized with user_request in state.
+""",
+
     StageName.STORY_UNDERSTANDING: """
 Analyze the user request and produce:
 1. brief_interpretation (emotional_question, tonal_flavor, runtime_target, platform, arc_phases_in_scope)
@@ -503,6 +510,677 @@ class StageResult:
     error: Optional[str] = None
     loopback: Optional[StageName] = None
     metadata: dict = field(default_factory=dict)
+    status: str = "unknown"
+
+
+class FixtureArtifactProvider:
+    """Provides deterministic fixture artifacts for dry-run mode."""
+
+    @staticmethod
+    def get_fixture_artifacts(stage: StageName, project_dir: Path) -> Dict[str, Any]:
+        football_emotion_dir = project_dir / "football_emotion"
+        football_emotion_dir.mkdir(parents=True, exist_ok=True)
+
+        fixtures = {}
+
+        if stage == StageName.STORY_UNDERSTANDING:
+            fixtures["brief_interpretation.json"] = {
+                "emotional_question": "How did Messi overcome pressure to achieve World Cup glory?",
+                "tonal_flavor": "triumphant",
+                "runtime_target": 180,
+                "platform": "youtube_longform",
+                "arc_phases_in_scope": ["cold_open", "setup", "fall", "grind", "turning_point", "triumph_or_payoff", "coda"]
+            }
+            fixtures["story_plan.json"] = {
+                "story_structure": "pain_pressure_comeback_legacy",
+                "hook_pattern": "iconic_image",
+                "target_duration": 180,
+                "sections": [
+                    {"section_id": "pressure_doubt", "timeline_range": "0-30", "emotional_role": "tension", "required_clip_types": ["tunnel_walk", "closeup_face"]},
+                    {"section_id": "grind_struggle", "timeline_range": "30-90", "emotional_role": "struggle", "required_clip_types": ["missed_chance", "defensive_pressure"]},
+                    {"section_id": "turning_point", "timeline_range": "90-150", "emotional_role": "release", "required_clip_types": ["goal", "celebration"]},
+                    {"section_id": "legacy_aftermath", "timeline_range": "150-180", "emotional_role": "meaning", "required_clip_types": ["trophy_lift", "final_image"]}
+                ],
+                "minimum_clip_package": ["tunnel_walk", "missed_chance", "goal", "trophy_lift"]
+            }
+            fixtures["editorial_journey_state.json"] = {
+                "locked_decisions": {"emotional_question": "How did Messi overcome pressure to achieve World Cup glory?"},
+                "current_stage": 1
+            }
+
+        elif stage == StageName.FOOTAGE_REQUIREMENTS:
+            fixtures["footage_requirements.json"] = {
+                "project_id": project_dir.name,
+                "generated_at": datetime.utcnow().isoformat(),
+                "user_request": "Messi World Cup 2022 triumph 30s",
+                "match_context": {"competition": "World Cup 2022", "teams": ["Argentina", "France"], "players": ["Messi", "Mbappe"]},
+                "story_type": "pain_pressure_comeback_legacy",
+                "emotional_arc": ["pain", "context", "pressure", "release", "meaning"],
+                "intended_duration_seconds": 180,
+                "narration_strategy": "hybrid",
+                "platform": "youtube_longform",
+                "requirements": [
+                    {
+                        "slot_id": "req_pressure_01",
+                        "purpose": "Establish pre-match tension via Messi tunnel walk",
+                        "story_section": "pressure_doubt",
+                        "required_emotion": "tension",
+                        "desired_subject": "Messi Argentina",
+                        "desired_action": "tunnel walk focused expression",
+                        "visual_type": "closeup",
+                        "priority": 1,
+                        "minimum_clips": 2,
+                        "search_terms": ["Messi tunnel walk World Cup 2022", "Argentina pre-match pressure"],
+                        "alternative_terms": ["Messi pre-match focus", "World Cup final tunnel"],
+                        "optional": False,
+                        "estimated_duration_seconds": 5.0,
+                        "story_role": "hook_reference",
+                        "platform_considerations": {"aspect_ratio": "16:9"}
+                    },
+                    {
+                        "slot_id": "req_celebration_01",
+                        "purpose": "Show World Cup trophy lift moment",
+                        "story_section": "legacy_aftermath",
+                        "required_emotion": "triumph",
+                        "desired_subject": "Messi Argentina",
+                        "desired_action": "lifting trophy celebration",
+                        "visual_type": "wide",
+                        "priority": 1,
+                        "minimum_clips": 1,
+                        "search_terms": ["Messi lifting World Cup trophy 2022", "Argentina champions celebration"],
+                        "alternative_terms": ["Messi trophy lift", "World Cup 2022 final celebration"],
+                        "optional": False,
+                        "estimated_duration_seconds": 8.0,
+                        "story_role": "source_clip",
+                        "platform_considerations": {"aspect_ratio": "16:9"}
+                    }
+                ]
+            }
+
+        elif stage == StageName.FOOTAGE_DISCOVERY:
+            fixtures["source_candidates.json"] = {
+                "req_pressure_01": [
+                    {
+                        "candidate_id": "req_pressure_01_abc123",
+                        "url": "https://youtu.be/abc123",
+                        "video_id": "abc123",
+                        "title": "Messi Tunnel Walk World Cup 2022 Final",
+                        "channel": "FIFA",
+                        "duration": 120,
+                        "upload_date": "20221218",
+                        "thumbnail": "",
+                        "query": "Messi tunnel walk World Cup 2022",
+                        "story_slot": "req_pressure_01",
+                        "ranking_score": 8.5,
+                        "verification_status": "unverified",
+                        "discovery_method": "yt_dlp_search",
+                        "metadata_confidence": "high",
+                        "deep_analysis_candidate": "yes"
+                    }
+                ],
+                "req_celebration_01": [
+                    {
+                        "candidate_id": "req_celebration_01_def456",
+                        "url": "https://youtu.be/def456",
+                        "video_id": "def456",
+                        "title": "Argentina World Cup 2022 Trophy Lift Celebration",
+                        "channel": "FIFA",
+                        "duration": 300,
+                        "upload_date": "20221218",
+                        "thumbnail": "",
+                        "query": "Messi lifting World Cup trophy 2022",
+                        "story_slot": "req_celebration_01",
+                        "ranking_score": 9.0,
+                        "verification_status": "unverified",
+                        "discovery_method": "yt_dlp_search",
+                        "metadata_confidence": "high",
+                        "deep_analysis_candidate": "yes"
+                    }
+                ]
+            }
+
+        elif stage == StageName.FOOTAGE_ACQUISITION:
+            sources_dir = project_dir / "football_emotion" / "sources"
+            sources_dir.mkdir(parents=True, exist_ok=True)
+
+            fixtures["source_media_review.json"] = {
+                "files": [
+                    {
+                        "path": "football_emotion/sources/req_pressure_01_abc123.mp4",
+                        "media_type": "video",
+                        "reviewed": True,
+                        "technical_probe": {
+                            "duration_seconds": 120.5,
+                            "width": 1920,
+                            "height": 1080,
+                            "video_codec": "h264",
+                            "audio_codec": "aac",
+                            "sample_rate": 44100,
+                            "channels": 2,
+                            "bitrate_kbps": 5000
+                        },
+                        "content_summary": "Messi walking through tunnel, focused expression",
+                        "transcript_summary": "Stadium ambience, crowd murmur",
+                        "representative_frames": [],
+                        "quality_risks": [],
+                        "usable_for": ["hero_footage", "b_roll"],
+                        "verification_status": "verified",
+                        "acquisition_attempt": 1,
+                        "original_candidate_id": "req_pressure_01_abc123",
+                        "source_url": "https://youtu.be/abc123"
+                    },
+                    {
+                        "path": "football_emotion/sources/req_celebration_01_def456.mp4",
+                        "media_type": "video",
+                        "reviewed": True,
+                        "technical_probe": {
+                            "duration_seconds": 45.0,
+                            "width": 1920,
+                            "height": 1080,
+                            "video_codec": "h264",
+                            "audio_codec": "aac",
+                            "sample_rate": 44100,
+                            "channels": 2,
+                            "bitrate_kbps": 6000
+                        },
+                        "content_summary": "Messi lifting World Cup trophy, team celebration",
+                        "transcript_summary": "Commentator: 'Messi lifts the World Cup!' Crowd roars",
+                        "representative_frames": [],
+                        "quality_risks": [],
+                        "usable_for": ["hero_footage", "b_roll"],
+                        "verification_status": "verified",
+                        "acquisition_attempt": 1,
+                        "original_candidate_id": "req_celebration_01_def456",
+                        "source_url": "https://youtu.be/def456"
+                    }
+                ],
+                "summary": "2 sources acquired and verified for Messi World Cup triumph story",
+                "planning_implications": ["All critical slots filled with verified footage"]
+            }
+            fixtures["asset_manifest.json"] = {
+                "assets": [
+                    {
+                        "id": "src_req_pressure_01_abc123",
+                        "type": "video",
+                        "path": "football_emotion/sources/req_pressure_01_abc123.mp4",
+                        "source_tool": "video_downloader",
+                        "scene_id": "req_pressure_01",
+                        "subtype": "source_footage",
+                        "license": "unverified",
+                        "original_url": "https://youtu.be/abc123",
+                        "generation_summary": "Downloaded from YouTube via yt-dlp; verification_status: verified",
+                        "technical_metadata": {
+                            "duration_seconds": 120.5,
+                            "width": 1920,
+                            "height": 1080,
+                            "video_codec": "h264",
+                            "audio_codec": "aac",
+                            "sample_rate": 44100,
+                            "channels": 2
+                        },
+                        "quality_warnings": [],
+                        "file_hash": "abc123hash",
+                        "file_size_bytes": 50000000
+                    },
+                    {
+                        "id": "src_req_celebration_01_def456",
+                        "type": "video",
+                        "path": "football_emotion/sources/req_celebration_01_def456.mp4",
+                        "source_tool": "video_downloader",
+                        "scene_id": "req_celebration_01",
+                        "subtype": "source_footage",
+                        "license": "unverified",
+                        "original_url": "https://youtu.be/def456",
+                        "generation_summary": "Downloaded from YouTube via yt-dlp; verification_status: verified",
+                        "technical_metadata": {
+                            "duration_seconds": 45.0,
+                            "width": 1920,
+                            "height": 1080,
+                            "video_codec": "h264",
+                            "audio_codec": "aac",
+                            "sample_rate": 44100,
+                            "channels": 2
+                        },
+                        "quality_warnings": [],
+                        "file_hash": "def456hash",
+                        "file_size_bytes": 30000000
+                    }
+                ]
+            }
+            fixtures["acquisition_attempts.json"] = []
+
+        elif stage == StageName.VISUAL_ANALYSIS:
+            fixtures["video_scene_analysis.json"] = {
+                "scenes": [
+                    {
+                        "scene_id": "scene_001",
+                        "source_video_id": "abc123",
+                        "source_timestamp_start": "00:00:10",
+                        "source_timestamp_end": "00:00:20",
+                        "editor_timeline_role": "hook",
+                        "scene_type": "tunnel_walk",
+                        "visual_description": "Messi walking through tunnel, focused expression, Argentina jersey",
+                        "audio_description": "Stadium ambience, distant crowd",
+                        "editing_technique_observed": "steady_cam_follow",
+                        "emotional_purpose": "establish_tension",
+                        "confidence": "high",
+                        "manual_review_needed": False
+                    },
+                    {
+                        "scene_id": "scene_002",
+                        "source_video_id": "def456",
+                        "source_timestamp_start": "00:00:05",
+                        "source_timestamp_end": "00:00:15",
+                        "editor_timeline_role": "climax",
+                        "scene_type": "trophy_lift",
+                        "visual_description": "Messi lifting World Cup trophy, confetti, teammates cheering",
+                        "audio_description": "Commentator excitement, crowd roar",
+                        "editing_technique_observed": "wide_celebration_shot",
+                        "emotional_purpose": "triumphant_release",
+                        "confidence": "high",
+                        "manual_review_needed": False
+                    }
+                ]
+            }
+
+        elif stage == StageName.TIMESTAMP_EXTRACTION:
+            fixtures["clip_candidates.json"] = {
+                "clips": [
+                    {
+                        "clip_id": "clip_001",
+                        "source_video_id": "abc123",
+                        "source_range": "00:00:10-00:00:15",
+                        "topic_match": "tunnel_walk",
+                        "scene_type": "tunnel_walk",
+                        "emotional_role": "hook",
+                        "visual_signs": ["focused_expression", "argentina_jersey"],
+                        "audio_signs": ["stadium_ambience"],
+                        "story_relevance": "high",
+                        "rights_risk": "low",
+                        "verification_status": "verified",
+                        "editor_timeline_role": "hook",
+                        "recommended_use": "hook"
+                    },
+                    {
+                        "clip_id": "clip_002",
+                        "source_video_id": "def456",
+                        "source_range": "00:00:05-00:00:13",
+                        "topic_match": "trophy_lift",
+                        "scene_type": "celebration",
+                        "emotional_role": "climax",
+                        "visual_signs": ["trophy", "confetti", "teammates"],
+                        "audio_signs": ["commentator", "crowd_roar"],
+                        "story_relevance": "high",
+                        "rights_risk": "low",
+                        "verification_status": "verified",
+                        "editor_timeline_role": "climax",
+                        "recommended_use": "climax"
+                    }
+                ]
+            }
+
+        elif stage == StageName.CLIP_SCORING:
+            fixtures["clip_scores.json"] = {
+                "clips": [
+                    {
+                        "clip_id": "clip_001",
+                        "scores": {
+                            "emotional_strength_2": 2,
+                            "visual_clarity_2": 2,
+                            "story_relevance_2": 2,
+                            "audio_commentary_value_1": 1,
+                            "uniqueness_1": 1,
+                            "editability_1": 1,
+                            "rights_reused_content_risk_1": 1
+                        },
+                        "total_10": 10,
+                        "recommended_use": "hook"
+                    },
+                    {
+                        "clip_id": "clip_002",
+                        "scores": {
+                            "emotional_strength_2": 2,
+                            "visual_clarity_2": 2,
+                            "story_relevance_2": 2,
+                            "audio_commentary_value_1": 1,
+                            "uniqueness_1": 1,
+                            "editability_1": 1,
+                            "rights_reused_content_risk_1": 1
+                        },
+                        "total_10": 10,
+                        "recommended_use": "climax"
+                    }
+                ]
+            }
+
+        elif stage == StageName.NARRATION:
+            fixtures["narration_script.json"] = {
+                "segments": [
+                    {
+                        "segment_id": "seg_001",
+                        "clip_id": "clip_001",
+                        "text": "Before the glory, there was the walk. Alone with the weight of a nation.",
+                        "start_seconds": 0,
+                        "end_seconds": 5
+                    },
+                    {
+                        "segment_id": "seg_002",
+                        "clip_id": "clip_002",
+                        "text": "And then, the moment arrived. Messi lifts the World Cup. A legacy complete.",
+                        "start_seconds": 5,
+                        "end_seconds": 15
+                    }
+                ]
+            }
+
+        elif stage == StageName.AUDIO_PLAN:
+            fixtures["audio_plan.json"] = {
+                "music": {
+                    "track_id": "music_001",
+                    "title": "Epic Orchestral Build",
+                    "source": "YouTube Audio Library",
+                    "license": "cc_by",
+                    "mood": "triumphant",
+                    "sections": [
+                        {"section": "pressure_doubt", "action": "low_tension_bed", "volume_db": -25},
+                        {"section": "grind_struggle", "action": "build_intensity", "volume_db": -20},
+                        {"section": "turning_point", "action": "full_mix", "volume_db": -15},
+                        {"section": "legacy_aftermath", "action": "warm_resolution", "volume_db": -18}
+                    ]
+                },
+                "narration": {
+                    "enabled": True,
+                    "voice": "narrator",
+                    "ducking": {"threshold_db": -20, "reduction_db": 12}
+                },
+                "sfx": []
+            }
+            fixtures["license_verification_records.json"] = []
+
+        elif stage == StageName.EDIT_PLAN:
+            fixtures["openmontage_edit_plan.json"] = {
+                "version": "1.0",
+                "sections": [
+                    {
+                        "section_id": "pressure_doubt",
+                        "timeline_range": "0-5",
+                        "clips": ["clip_001"],
+                        "cut_style": "slow_reveal",
+                        "transition_in": "fade_from_black",
+                        "transition_out": "hard_cut",
+                        "speed": "normal",
+                        "effect": "subtle_zoom",
+                        "reason": "Establish tension through slow reveal"
+                    },
+                    {
+                        "section_id": "legacy_aftermath",
+                        "timeline_range": "5-15",
+                        "clips": ["clip_002"],
+                        "cut_style": "impact",
+                        "transition_in": "hard_cut",
+                        "transition_out": "fade_to_black",
+                        "speed": "normal",
+                        "effect": "none",
+                        "reason": "Climactic release"
+                    }
+                ],
+                "renderer_family": "documentary-montage",
+                "render_runtime": "remotion",
+                "composition_mode": "templated"
+            }
+            fixtures["openmontage_audio_operations.json"] = {
+                "tracks": [
+                    {
+                        "track_type": "narration",
+                        "clips": [
+                            {"asset_id": "narration_seg_001", "start_time": 0, "end_time": 5},
+                            {"asset_id": "narration_seg_002", "start_time": 5, "end_time": 15}
+                        ]
+                    },
+                    {
+                        "track_type": "music",
+                        "clips": [
+                            {"asset_id": "music_001", "start_time": 0, "end_time": 15, "volume_db": -20, "fade_in": 1.0, "fade_out": 1.0, "ducking": {"enabled": True, "threshold_db": -20, "reduction_db": 12}}
+                        ]
+                    }
+                ],
+                "subtitles": []
+            }
+            fixtures["assembly_plan.json"] = {}
+
+        elif stage == StageName.OPENMONTAGE_IDEA:
+            fixtures["brief.json"] = {
+                "thematic_question": "How did Messi overcome pressure to achieve World Cup glory?",
+                "tone": "triumphant",
+                "duration_seconds": 15,
+                "music_plan": {
+                    "source": "library",
+                    "mood": "triumphant",
+                    "pacing": "build_to_climax"
+                },
+                "end_tag_plan": {
+                    "text": "The moment that defined a legacy.",
+                    "palette": "warm_gold",
+                    "duration_seconds": 3,
+                    "mode": "overlay"
+                },
+                "narration_plan": {
+                    "enabled": True,
+                    "style": "poetic_commentary",
+                    "voice": "narrator"
+                }
+            }
+
+        elif stage == StageName.OPENMONTAGE_SCENE_PLAN:
+            fixtures["scene_plan.json"] = {
+                "metadata": {
+                    "slot_count": 2,
+                    "total_target_seconds": 15,
+                    "era_mix": "contemporary"
+                },
+                "slots": [
+                    {
+                        "slot_id": "req_pressure_01",
+                        "description": "Establish pre-match tension via Messi tunnel walk",
+                        "target_hold_seconds": 5,
+                        "search_queries": ["Messi tunnel walk World Cup 2022"],
+                        "preferred_sources": ["youtube"],
+                        "hero": True,
+                        "visual_type": "closeup",
+                        "emotional_role": "tension",
+                        "required": True
+                    },
+                    {
+                        "slot_id": "req_celebration_01",
+                        "description": "Show World Cup trophy lift moment",
+                        "target_hold_seconds": 10,
+                        "search_queries": ["Messi lifting World Cup trophy 2022"],
+                        "preferred_sources": ["youtube"],
+                        "hero": True,
+                        "visual_type": "wide",
+                        "emotional_role": "triumph",
+                        "required": True
+                    }
+                ]
+            }
+
+        elif stage == StageName.OPENMONTAGE_ASSETS:
+            fixtures["asset_manifest.json"] = {
+                "assets": [
+                    {
+                        "id": "src_req_pressure_01_abc123",
+                        "type": "video",
+                        "path": "football_emotion/sources/req_pressure_01_abc123.mp4",
+                        "source_tool": "video_downloader",
+                        "scene_id": "req_pressure_01",
+                        "subtype": "source_footage",
+                        "license": "unverified",
+                        "original_url": "https://youtu.be/abc123",
+                        "generation_summary": "Downloaded from YouTube via yt-dlp; verification_status: verified",
+                        "technical_metadata": {"duration_seconds": 120.5, "width": 1920, "height": 1080},
+                        "quality_warnings": [],
+                        "file_hash": "abc123hash",
+                        "file_size_bytes": 50000000
+                    },
+                    {
+                        "id": "src_req_celebration_01_def456",
+                        "type": "video",
+                        "path": "football_emotion/sources/req_celebration_01_def456.mp4",
+                        "source_tool": "video_downloader",
+                        "scene_id": "req_celebration_01",
+                        "subtype": "source_footage",
+                        "license": "unverified",
+                        "original_url": "https://youtu.be/def456",
+                        "generation_summary": "Downloaded from YouTube via yt-dlp; verification_status: verified",
+                        "technical_metadata": {"duration_seconds": 45.0, "width": 1920, "height": 1080},
+                        "quality_warnings": [],
+                        "file_hash": "def456hash",
+                        "file_size_bytes": 30000000
+                    }
+                ]
+            }
+
+        elif stage == StageName.OPENMONTAGE_EDIT:
+            fixtures["edit_decisions.json"] = {
+                "version": "1.0",
+                "cuts": [
+                    {
+                        "id": "pressure_doubt_clip_001",
+                        "source": "football_emotion/sources/req_pressure_01_abc123.mp4",
+                        "in_seconds": 10.0,
+                        "out_seconds": 15.0,
+                        "speed": 1.0,
+                        "layer": "primary",
+                        "transform": {"animation": "ken-burns-slow-zoom"},
+                        "transition_in": "fade_from_black",
+                        "transition_out": "hard_cut",
+                        "reason": "Establish tension through slow reveal"
+                    },
+                    {
+                        "id": "legacy_aftermath_clip_002",
+                        "source": "football_emotion/sources/req_celebration_01_def456.mp4",
+                        "in_seconds": 5.0,
+                        "out_seconds": 15.0,
+                        "speed": 1.0,
+                        "layer": "primary",
+                        "transform": {"animation": "none"},
+                        "transition_in": "hard_cut",
+                        "transition_out": "fade_to_black",
+                        "reason": "Climactic release"
+                    }
+                ],
+                "overlays": [],
+                "audio": {
+                    "narration": {
+                        "segments": [
+                            {"asset_id": "narration_seg_001", "start_seconds": 0, "end_seconds": 5},
+                            {"asset_id": "narration_seg_002", "start_seconds": 5, "end_seconds": 15}
+                        ]
+                    },
+                    "music": {
+                        "asset_id": "music_001",
+                        "volume": 0.1,
+                        "fade_in_seconds": 1.0,
+                        "fade_out_seconds": 1.0,
+                        "ducking": {
+                            "enabled": True,
+                            "threshold_db": -20,
+                            "reduction_db": 12,
+                            "attack_ms": 100,
+                            "release_ms": 300
+                        }
+                    },
+                    "sfx": [],
+                    "subtitles": []
+                },
+                "renderer_family": "documentary-montage",
+                "render_runtime": "remotion",
+                "composition_mode": "templated"
+            }
+
+        elif stage == StageName.OPENMONTAGE_COMPOSE:
+            output_dir = project_dir / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            final_video = output_dir / "final.mp4"
+            final_video.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom")
+
+            fixtures["render_report.json"] = {
+                "version": "1.0",
+                "outputs": [
+                    {
+                        "path": str(final_video),
+                        "format": "mp4",
+                        "codec": "h264",
+                        "audio_codec": "aac",
+                        "resolution": "1920x1080",
+                        "fps": 30,
+                        "duration_seconds": 15.0,
+                        "file_size_bytes": 1000000,
+                        "platform_target": "youtube_longform"
+                    }
+                ],
+                "render_time_seconds": 5.0,
+                "warnings": [],
+                "verification_notes": ["Dry-run synthetic output"],
+                "render_grammar": "documentary-montage",
+                "slideshow_risk_score": {"average": 0.1, "verdict": "low"},
+                "decision_log_ref": "",
+                "final_review_ref": "",
+                "metadata": {"dry_run": True}
+            }
+
+        elif stage == StageName.QUALITY_REVIEW:
+            fixtures["full_qa_report.json"] = {
+                "pass": True,
+                "findings": [],
+                "required_loopbacks": []
+            }
+            fixtures["audio_qc_report.json"] = {
+                "pass": True,
+                "qc_report": {
+                    "integrated_lufs": -14.2,
+                    "true_peak_db": -1.5,
+                    "lra": 5.0
+                }
+            }
+            fixtures["export_profile.json"] = {
+                "pass": True,
+                "export_profile": {
+                    "platform": "youtube_longform",
+                    "aspect_ratio": "16:9",
+                    "resolution": "1920x1080",
+                    "codec": "h264",
+                    "audio_codec": "aac",
+                    "loudness_target_lufs": -14
+                }
+            }
+
+        elif stage == StageName.MEMORY_UPDATE:
+            fixtures["hermes_memory_update.json"] = {
+                "project_id": project_dir.name,
+                "topic": "Messi World Cup 2022 triumph",
+                "story_type": "pain_pressure_comeback_legacy",
+                "short_lessons": [
+                    "Tunnel walk footage essential for pressure establishment",
+                    "Trophy lift wide shot carries maximum emotional release"
+                ],
+                "best_source_types": ["FIFA official broadcast", "tournament highlights"],
+                "successful_hook_pattern": "iconic_image",
+                "successful_audio_pattern": "orchestral_build_to_climax",
+                "clips_to_avoid_next_time": [],
+                "full_project_record_path": f"projects/{project_dir.name}/football_emotion/project_record.json"
+            }
+            fixtures["project_record.json"] = {
+                "project_id": project_dir.name,
+                "run_id": "dry_run",
+                "user_request": "Messi World Cup 2022 triumph 30s",
+                "completed_at": datetime.utcnow().isoformat(),
+                "stages_completed": [s.value for s in STAGE_ORDER],
+                "artifacts_generated": sum(len(STAGE_ARTIFACTS.get(s, [])) for s in STAGE_ORDER),
+                "loopback_count": 0
+            }
+
+        return fixtures
 
 
 class StageOrchestrator:
@@ -519,19 +1197,22 @@ class StageOrchestrator:
         hermes_runner,
         openmontage_runner,
         config: dict,
-        loopback_controller: Optional[LoopbackController] = None
+        loopback_controller: Optional[LoopbackController] = None,
+        dry_run: bool = False
     ):
         self.project_dir = project_dir
         self.hermes_runner = hermes_runner
         self.openmontage_runner = openmontage_runner
         self.config = config
+        self.dry_run = dry_run
         self.loopback = loopback_controller or LoopbackController(
             max_loopbacks=config.get("max_loopbacks", 3)
         )
         
         self.checkpoint_mgr = CheckpointManager(project_dir)
         self.validator = ArtifactValidator(
-            Path(config.get("openmontage_schemas_path", "/home/kasun/Music/Director/acd-video-worker/external/OpenMontage/schemas/artifacts"))
+            Path(config.get("openmontage_schemas_path")) if config.get("openmontage_schemas_path") else self._find_openmontage_schemas(),
+            strict_mode=True
         )
         
         # Load or create project state
@@ -544,6 +1225,8 @@ class StageOrchestrator:
                 created_at=datetime.utcnow().isoformat(),
                 updated_at=datetime.utcnow().isoformat()
             )
+
+        self.fixture_provider = FixtureArtifactProvider()
     
     def get_next_stage(self) -> Optional[StageName]:
         """Get the next stage to execute based on completed stages."""
@@ -580,15 +1263,6 @@ class StageOrchestrator:
         print(f"EXECUTING STAGE: {stage.value}")
         print(f"{'='*60}")
         
-        # Validate inputs
-        valid, errors = self.validate_stage_inputs(stage)
-        if not valid:
-            return StageResult(
-                stage=stage,
-                success=False,
-                error=f"Input validation failed: {errors}"
-            )
-        
         # Create checkpoint for running stage
         checkpoint = StageCheckpoint(
             stage=stage.value,
@@ -599,13 +1273,17 @@ class StageOrchestrator:
         self.checkpoint_mgr.save_stage_checkpoint(self.state, checkpoint)
         
         try:
-            # Get the prompt for this stage
-            prompt = STAGE_PROMPTS.get(stage, "")
-            if not prompt:
+            # Dry-run mode: write fixture artifacts and return success
+            if self.dry_run:
+                return self._execute_dry_run_stage(stage, checkpoint)
+            
+            # Validate inputs
+            valid, errors = self.validate_stage_inputs(stage)
+            if not valid:
                 return StageResult(
                     stage=stage,
                     success=False,
-                    error=f"No prompt defined for stage {stage.value}"
+                    error=f"Input validation failed: {errors}"
                 )
             
             # Build full prompt with context
@@ -614,8 +1292,8 @@ class StageOrchestrator:
             # Execute via Hermes
             result = self.hermes_runner.run_session(full_prompt, context)
             
-            if not result.get("success", False):
-                error = result.get("error", "Unknown error")
+            if not result.success:
+                error = result.error or "Unknown error"
                 checkpoint.status = StageStatus.FAILED.value
                 checkpoint.completed_at = datetime.utcnow().isoformat()
                 checkpoint.error = error
@@ -650,7 +1328,7 @@ class StageOrchestrator:
             checkpoint.status = StageStatus.COMPLETED.value
             checkpoint.completed_at = datetime.utcnow().isoformat()
             checkpoint.output_artifacts = output_artifacts
-            checkpoint.hermes_session_id = result.get("session_id")
+            checkpoint.hermes_session_id = result.session_id
             if checkpoint.hermes_session_id:
                 self.state.hermes_sessions.append(checkpoint.hermes_session_id)
             self.checkpoint_mgr.save_stage_checkpoint(self.state, checkpoint)
@@ -673,7 +1351,41 @@ class StageOrchestrator:
                 success=False,
                 error=str(e)
             )
-    
+            checkpoint.error = str(e)
+            self.checkpoint_mgr.save_stage_checkpoint(self.state, checkpoint)
+            
+            return StageResult(
+                stage=stage,
+                success=False,
+                error=str(e)
+            )
+
+    def _execute_dry_run_stage(self, stage: StageName, checkpoint: StageCheckpoint) -> StageResult:
+        """Execute stage in dry-run mode using fixture artifacts."""
+        fixtures = self.fixture_provider.get_fixture_artifacts(stage, self.project_dir)
+
+        for artifact_name, artifact_data in fixtures.items():
+            artifact_path = self.project_dir / "football_emotion" / artifact_name
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text(json.dumps(artifact_data, indent=2))
+
+        output_artifacts = list(fixtures.keys())
+        checkpoint.status = StageStatus.COMPLETED.value
+        checkpoint.completed_at = datetime.utcnow().isoformat()
+        checkpoint.output_artifacts = output_artifacts
+        checkpoint.hermes_session_id = f"dry_run_{uuid.uuid4().hex[:8]}"
+        self.state.hermes_sessions.append(checkpoint.hermes_session_id)
+        self.checkpoint_mgr.save_stage_checkpoint(self.state, checkpoint)
+
+        print(f"✓ Dry-run stage {stage.value} completed with {len(output_artifacts)} fixture artifacts")
+        return StageResult(
+            stage=stage,
+            success=True,
+            output_artifacts=output_artifacts,
+            metadata={"dry_run": True, "fixture_artifacts": len(fixtures)},
+            status="completed"
+        )
+
     def _build_stage_prompt(self, stage: StageName, base_prompt: str, context: dict) -> str:
         """Build complete prompt with context for Hermes."""
         context_json = json.dumps(context, indent=2)
@@ -866,3 +1578,17 @@ if __name__ == "__main__":
         print(f"Checkpoint loaded: {loaded_checkpoint is not None}")
         
         print("\n✓ All checkpoint tests passed")
+
+    def _find_openmontage_schemas(self) -> Path:
+        """Discover OpenMontage schemas path from repository root."""
+        # Try relative to this file
+        repo_root = Path(__file__).parent.parent.parent
+        candidates = [
+            repo_root / "external" / "OpenMontage" / "schemas" / "artifacts",
+            Path.cwd() / "external" / "OpenMontage" / "schemas" / "artifacts",
+        ]
+        for c in candidates:
+            if c.exists():
+                return c
+        # Fallback - return empty path, validator will fail appropriately
+        return Path("")

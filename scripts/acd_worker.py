@@ -46,15 +46,15 @@ class ACDConfig:
     """Runtime configuration loaded from environment + config files."""
     hermes_home: str = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
     openmontage_projects_dir: str = os.environ.get("OPENMONTAGE_PROJECTS_DIR", 
-                                                    os.path.expanduser("~/OpenMontage/projects"))
+                                                     os.path.expanduser("~/OpenMontage/projects"))
     openmontage_root: str = os.environ.get("OPENMONTAGE_ROOT", 
-                                            "/home/kasun/Music/Director/acd-video-worker/external/OpenMontage")
+                                             str(Path(__file__).parent.parent / "external" / "OpenMontage"))
     hermes_profile: str = "football-emotion"
     discord_webhook_url: str = os.environ.get("DISCORD_WEBHOOK_URL", "")
     log_level: str = "INFO"
     dry_run: bool = False
     max_loopbacks: int = 3
-    render_runtime: str = "ffmpeg"
+    render_runtime: str = "remotion"
     min_candidates_per_slot: int = 3
     tavily_api_key: str = os.environ.get("TAVILY_API_KEY", "")
     
@@ -236,7 +236,8 @@ class ACDWorker:
                 "max_loopbacks": self.config.max_loopbacks,
                 "openmontage_schemas_path": str(Path(self.config.openmontage_root) / "schemas" / "artifacts")
             },
-            loopback_controller=self.loopback_controller
+            loopback_controller=self.loopback_controller,
+            dry_run=self.config.dry_run
         )
         
         # Create or load project state
@@ -320,222 +321,36 @@ class ACDWorker:
     
     def execute_full_workflow(self, user_request: str) -> bool:
         """Execute the complete football video production workflow."""
-        
-        # In dry-run mode, just initialize and return success
-        if self.config.dry_run:
-            self.logger.info("DRY RUN MODE - Initializing project and returning success")
-            self.initialize_project(user_request)
-            self.project_state.status = "completed"
-            self.orchestrator.checkpoint_mgr.save_state(self.project_state)
-            self.logger.info("Dry run completed successfully")
-            return True
-        
+
         self.initialize_project(user_request)
-        
+
         try:
             # Parse user request for context
             context = self._parse_user_request(user_request)
             self.run_metadata.update(context)
-            
-            # ============================================================
-            # STAGE 1: STORY_UNDERSTANDING
-            # ============================================================
-            self.logger.info("\n" + "="*60)
-            self.logger.info("STAGE 1: STORY_UNDERSTANDING")
-            self.logger.info("="*60)
-            
-            result = self._run_story_understanding(context)
-            if not result.success:
-                self._fail_workflow(f"Story understanding failed: {result.error}")
-                return False
-            
-            # ============================================================
-            # STAGE 2: FOOTAGE_REQUIREMENTS (Dynamic, Hermes-generated)
-            # ============================================================
-            self.logger.info("\n" + "="*60)
-            self.logger.info("STAGE 2: FOOTAGE_REQUIREMENTS")
-            self.logger.info("="*60)
-            
-            footage_reqs = self._generate_footage_requirements(context)
-            if not footage_reqs:
-                self._fail_workflow("Footage requirements generation failed")
-                return False
-            
-            # ============================================================
-            # STAGE 3: FOOTAGE_DISCOVERY (with fallback)
-            # ============================================================
-            self.logger.info("\n" + "="*60)
-            self.logger.info("STAGE 3: FOOTAGE_DISCOVERY")
-            self.logger.info("="*60)
-            
-            source_candidates = self._run_footage_discovery(footage_reqs, context)
-            if not source_candidates:
-                self._fail_workflow("Footage discovery failed - no candidates found")
-                return False
-            
-            # ============================================================
-            # STAGE 4: VISUAL_ANALYSIS
-            # ============================================================
-            self.logger.info("\n" + "="*60)
-            self.logger.info("STAGE 4: VISUAL_ANALYSIS")
-            self.logger.info("="*60)
-            
-            scene_analysis = self._run_visual_analysis(source_candidates)
-            if not scene_analysis:
-                self._fail_workflow("Visual analysis failed")
-                return False
-            
-            # ============================================================
-            # STAGE 5: TIMESTAMP_EXTRACTION
-            # ============================================================
-            self.logger.info("\n" + "="*60)
-            self.logger.info("STAGE 5: TIMESTAMP_EXTRACTION")
-            self.logger.info("="*60)
-            
-            clip_candidates = self._run_timestamp_extraction(scene_analysis)
-            if not clip_candidates:
-                self._fail_workflow("Timestamp extraction failed")
-                return False
-            
-            # ============================================================
-            # STAGE 6: CLIP_SCORING
-            # ============================================================
-            self.logger.info("\n" + "="*60)
-            self.logger.info("STAGE 6: CLIP_SCORING")
-            self.logger.info("="*60)
-            
-            clip_scores = self._run_clip_scoring(clip_candidates, context)
-            if not clip_scores:
-                self._fail_workflow("Clip scoring failed")
-                return False
-            
-            # ============================================================
-            # STAGE 7: FOOTAGE_ACQUISITION
-            # ============================================================
-            self.logger.info("\n" + "="*60)
-            self.logger.info("STAGE 7: FOOTAGE_ACQUISITION")
-            self.logger.info("="*60)
-            
-            source_media_review, asset_manifest = self._run_footage_acquisition(
-                clip_scores, footage_reqs
-            )
-            if not source_media_review:
-                self._fail_workflow("Footage acquisition failed")
-                return False
-            
-            # Discord: sourcing completed
-            clips_acquired = len(source_media_review.get("files", []))
-            self.discord.sourcing_completed(
-                self.project_state.project_id,
-                len(source_candidates),
-                clips_acquired
-            )
-            
-            # ============================================================
-            # STAGE 8-12: OPENMONTAGE PIPELINE
-            # ============================================================
-            self.logger.info("\n" + "="*60)
-            self.logger.info("STAGES 8-12: OPENMONTAGE PIPELINE")
-            self.logger.info("="*60)
-            
-            self.discord.editing_started(self.project_state.project_id)
-            
-            # Verify schema lock before native artifacts
-            if not self.run_schema_lock_verification():
-                self._fail_workflow("Schema lock verification failed")
-                return False
-            
-            # Build adapter-facing plans from scored clips
-            openmontage_edit_plan, openmontage_audio_ops = self._build_openmontage_plans(
-                clip_scores, footage_reqs, context
-            )
-            
-            # Run OpenMontage pipeline
-            om_results = self.openmontage_runner.run_full_pipeline(
-                brief_interpretation=self._load_artifact("brief_interpretation.json"),
-                footage_requirements=footage_reqs.to_dict() if hasattr(footage_reqs, 'to_dict') else footage_reqs,
-                clip_scores=clip_scores,
-                source_media_review=source_media_review,
-                asset_manifest=asset_manifest,
-                openmontage_edit_plan=openmontage_edit_plan,
-                openmontage_audio_operations=openmontage_audio_ops
-            )
-            
-            # Check compose stage result
-            compose_result = next((r for r in om_results if r.stage == "compose"), None)
-            if not compose_result or not compose_result.success:
-                self.discord.render_failed(
+
+            # Execute via canonical orchestrator
+            result = self.orchestrator.run_pipeline(user_request, self.run_metadata)
+
+            if result.success:
+                duration = (datetime.utcnow() - self.start_time).total_seconds()
+                output_path = self.project_state.output_path or "unknown"
+
+                self.discord.run_completed(
                     self.project_state.project_id,
-                    compose_result.error if compose_result else "Unknown compose error"
+                    output_path,
+                    self.run_id,
+                    duration
                 )
-                self._fail_workflow("OpenMontage compose failed")
+
+                self.logger.info(f"\n✅ Production completed successfully!")
+                self.logger.info(f"Output: {output_path}")
+                self.logger.info(f"Duration: {duration:.0f}s")
+                return True
+            else:
+                self._fail_workflow(f"Pipeline failed: {result.error}")
                 return False
-            
-            final_video = compose_result.artifacts.get("final_video")
-            
-            # ============================================================
-            # STAGE 13: QUALITY_REVIEW
-            # ============================================================
-            self.logger.info("\n" + "="*60)
-            self.logger.info("STAGE 13: QUALITY_REVIEW")
-            self.logger.info("="*60)
-            
-            qa_passed, qa_failures = self._run_quality_review()
-            if not qa_passed:
-                self.discord.quality_review_failed(self.project_state.project_id, qa_failures)
-                # Attempt loopbacks
-                for failure in qa_failures:
-                    target_stage = self.loopback_controller.get_target_stage(failure)
-                    if target_stage and self.loopback_controller.should_loopback(failure):
-                        self.discord.loopback_triggered(
-                            self.project_state.project_id,
-                            "quality_review",
-                            target_stage.value,
-                            failure
-                        )
-                        # In a full implementation, we'd loop back here
-                        # For Session 4, we report and continue
-                
-                self._fail_workflow(f"Quality review failed: {qa_failures}")
-                return False
-            
-            # ============================================================
-            # STAGE 14: DELIVERY
-            # ============================================================
-            self.logger.info("\n" + "="*60)
-            self.logger.info("STAGE 14: DELIVERY")
-            self.logger.info("="*60)
-            
-            output_path = self._finalize_delivery(final_video)
-            
-            # ============================================================
-            # STAGE 15: MEMORY_UPDATE
-            # ============================================================
-            self.logger.info("\n" + "="*60)
-            self.logger.info("STAGE 15: MEMORY_UPDATE")
-            self.logger.info("="*60)
-            
-            self._run_memory_update()
-            
-            # Complete
-            duration = (datetime.utcnow() - self.start_time).total_seconds()
-            self.discord.run_completed(
-                self.project_state.project_id,
-                output_path,
-                self.run_id,
-                duration
-            )
-            
-            self.project_state.status = "completed"
-            self.project_state.output_path = output_path
-            self.orchestrator.checkpoint_mgr.save_state(self.project_state)
-            
-            self.logger.info(f"\n✅ Production completed successfully!")
-            self.logger.info(f"Output: {output_path}")
-            self.logger.info(f"Duration: {duration:.0f}s")
-            
-            return True
-            
+
         except Exception as e:
             self.logger.exception("Workflow exception")
             self._fail_workflow(f"Workflow exception: {e}")
