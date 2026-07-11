@@ -1,7 +1,7 @@
 """
 OpenMontage Runner — Executes the documentary-montage pipeline stages.
 
-Handles the OpenMontage pipeline execution via direct tool invocation,
+Handles the OpenMontage pipeline execution via the real tool registry interface,
 with proper manifest loading, stage director skill reading, tool registry
 discovery, and schema-locked artifact production.
 """
@@ -9,6 +9,7 @@ discovery, and schema-locked artifact production.
 import json
 import os
 import subprocess
+import sys
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -32,7 +33,8 @@ class OpenMontageRunner:
     Runs the OpenMontage documentary-montage pipeline stages.
 
     Each stage corresponds to a stage director skill in the pipeline.
-    We invoke these via direct Python module calls to OpenMontage tools.
+    We invoke these via the real OpenMontage tool registry, executing
+    the video_compose tool directly through its execute() method.
     """
 
     PIPELINE_NAME = "documentary-montage"
@@ -69,17 +71,53 @@ class OpenMontageRunner:
         self.output_dir = self.om_project_dir / "output"
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Render runtime (locked to ffmpeg for Kaggle)
-        self.render_runtime = config.get("render_runtime", "ffmpeg")
+# Render runtime - must be Remotion for documentary-montage per compose-director
+        # If Remotion unavailable, fail with BLOCKED_BY_ENVIRONMENT
+        self.render_runtime = config.get("render_runtime", "remotion")
 
         # Schema lock verification
         self.schema_lock_verified = False
 
-    def verify_schema_lock(self) -> tuple[bool, List[str]]:
+        # Tool registry cache
+        self._video_compose_tool = None
+
+    def _get_openmontage_python(self) -> str:
+        """Get the OpenMontage virtualenv Python path."""
+        venv_python = self.om_root / ".venv" / "bin" / "python"
+        if venv_python.exists():
+            return str(venv_python)
+        return "python3"
+
+    def _get_video_compose_tool(self):
+        """Get or create the video_compose tool instance."""
+        if self._video_compose_tool is not None:
+            return self._video_compose_tool
+
+        # Add OpenMontage to path
+        sys.path.insert(0, str(self.om_root))
+        sys.path.insert(0, str(self.om_root / "tools"))
+
+        from tools.video.video_compose import VideoCompose
+        self._video_compose_tool = VideoCompose()
+        return self._video_compose_tool
+
+    def _check_remotion_available(self) -> tuple[bool, str]:
+        """Check if Remotion runtime is available for documentary-montage pipeline."""
+        tool = self._get_video_compose_tool()
+        if tool._remotion_available():
+            return True, ""
+        return False, (
+            "Remotion runtime required for documentary-montage pipeline but not available. "
+            "Ensure Node.js >= 22, npx, and remotion-composer with node_modules are installed. "
+            "Run: cd remotion-composer && npm install"
+        )
+
+    def verify_schema_lock(self) -> tuple[bool, list[str]]:
         """Verify OpenMontage schema lock before producing native artifacts."""
         if self.schema_lock_verified:
             return True, []
 
+        # Check that openmontage_schema_lock.bridge_status is "passed"
         lock_file = self.project_dir / "football_emotion" / "openmontage_schema_lock.json"
         if lock_file.exists():
             try:
@@ -116,6 +154,7 @@ class OpenMontageRunner:
                 f"Platform: {brief_interpretation.get('platform', 'youtube_longform')}"
             ],
             "core_message": brief_interpretation.get("emotional_question", ""),
+            "thematic_question": brief_interpretation.get("emotional_question", "What makes this moment matter?"),
             "tone": brief_interpretation.get("tonal_flavor", "triumphant"),
             "style": "documentary-montage",
             "target_audience": "football fans",
@@ -299,42 +338,55 @@ class OpenMontageRunner:
         """
         Run the compose-director stage.
 
-        Renders final video using FFmpeg (locked runtime).
+        Renders final video using the real OpenMontage video_compose tool.
+        For documentary-montage, this MUST use Remotion runtime per pipeline contract.
         """
         start = datetime.utcnow()
 
         output_file = self.output_dir / "final.mp4"
 
-        # Build compose command using OpenMontage's video_compose tool
-        venv_python = self.om_root / ".venv" / "bin" / "python"
-        if not venv_python.exists():
-            venv_python = Path("python3")
+        # Verify schema lock
+        lock_ok, errors = self.verify_schema_lock()
+        if not lock_ok:
+            return OpenMontageStageResult(
+                stage="compose",
+                success=False,
+                error=f"Schema lock not verified: {errors}"
+            )
 
-        compose_cmd = [
-            str(venv_python), "-m", "tools.compose.video_compose",
-            "--project-dir", str(self.om_project_dir),
-            "--render-runtime", self.render_runtime,
-            "--output", str(output_file)
-        ]
+        # Check Remotion availability (REQUIRED for documentary-montage)
+        remotion_ok, remotion_error = self._check_remotion_available()
+        if not remotion_ok:
+            return OpenMontageStageResult(
+                stage="compose",
+                success=False,
+                error=f"BLOCKED_BY_ENVIRONMENT: {remotion_error}",
+                duration_seconds=(datetime.utcnow() - start).total_seconds()
+            )
 
-        print(f"[OpenMontageRunner] Running compose: {' '.join(compose_cmd)}")
+        # Prepare inputs for video_compose.execute()
+        compose_inputs = {
+            "operation": "compose",
+            "edit_decisions": edit_decisions,
+            "asset_manifest": asset_manifest,
+            "output_path": str(output_file),
+            "profile": "youtube_longform",
+        }
+
+        # Get the video_compose tool
+        tool = self._get_video_compose_tool()
 
         try:
-            result = subprocess.run(
-                compose_cmd,
-                cwd=self.om_root,
-                capture_output=True,
-                text=True,
-                timeout=600
-            )
+            # Execute the tool directly (runs in current process)
+            result = tool.execute(compose_inputs)
 
             duration = (datetime.utcnow() - start).total_seconds()
 
-            if result.returncode != 0:
+            if not result.success:
                 return OpenMontageStageResult(
                     stage="compose",
                     success=False,
-                    error=f"Compose failed (exit {result.returncode}): {result.stderr}",
+                    error=f"Compose failed: {result.error}",
                     duration_seconds=duration
                 )
 
@@ -361,13 +413,6 @@ class OpenMontageRunner:
                 duration_seconds=duration
             )
 
-        except subprocess.TimeoutExpired:
-            return OpenMontageStageResult(
-                stage="compose",
-                success=False,
-                error="Compose timed out after 600s",
-                duration_seconds=(datetime.utcnow() - start).total_seconds()
-            )
         except Exception as e:
             return OpenMontageStageResult(
                 stage="compose",
@@ -434,7 +479,7 @@ class OpenMontageRunner:
 
         return edit_decisions
 
-    def _convert_audio_operations(self, audio_ops: Dict) -> Dict:
+    def _convert_audio_operations(self, audio_ops: dict) -> dict:
         """Convert audio_operations to edit_decisions.audio."""
         audio = {}
 
@@ -485,13 +530,11 @@ class OpenMontageRunner:
 
         return audio
 
-    def _validate_edit_decisions(self, edit_decisions: Dict) -> tuple[bool, List[str]]:
+    def _validate_edit_decisions(self, edit_decisions: dict) -> tuple[bool, list[str]]:
         """Validate edit_decisions against OpenMontage schema."""
         try:
-            venv_python = self.om_root / ".venv" / "bin" / "python"
-            if not venv_python.exists():
-                venv_python = Path("python3")
-
+            # Use OpenMontage's schema validation
+            venv_python = self._get_openmontage_python()
             script = f"""
 from schemas.artifacts import validate_artifact
 import json
@@ -500,7 +543,7 @@ validate_artifact('edit_decisions', data)
 print('VALID')
 """
             result = subprocess.run(
-                [str(venv_python), "-c", script],
+                [venv_python, "-c", script],
                 cwd=self.om_root,
                 capture_output=True,
                 text=True,
@@ -518,15 +561,15 @@ print('VALID')
     def _build_render_report(
         self,
         output_file: Path,
-        edit_decisions: Dict,
-        brief: Dict
-    ) -> Dict:
+        edit_decisions: dict,
+        brief: dict
+    ) -> dict:
         """Build render_report with actual measured data from ffprobe."""
         duration = self._get_video_duration(output_file)
         resolution = self._get_video_resolution(output_file)
         has_audio = self._has_audio_stream(output_file)
 
-        # Measure actual loudness if ffmpeg with ebur128 is available
+        # Measure actual loudness if ffmpeg ebur128 available
         measured_lufs, measured_true_peak = self._measure_loudness(output_file)
 
         render_report = {
@@ -619,7 +662,6 @@ print('VALID')
                 ["ffmpeg", "-i", str(path), "-af", "ebur128", "-f", "null", "-"],
                 capture_output=True, text=True, timeout=60
             )
-            # Parse ebur128 output
             import re
             lufs_match = re.search(r"I:\s*(-?\d+\.?\d*)\s*LUFS", result.stderr)
             tp_match = re.search(r"True peak:\s*(-?\d+\.?\d*)\s*dBTP", result.stderr)
@@ -746,7 +788,7 @@ This is required before generating edit_decisions or any native OpenMontage arti
 
 if __name__ == "__main__":
     import sys
-    sys.path.insert(0, "/home/kasun/Music/Director/acd-video-worker/src")
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
     from .hermes_runner import HermesRunner
 
@@ -757,9 +799,9 @@ if __name__ == "__main__":
     om_runner = OpenMontageRunner(
         project_dir=project_dir,
         hermes_runner=hermes_runner,
-        openmontage_root=Path("/home/kasun/Music/Director/acd-video-worker/external/OpenMontage"),
-        openmontage_projects_dir=Path("/home/kasun/Music/Director/acd-video-worker/projects"),
-        config={"render_runtime": "ffmpeg"}
+        openmontage_root=Path(__file__).parent.parent.parent / "external" / "OpenMontage",
+        openmontage_projects_dir=Path(__file__).parent.parent.parent / "projects",
+        config={"render_runtime": "remotion"}
     )
 
     print("OpenMontageRunner initialized")

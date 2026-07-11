@@ -84,7 +84,7 @@ class HermesRunner:
             prompt: The prompt to send to Hermes (should trigger skills via description matching)
             context: Additional context to include in the prompt
             session_id: Optional existing session ID to continue
-            parent_session_id: Optional parent session for sub-agent tracking
+            parent_session_id: Optional parent session for sub-agent tracking (stored in metadata only)
             expected_skills: Skills we expect to be activated (for validation)
 
         Returns:
@@ -107,10 +107,9 @@ class HermesRunner:
         ]
 
         if session_id:
-            cmd.extend(["--resume", session_id])
-        if parent_session_id:
-            cmd.extend(["--parent-session", parent_session_id])
-
+            cmd.extend(["--session", session_id])
+        # Note: --parent-session is not supported in pinned Hermes CLI (5ecc079)
+        # Parent/child relationships tracked in worker metadata instead
         print(f"[HermesRunner] Running session with profile '{self.profile}'")
         print(f"[HermesRunner] Prompt length: {len(prompt)} chars")
         if expected_skills:

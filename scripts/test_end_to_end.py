@@ -38,7 +38,8 @@ class EndToEndValidator:
     
     def __init__(self, config: dict):
         self.config = config
-        self.project_root = Path(config.get("project_root", "/home/kasun/Music/Director/acd-video-worker"))
+        self.project_root = Path(config.get("project_root", 
+                                            str(Path(__file__).parent.parent)))
         self.dry_run = config.get("dry_run", False)
         self.duration_seconds = config.get("duration_seconds", 30)
         self.platform = config.get("platform", "youtube_longform")
@@ -93,7 +94,7 @@ class EndToEndValidator:
             project_dir=self.project_dir,
             hermes_runner=self.hermes_runner,
             openmontage_root=Path(self.config.get("openmontage_root", 
-                "/home/kasun/Music/Director/acd-video-worker/external/OpenMontage")),
+                str(self.project_root / "external" / "OpenMontage"))),
             openmontage_projects_dir=Path(self.config.get("openmontage_projects_dir",
                 os.path.expanduser("~/OpenMontage/projects"))),
             config={"render_runtime": "ffmpeg"}
@@ -105,7 +106,10 @@ class EndToEndValidator:
             project_dir=self.project_dir,
             hermes_runner=self.hermes_runner,
             openmontage_runner=self.openmontage_runner,
-            config={"max_loopbacks": 3},
+            config={
+                "max_loopbacks": 3,
+                "openmontage_schemas_path": str(self.project_root / "external" / "OpenMontage" / "schemas" / "artifacts")
+            },
             loopback_controller=LoopbackController(max_loopbacks_per_category=3)
         )
         print("✓ Stage orchestrator initialized")
@@ -549,7 +553,7 @@ Sections: hook→context→pressure→climax→aftermath
         lock_ok, msg = run_schema_lock_verification(
             project_dir=self.project_dir,
             openmontage_root=Path(self.config.get("openmontage_root", 
-                "/home/kasun/Music/Director/acd-video-worker/external/OpenMontage")),
+                str(self.project_root / "external" / "OpenMontage"))),
             hermes_runner=self.hermes_runner
         )
         
@@ -974,10 +978,11 @@ Sections: hook→context→pressure→climax→aftermath
 
 def main():
     """Run end-to-end validation."""
+    project_root = Path(__file__).parent.parent
     config = {
-        "project_root": "/home/kasun/Music/Director/acd-video-worker",
+        "project_root": str(project_root),
         "hermes_home": os.path.expanduser("~/.hermes"),
-        "openmontage_root": "/home/kasun/Music/Director/acd-video-worker/external/OpenMontage",
+        "openmontage_root": str(project_root / "external" / "OpenMontage"),
         "openmontage_projects_dir": os.path.expanduser("~/OpenMontage/projects"),
         "dry_run": True,  # Use dry-run for validation
         "duration_seconds": 30,

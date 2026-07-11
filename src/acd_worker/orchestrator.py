@@ -15,8 +15,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Optional, List, Dict
-from fractions import Fraction
+from typing import Any, Callable, Optional, Dict, List
 
 from .source.discovery import SourceCandidate
 from .source.acquisition import AcquiredSource, AcquisitionAttempt
@@ -120,6 +119,233 @@ STAGE_ARTIFACTS = {
     StageName.MEMORY_UPDATE: ["hermes_memory_update.json", "project_record.json"],
 }
 
+@dataclass
+class StageCheckpoint:
+    """Checkpoint data for a completed stage."""
+    stage: str
+    status: str
+    started_at: str
+    completed_at: Optional[str] = None
+    input_artifacts: list[str] = field(default_factory=list)
+    output_artifacts: list[str] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
+    error: Optional[str] = None
+    loopback_count: int = 0
+    hermes_session_id: Optional[str] = None
+    
+    def to_dict(self) -> dict:
+        return asdict(self)
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "StageCheckpoint":
+        return cls(**data)
+
+
+@dataclass
+class ProjectState:
+    """Complete project state for checkpoint/resume."""
+    project_id: str
+    run_id: str
+    user_request: str
+    created_at: str
+    updated_at: str
+    current_stage: Optional[str] = None
+    completed_stages: list[str] = field(default_factory=list)
+    stage_checkpoints: dict[str, StageCheckpoint] = field(default_factory=dict)
+    status: str = "running"  # running, completed, failed, awaiting_human
+    error: Optional[str] = None
+    output_path: Optional[str] = None
+    hermes_sessions: list[str] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
+    
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["stage_checkpoints"] = {k: v.to_dict() for k, v in self.stage_checkpoints.items()}
+        return data
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "ProjectState":
+        checkpoints = {k: StageCheckpoint.from_dict(v) for k, v in data.get("stage_checkpoints", {}).items()}
+        data["stage_checkpoints"] = checkpoints
+        return cls(**data)
+
+
+class CheckpointManager:
+    """Manages project checkpoints with atomic writes and history."""
+    
+    def __init__(self, project_dir: Path):
+        self.project_dir = project_dir
+        self.checkpoints_dir = project_dir / "checkpoints"
+        self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        self.history_dir = self.checkpoints_dir / "history"
+        self.history_dir.mkdir(parents=True, exist_ok=True)
+        self.state_file = self.checkpoints_dir / "project_state.json"
+    
+    def save_state(self, state: ProjectState) -> None:
+        """Atomically save project state."""
+        state.updated_at = datetime.utcnow().isoformat()
+        tmp_file = self.state_file.with_suffix(".tmp")
+        tmp_file.write_text(json.dumps(state.to_dict(), indent=2))
+        tmp_file.replace(self.state_file)
+    
+    def load_state(self) -> Optional[ProjectState]:
+        """Load project state if exists."""
+        if not self.state_file.exists():
+            return None
+        try:
+            data = json.loads(self.state_file.read_text())
+            return ProjectState.from_dict(data)
+        except Exception:
+            return None
+    
+    def save_stage_checkpoint(self, state: ProjectState, checkpoint: StageCheckpoint) -> None:
+        """Save stage checkpoint and archive previous."""
+        stage_name = checkpoint.stage
+        
+        # Archive existing checkpoint if present
+        existing_file = self.checkpoints_dir / f"{stage_name}.json"
+        if existing_file.exists():
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            archive_file = self.history_dir / f"{stage_name}_{timestamp}.json"
+            shutil.move(str(existing_file), str(archive_file))
+        
+        # Write new checkpoint
+        existing_file.write_text(json.dumps(checkpoint.to_dict(), indent=2))
+        
+        # Update state
+        state.stage_checkpoints[stage_name] = checkpoint
+        if checkpoint.status == StageStatus.COMPLETED.value:
+            if stage_name not in state.completed_stages:
+                state.completed_stages.append(stage_name)
+        self.save_state(state)
+    
+    def get_latest_checkpoint(self, stage: StageName) -> Optional[StageCheckpoint]:
+        """Get latest checkpoint for a stage."""
+        checkpoint_file = self.checkpoints_dir / f"{stage.value}.json"
+        if checkpoint_file.exists():
+            try:
+                data = json.loads(checkpoint_file.read_text())
+                return StageCheckpoint.from_dict(data)
+            except Exception:
+                pass
+        return None
+
+
+class ArtifactValidator:
+    """Validates artifacts against schemas."""
+    
+    def __init__(self, openmontage_schemas_path: Path, strict_mode: bool = True):
+        self.schemas_path = openmontage_schemas_path
+        self._schema_cache: dict[str, dict] = {}
+        self.strict_mode = strict_mode
+    
+    def _load_schema(self, artifact_name: str) -> Optional[dict]:
+        """Load JSON schema for artifact."""
+        if artifact_name in self._schema_cache:
+            return self._schema_cache[artifact_name]
+        
+        schema_file = self.schemas_path / f"{artifact_name}.schema.json"
+        if schema_file.exists():
+            try:
+                schema = json.loads(schema_file.read_text())
+                self._schema_cache[artifact_name] = schema
+                return schema
+            except Exception:
+                pass
+        return None
+    
+    def validate(self, artifact_name: str, data: dict) -> tuple[bool, list[str]]:
+        """Validate artifact against schema. Returns (valid, errors)."""
+        schema = self._load_schema(artifact_name)
+        if not schema:
+            return True, []  # No schema = skip validation
+        
+        try:
+            import jsonschema
+            jsonschema.validate(instance=data, schema=schema)
+            return True, []
+        except jsonschema.exceptions.ValidationError as e:
+            return False, [str(e)]
+        except Exception as e:
+            return False, [f"Validation error: {e}"]
+    
+    def validate_required_artifacts(self, stage: StageName, project_dir: Path) -> tuple[bool, list[str]]:
+        """Validate all required artifacts for a stage exist and are valid."""
+        required = STAGE_ARTIFACTS.get(stage, [])
+        errors = []
+        
+        for artifact_name in required:
+            artifact_file = project_dir / "football_emotion" / artifact_name
+            if not artifact_file.exists():
+                errors.append(f"Missing required artifact: {artifact_name}")
+                continue
+            
+            try:
+                data = json.loads(artifact_file.read_text())
+                valid, val_errors = self.validate(artifact_name.replace(".json", ""), data)
+                if not valid:
+                    errors.extend([f"{artifact_name}: {e}" for e in val_errors])
+            except json.JSONDecodeError as e:
+                errors.append(f"{artifact_name}: Invalid JSON - {e}")
+        
+        return len(errors) == 0, errors
+
+
+class LoopbackController:
+    """Manages automatic loopbacks based on quality failures."""
+
+    LOOPBACK_MAP = {
+        "missing_footage": StageName.FOOTAGE_DISCOVERY,
+        "insufficient_coverage": StageName.FOOTAGE_DISCOVERY,
+        "weak_clip": StageName.CLIP_SCORING,
+        "duplicate_clips": StageName.CLIP_SCORING,
+        "invalid_timestamps": StageName.TIMESTAMP_EXTRACTION,
+        "black_frames": StageName.FOOTAGE_ACQUISITION,
+        "frozen_frames": StageName.FOOTAGE_ACQUISITION,
+        "broken_video": StageName.FOOTAGE_ACQUISITION,
+        "bad_aspect_ratio": StageName.VISUAL_ANALYSIS,
+        "audio_clipping": StageName.AUDIO_PLAN,
+        "excessive_silence": StageName.AUDIO_PLAN,
+        "missing_narration": StageName.NARRATION,
+        "missing_music": StageName.AUDIO_PLAN,
+        "bad_ducking": StageName.AUDIO_PLAN,
+        "missing_story_section": StageName.EDIT_PLAN,
+        "weak_emotional_progression": StageName.EDIT_PLAN,
+        "unreadable_captions": StageName.EDIT_PLAN,
+        "invalid_edit_artifact": StageName.EDIT_PLAN,
+        "render_failure": StageName.OPENMONTAGE_COMPOSE,
+        "schema_validation_failed": StageName.EDIT_PLAN,
+        "reused_content_risk": StageName.FOOTAGE_DISCOVERY,
+    }
+
+    def __init__(self, max_per_category: int = 3, max_total: int = 10):
+        self.max_per_category = max_per_category
+        self.max_total = max_total
+        self.category_counts: dict[str, int] = {}
+        self.total_count = 0
+
+    def should_loopback(self, failure_type: str) -> bool:
+        cat_count = self.category_counts.get(failure_type, 0)
+        return cat_count < self.max_per_category and self.total_count < self.max_total
+
+    def get_target_stage(self, failure_type: str) -> Optional[StageName]:
+        return self.LOOPBACK_MAP.get(failure_type)
+
+    def record_loopback(self, failure_type: str) -> int:
+        self.category_counts[failure_type] = self.category_counts.get(failure_type, 0) + 1
+        self.total_count += 1
+        return self.category_counts[failure_type]
+
+    def get_stats(self) -> dict:
+        return {
+            "per_category": self.category_counts,
+            "total": self.total_count,
+            "max_per_category": self.max_per_category,
+            "max_total": self.max_total,
+        }
+
+
+# Skill invocation payloads for each stage
 STAGE_PROMPTS = {
     StageName.REQUEST: """
 Initialize the production project with the user request.
@@ -253,236 +479,13 @@ Use skill: hermes-football-memory-learning
 
 
 @dataclass
-class StageCheckpoint:
-    stage: str
-    status: str
-    started_at: str
-    completed_at: Optional[str] = None
-    input_artifacts: List[str] = field(default_factory=list)
-    output_artifacts: List[str] = field(default_factory=list)
-    metadata: Dict = field(default_factory=dict)
-    error: Optional[str] = None
-    loopback_count: int = 0
-    hermes_session_id: Optional[str] = None
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "StageCheckpoint":
-        return cls(**data)
-
-
-@dataclass
-class ProjectState:
-    project_id: str
-    run_id: str
-    user_request: str
-    created_at: str
-    updated_at: str
-    current_stage: Optional[str] = None
-    completed_stages: List[str] = field(default_factory=list)
-    stage_checkpoints: Dict[str, StageCheckpoint] = field(default_factory=dict)
-    status: str = "running"
-    error: Optional[str] = None
-    output_path: Optional[str] = None
-    hermes_sessions: List[str] = field(default_factory=list)
-    metadata: Dict = field(default_factory=dict)
-    loopback_history: List[Dict] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        data = asdict(self)
-        data["stage_checkpoints"] = {k: v.to_dict() for k, v in self.stage_checkpoints.items()}
-        return data
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "ProjectState":
-        checkpoints = {k: StageCheckpoint.from_dict(v) for k, v in data.get("stage_checkpoints", {}).items()}
-        data["stage_checkpoints"] = checkpoints
-        return cls(**data)
-
-
-class CheckpointManager:
-    def __init__(self, project_dir: Path):
-        self.project_dir = project_dir
-        self.checkpoints_dir = project_dir / "checkpoints"
-        self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-        self.history_dir = self.checkpoints_dir / "history"
-        self.history_dir.mkdir(parents=True, exist_ok=True)
-        self.state_file = self.checkpoints_dir / "project_state.json"
-
-    def save_state(self, state: ProjectState) -> None:
-        state.updated_at = datetime.utcnow().isoformat()
-        tmp_file = self.state_file.with_suffix(".tmp")
-        tmp_file.write_text(json.dumps(state.to_dict(), indent=2))
-        tmp_file.replace(self.state_file)
-
-    def load_state(self) -> Optional[ProjectState]:
-        if not self.state_file.exists():
-            return None
-        try:
-            data = json.loads(self.state_file.read_text())
-            return ProjectState.from_dict(data)
-        except Exception:
-            return None
-
-    def save_stage_checkpoint(self, state: ProjectState, checkpoint: StageCheckpoint) -> None:
-        stage_name = checkpoint.stage
-        existing_file = self.checkpoints_dir / f"{stage_name}.json"
-        if existing_file.exists():
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            archive_file = self.history_dir / f"{stage_name}_{timestamp}.json"
-            shutil.move(str(existing_file), str(archive_file))
-
-        existing_file.write_text(json.dumps(checkpoint.to_dict(), indent=2))
-
-        state.stage_checkpoints[stage_name] = checkpoint
-        if checkpoint.status == StageStatus.COMPLETED.value:
-            if stage_name not in state.completed_stages:
-                state.completed_stages.append(stage_name)
-        self.save_state(state)
-
-    def get_latest_checkpoint(self, stage: StageName) -> Optional[StageCheckpoint]:
-        checkpoint_file = self.checkpoints_dir / f"{stage.value}.json"
-        if checkpoint_file.exists():
-            try:
-                data = json.loads(checkpoint_file.read_text())
-                return StageCheckpoint.from_dict(data)
-            except Exception:
-                pass
-        return None
-
-    def invalidate_downstream(self, state: ProjectState, from_stage: StageName) -> None:
-        """Invalidate all stages downstream of the given stage."""
-        from_idx = CANONICAL_STAGE_ORDER.index(from_stage)
-        for stage in CANONICAL_STAGE_ORDER[from_idx + 1:]:
-            stage_name = stage.value
-            if stage_name in state.completed_stages:
-                state.completed_stages.remove(stage_name)
-            if stage_name in state.stage_checkpoints:
-                checkpoint = state.stage_checkpoints[stage_name]
-                checkpoint.status = StageStatus.PENDING.value
-                self.save_stage_checkpoint(state, checkpoint)
-
-
-class ArtifactValidator:
-    def __init__(self, openmontage_schemas_path: Path, strict_mode: bool = True):
-        self.schemas_path = openmontage_schemas_path
-        self._schema_cache: Dict[str, dict] = {}
-        self.strict_mode = strict_mode
-
-    def _load_schema(self, artifact_name: str) -> Optional[dict]:
-        if artifact_name in self._schema_cache:
-            return self._schema_cache[artifact_name]
-
-        schema_file = self.schemas_path / f"{artifact_name}.schema.json"
-        if schema_file.exists():
-            try:
-                schema = json.loads(schema_file.read_text())
-                self._schema_cache[artifact_name] = schema
-                return schema
-            except Exception:
-                pass
-        return None
-
-    def validate(self, artifact_name: str, data: dict) -> tuple[bool, List[str]]:
-        schema = self._load_schema(artifact_name)
-        if not schema:
-            if self.strict_mode:
-                return False, [f"No schema found for required artifact: {artifact_name}"]
-            return True, []
-
-        try:
-            import jsonschema
-            jsonschema.validate(instance=data, schema=schema)
-            return True, []
-        except jsonschema.exceptions.ValidationError as e:
-            return False, [str(e)]
-        except Exception as e:
-            return False, [f"Validation error: {e}"]
-
-    def validate_required_artifacts(self, stage: StageName, project_dir: Path) -> tuple[bool, List[str]]:
-        required = STAGE_ARTIFACTS.get(stage, [])
-        errors = []
-
-        for artifact_name in required:
-            artifact_file = project_dir / "football_emotion" / artifact_name
-            if not artifact_file.exists():
-                errors.append(f"Missing required artifact: {artifact_name}")
-                continue
-
-            try:
-                data = json.loads(artifact_file.read_text())
-                schema_name = artifact_name.replace(".json", "")
-                valid, val_errors = self.validate(schema_name, data)
-                if not valid:
-                    errors.extend([f"{artifact_name}: {e}" for e in val_errors])
-            except json.JSONDecodeError as e:
-                errors.append(f"{artifact_name}: Invalid JSON - {e}")
-
-        return len(errors) == 0, errors
-
-
-class LoopbackController:
-    LOOPBACK_MAP = {
-        "missing_footage": StageName.FOOTAGE_DISCOVERY,
-        "insufficient_coverage": StageName.FOOTAGE_DISCOVERY,
-        "weak_clip": StageName.CLIP_SCORING,
-        "duplicate_clips": StageName.CLIP_SCORING,
-        "invalid_timestamps": StageName.TIMESTAMP_EXTRACTION,
-        "black_frames": StageName.FOOTAGE_ACQUISITION,
-        "frozen_frames": StageName.FOOTAGE_ACQUISITION,
-        "broken_video": StageName.FOOTAGE_ACQUISITION,
-        "bad_aspect_ratio": StageName.VISUAL_ANALYSIS,
-        "audio_clipping": StageName.AUDIO_PLAN,
-        "excessive_silence": StageName.AUDIO_PLAN,
-        "missing_narration": StageName.NARRATION,
-        "missing_music": StageName.AUDIO_PLAN,
-        "bad_ducking": StageName.AUDIO_PLAN,
-        "missing_story_section": StageName.EDIT_PLAN,
-        "weak_emotional_progression": StageName.EDIT_PLAN,
-        "unreadable_captions": StageName.EDIT_PLAN,
-        "invalid_edit_artifact": StageName.EDIT_PLAN,
-        "render_failure": StageName.OPENMONTAGE_COMPOSE,
-        "schema_validation_failed": StageName.EDIT_PLAN,
-        "reused_content_risk": StageName.FOOTAGE_DISCOVERY,
-    }
-
-    def __init__(self, max_per_category: int = 3, max_total: int = 10):
-        self.max_per_category = max_per_category
-        self.max_total = max_total
-        self.category_counts: Dict[str, int] = {}
-        self.total_count = 0
-
-    def should_loopback(self, failure_type: str) -> bool:
-        cat_count = self.category_counts.get(failure_type, 0)
-        return cat_count < self.max_per_category and self.total_count < self.max_total
-
-    def get_target_stage(self, failure_type: str) -> Optional[StageName]:
-        return self.LOOPBACK_MAP.get(failure_type)
-
-    def record_loopback(self, failure_type: str) -> int:
-        self.category_counts[failure_type] = self.category_counts.get(failure_type, 0) + 1
-        self.total_count += 1
-        return self.category_counts[failure_type]
-
-    def get_stats(self) -> Dict:
-        return {
-            "per_category": self.category_counts,
-            "total": self.total_count,
-            "max_per_category": self.max_per_category,
-            "max_total": self.max_total,
-        }
-
-
-@dataclass
 class StageResult:
     stage: StageName
     success: bool
     output_artifacts: List[str] = field(default_factory=list)
     error: Optional[str] = None
     loopback: Optional[StageName] = None
-    metadata: Dict = field(default_factory=dict)
+    metadata: dict = field(default_factory=dict)
     status: str = "unknown"
     blocked_reason: Optional[str] = None
 
@@ -497,11 +500,7 @@ class FixtureArtifactProvider:
 
         fixtures = {}
 
-        if stage == StageName.REQUEST:
-            # REQUEST stage has no output artifacts - it's just initialization
-            pass
-
-        elif stage == StageName.STORY_UNDERSTANDING:
+        if stage == StageName.STORY_UNDERSTANDING:
             fixtures["brief_interpretation.json"] = {
                 "emotional_question": "How did Messi overcome pressure to achieve World Cup glory?",
                 "tonal_flavor": "triumphant",
@@ -903,7 +902,7 @@ class FixtureArtifactProvider:
                     }
                 ],
                 "renderer_family": "documentary-montage",
-                "render_runtime": "ffmpeg",
+"render_runtime": "remotion",
                 "composition_mode": "templated"
             }
             fixtures["openmontage_audio_operations.json"] = {
@@ -1028,7 +1027,7 @@ class FixtureArtifactProvider:
                         "in_seconds": 10.0,
                         "out_seconds": 15.0,
                         "speed": 1.0,
-                        "layer": 1,
+"layer": "primary",
                         "transform": {"animation": "ken-burns-slow-zoom"},
                         "transition_in": "fade_from_black",
                         "transition_out": "hard_cut",
@@ -1040,7 +1039,7 @@ class FixtureArtifactProvider:
                         "in_seconds": 5.0,
                         "out_seconds": 15.0,
                         "speed": 1.0,
-                        "layer": 1,
+"layer": "primary",
                         "transform": {"animation": "none"},
                         "transition_in": "hard_cut",
                         "transition_out": "fade_to_black",
@@ -1072,7 +1071,7 @@ class FixtureArtifactProvider:
                     "subtitles": []
                 },
                 "renderer_family": "documentary-montage",
-                "render_runtime": "ffmpeg",
+"render_runtime": "remotion",
                 "composition_mode": "templated"
             }
 
@@ -1080,7 +1079,6 @@ class FixtureArtifactProvider:
             output_dir = project_dir / "output"
             output_dir.mkdir(parents=True, exist_ok=True)
             final_video = output_dir / "final.mp4"
-            # Create a minimal valid MP4 for dry-run
             final_video.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom")
 
             fixtures["render_report.json"] = {
@@ -1154,7 +1152,7 @@ class FixtureArtifactProvider:
                 "run_id": "dry_run",
                 "user_request": "Messi World Cup 2022 triumph 30s",
                 "completed_at": datetime.utcnow().isoformat(),
-                "stages_completed": [s.value for s in CANONICAL_STAGE_ORDER],
+"stages_completed": [s.value for s in CANONICAL_STAGE_ORDER],
                 "artifacts_generated": sum(len(STAGE_ARTIFACTS.get(s, [])) for s in CANONICAL_STAGE_ORDER),
                 "loopback_count": 0
             }
@@ -1175,7 +1173,7 @@ class StageOrchestrator:
         project_dir: Path,
         hermes_runner,
         openmontage_runner,
-        config: Dict,
+config: dict,
         loopback_controller: Optional[LoopbackController] = None,
         dry_run: bool = False
     ):
@@ -1191,7 +1189,7 @@ class StageOrchestrator:
 
         self.checkpoint_mgr = CheckpointManager(project_dir)
         self.validator = ArtifactValidator(
-            Path(config.get("openmontage_schemas_path", "")),
+Path(config.get("openmontage_schemas_path")) if config.get("openmontage_schemas_path") else self._find_openmontage_schemas(),
             strict_mode=True
         )
         self.fixture_provider = FixtureArtifactProvider()
@@ -1206,6 +1204,7 @@ class StageOrchestrator:
                 created_at=datetime.utcnow().isoformat(),
                 updated_at=datetime.utcnow().isoformat()
             )
+
 
     def get_next_stage(self) -> Optional[StageName]:
         for stage in CANONICAL_STAGE_ORDER:
@@ -1232,18 +1231,7 @@ class StageOrchestrator:
         print(f"\n{'='*60}")
         print(f"EXECUTING STAGE: {stage.value}")
         print(f"{'='*60}")
-
-        # Validate inputs
-        valid, errors = self.validate_stage_inputs(stage)
-        if not valid:
-            return StageResult(
-                stage=stage,
-                success=False,
-                error=f"Input validation failed: {errors}",
-                status="failed"
-            )
-
-        # Create running checkpoint
+# Create checkpoint for running stage
         checkpoint = StageCheckpoint(
             stage=stage.value,
             status=StageStatus.RUNNING.value,
@@ -1253,10 +1241,19 @@ class StageOrchestrator:
         self.checkpoint_mgr.save_stage_checkpoint(self.state, checkpoint)
 
         try:
+# Dry-run mode: write fixture artifacts and return success
             if self.dry_run:
                 return self._execute_dry_run_stage(stage, checkpoint)
+            
+            # Validate inputs
+            valid, errors = self.validate_stage_inputs(stage)
+            if not valid:
+                return StageResult(
+                    stage=stage,
+                    success=False,
+                    error=f"Input validation failed: {errors}"
+                )
 
-            # Real execution via Hermes
             prompt = STAGE_PROMPTS.get(stage, "")
             if not prompt:
                 return StageResult(
@@ -1267,13 +1264,14 @@ class StageOrchestrator:
                 )
 
             full_prompt = self._build_stage_prompt(stage, prompt, context)
-
+            
+            # Execute via Hermes
             result = self.hermes_runner.run_session(
                 prompt=full_prompt,
                 context=context,
                 expected_skills=STAGE_SKILLS.get(stage, [])
             )
-
+            
             if not result.success:
                 error = result.error or "Unknown error"
                 checkpoint.status = StageStatus.FAILED.value
@@ -1364,9 +1362,10 @@ class StageOrchestrator:
             status="completed"
         )
 
-    def _build_stage_prompt(self, stage: StageName, base_prompt: str, context: Dict) -> str:
-        context_json = json.dumps(context, indent=2)[:5000]
-
+    def _build_stage_prompt(self, stage: StageName, base_prompt: str, context: dict) -> str:
+        """Build complete prompt with context for Hermes."""
+        context_json = json.dumps(context, indent=2)
+        
         return f"""Project Context:
 {context_json}
 
@@ -1519,6 +1518,18 @@ Execute this stage and produce the required output artifacts.
 
         return last_result
 
+    def _find_openmontage_schemas(self) -> Path:
+        """Discover OpenMontage schemas path from repository root."""
+        repo_root = Path(__file__).parent.parent.parent
+        candidates = [
+            repo_root / "external" / "OpenMontage" / "schemas" / "artifacts",
+            Path.cwd() / "external" / "OpenMontage" / "schemas" / "artifacts",
+        ]
+        for c in candidates:
+            if c.exists():
+                return c
+        return Path("")
+
 
 if __name__ == "__main__":
     import sys
@@ -1554,5 +1565,5 @@ if __name__ == "__main__":
 
         loaded_checkpoint = mgr.get_latest_checkpoint(StageName.STORY_UNDERSTANDING)
         print(f"Checkpoint loaded: {loaded_checkpoint is not None}")
-
+        
         print("\n✓ All checkpoint tests passed")

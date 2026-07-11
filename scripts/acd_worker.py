@@ -47,11 +47,13 @@ def get_project_root() -> Path:
 @dataclass
 class ACDConfig:
     """Runtime configuration loaded from environment + config files."""
-    # Paths - no hardcoded machine paths
+# Paths - no hardcoded machine paths
     project_root: Path = field(default_factory=get_project_root)
-    hermes_home: str = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
-    openmontage_projects_dir: str = os.environ.get("OPENMONTAGE_PROJECTS_DIR", str(Path.home() / "OpenMontage" / "projects"))
-    openmontage_root: str = os.environ.get("OPENMONTAGE_ROOT", str(Path.home() / "OpenMontage"))
+    hermes_home: str = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+    openmontage_projects_dir: str = os.environ.get("OPENMONTAGE_PROJECTS_DIR", 
+                                                     os.path.expanduser("~/OpenMontage/projects"))
+    openmontage_root: str = os.environ.get("OPENMONTAGE_ROOT", 
+                                             str(Path(__file__).parent.parent / "external" / "OpenMontage"))
     hermes_profile: str = os.environ.get("HERMES_PROFILE", "football-emotion")
     hermes_cli: Optional[str] = os.environ.get("HERMES_CLI")
 
@@ -60,7 +62,7 @@ class ACDConfig:
     log_level: str = os.environ.get("ACD_LOG_LEVEL", "INFO")
     dry_run: bool = os.environ.get("ACD_DRY_RUN", "false").lower() == "true"
     max_loopbacks: int = int(os.environ.get("ACD_MAX_LOOPBACKS", "3"))
-    render_runtime: str = os.environ.get("ACD_RENDER_RUNTIME", "ffmpeg")
+    render_runtime: str = os.environ.get("ACD_RENDER_RUNTIME", "remotion")
     min_candidates_per_slot: int = int(os.environ.get("ACD_MIN_CANDIDATES", "3"))
     tavily_api_key: str = os.environ.get("TAVILY_API_KEY", "")
 
@@ -331,27 +333,7 @@ class ACDWorker:
     def execute_full_workflow(self, user_request: str) -> bool:
         """Execute the complete football video production workflow."""
 
-        # In dry-run mode, run full pipeline with fixture artifacts
-        if self.config.dry_run:
-            self.logger.info("DRY RUN MODE - Executing full pipeline with fixture artifacts")
-            self.initialize_project(user_request)
 
-            # Run the canonical orchestrator pipeline
-            context = self._parse_user_request(user_request)
-            self.run_metadata.update(context)
-
-            result = self.orchestrator.run_pipeline(user_request, self.run_metadata)
-
-            if result.success:
-                self.logger.info("Dry run completed successfully")
-                self.project_state.status = "completed"
-                self.orchestrator.checkpoint_mgr.save_state(self.project_state)
-                return True
-            else:
-                self.logger.error(f"Dry run failed: {result.error}")
-                return False
-
-        # Full production workflow
         self.initialize_project(user_request)
 
         try:

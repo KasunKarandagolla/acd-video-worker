@@ -672,7 +672,7 @@ print('Stages:', [s['name'] for s in p['stages']])
         return failed == 0
 
 def main():
-    project_root = os.environ.get("PROJECT_ROOT", "/home/kasun/Music/Director/acd-video-worker")
+    project_root = os.environ.get("PROJECT_ROOT", str(Path(__file__).parent.parent))
     validator = SetupValidator(project_root)
     success = validator.run_all()
     sys.exit(0 if success else 1)
