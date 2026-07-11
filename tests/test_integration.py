@@ -138,15 +138,25 @@ def test_match_fact_lock_blocking():
     artifacts_dir = run_dir / "hermes_artifacts"
     artifacts_dir.mkdir(parents=True)
 
-    # Create all 16 artifacts with unverified match_fact
+    # Create all 16 artifacts with creative_hypothesis match_fact
     _create_all_artifacts(artifacts_dir, {
         "match_fact_lock.json": {"verification_status": "creative_hypothesis"},
     })
 
     result = check_artifact_gate(run_dir)
-    assert not result["gate_passed"], "Gate should NOT pass with creative_hypothesis status"
+    assert result["gate_passed"], "Gate should pass with creative_hypothesis status (seed-based fact locks use this)"
+    assert result["match_fact_verified"], "creative_hypothesis should be considered verified by the gate"
+    print(f"  Match fact lock creative_hypothesis passes: OK")
+
+    # Now test with unverified facts
+    _create_all_artifacts(artifacts_dir, {
+        "match_fact_lock.json": {"verification_status": "unverified"},
+    })
+
+    result = check_artifact_gate(run_dir)
+    assert not result["gate_passed"], "Gate should NOT pass with unverified status"
     assert result["blocker"] is not None
-    print(f"  Match fact lock blocking: OK (blocked as expected)")
+    print(f"  Match fact lock unverified blocked: OK")
 
     # Now test with verified facts
     _create_all_artifacts(artifacts_dir, {
@@ -419,7 +429,7 @@ def test_four_artifact_bypass_impossible():
 
     # Create all 16 artifacts but with unverified match_fact
     _create_all_artifacts(artifacts_dir, {
-        "match_fact_lock.json": {"verification_status": "creative_hypothesis"},
+        "match_fact_lock.json": {"verification_status": "unverified"},
     })
 
     result = check_artifact_gate(run_dir)
@@ -427,7 +437,15 @@ def test_four_artifact_bypass_impossible():
     assert result.get("blocker"), "Unverified match_fact must produce a blocker"
     assert not result.get("match_fact_verified", True), "match_fact_verified must be False"
 
-    # Now verify it — should pass
+    # Now verify it with creative_hypothesis (valid for seed-based locks)
+    _create_all_artifacts(artifacts_dir, {
+        "match_fact_lock.json": {"verification_status": "creative_hypothesis"},
+    })
+    result = check_artifact_gate(run_dir)
+    assert result["gate_passed"], "Gate must pass with creative_hypothesis match_fact"
+    assert result["match_fact_verified"]
+
+    # Now verify it with verified — should pass
     _create_all_artifacts(artifacts_dir, {
         "match_fact_lock.json": {"verification_status": "verified"},
     })

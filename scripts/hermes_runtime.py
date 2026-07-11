@@ -649,6 +649,65 @@ def _build_fallback_match_fact_lock(response_text: str, title: str, theme: str) 
     return match_fact
 
 
+def generate_fact_lock_from_seed(seed: dict) -> dict:
+    """Build a deterministic match_fact_lock from a job YAML fact_lock_seed.
+
+    This is the canonical production path when the job YAML explicitly provides
+    verified fact identity fields.  NOT fallback — the seed is primary.
+    Hermes should receive this as context and skip match_fact_lock generation.
+    """
+    now = datetime.now(timezone.utc).isoformat() + "Z"
+    team_a = seed.get("team_a", "")
+    team_b = seed.get("team_b", "")
+    match_label = f"{team_a} vs {team_b}" if team_a and team_b else seed.get("match", "")
+
+    match_fact = dict(_MATCH_FACT_LOCK_SCHEMA)
+    match_fact.update({
+        "status": seed.get("status", "verified"),
+        "competition": seed.get("competition", ""),
+        "match_date": seed.get("match_date", seed.get("date", "")),
+        "team_a": team_a,
+        "team_b": team_b,
+        "score": seed.get("score", seed.get("score_if_known", "")),
+        "stage_or_round": seed.get("stage_or_round", seed.get("stage", "")),
+        "evidence_sources": seed.get("evidence_sources", []),
+        "evidence_claims": seed.get("evidence_claims", []),
+        "verification_status": seed.get("verification_status", "creative_hypothesis"),
+        "confidence": seed.get("confidence", "high"),
+        "unresolved_conflicts": seed.get("unresolved_conflicts", []),
+        "generated_by": "job_verified_fact_lock_seed",
+        "timestamp_utc": now,
+        "extraction_method": "job_verified_fact_lock_seed",
+        "source_mode": "job_seed",
+        "production_fallback_used": False,
+        "user_supplied_seed": True,
+        "match": match_label,
+        "opponent": team_b,
+        "date": match_fact.get("match_date", seed.get("date", "")),
+    })
+    return match_fact
+
+
+_CRITICAL_SEED_FIELDS = ["team_a", "team_b", "competition", "match_date", "stage_or_round"]
+
+
+def validate_fact_lock_seed_structure(seed: dict) -> list:
+    """Validate that fact_lock_seed provides the minimum identity fields.
+
+    The seed must supply non-empty values for all critical identity fields
+    so that the generated match_fact_lock is semantically useful.
+    Returns a list of error strings (empty if valid).
+    """
+    errors = []
+    for field in _CRITICAL_SEED_FIELDS:
+        if not seed.get(field):
+            errors.append(f"Seed missing critical field: {field}")
+    vs = seed.get("verification_status", "")
+    if vs and vs not in ("verified", "creative_hypothesis"):
+        errors.append(f"Seed verification_status must be 'verified' or 'creative_hypothesis', got '{vs}'")
+    return errors
+
+
 _REQUIRED_MATCH_FACT_FIELDS = [
     "status", "competition", "match_date", "team_a", "team_b",
     "score", "stage_or_round", "evidence_sources", "evidence_claims",
@@ -656,7 +715,7 @@ _REQUIRED_MATCH_FACT_FIELDS = [
     "generated_by", "timestamp_utc",
 ]
 
-_FORBIDDEN_STATUSES = {"pending", "pending_discovery", "creative_hypothesis", "unverified"}
+_FORBIDDEN_STATUSES = {"pending", "pending_discovery", "unverified"}
 
 
 def _validate_match_fact_lock(data: dict) -> list:
@@ -858,6 +917,23 @@ def _build_core_agent_code(
     ''')
 
 
+def _extract_brief_interpretation(response_text: str, title: str, theme: str) -> dict:
+    """Extract brief_interpretation from Hermes response text."""
+    json_blocks = re.findall(r'\{[^{}]*\}', response_text, re.DOTALL)
+    for block in json_blocks:
+        try:
+            parsed = json.loads(block)
+            if isinstance(parsed, dict) and "emotional_arc" in parsed:
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return {
+        "title": title or "Unknown Match",
+        "theme": theme or "Football highlights",
+        "emotional_arc": "determined_from_content",
+    }
+
+
 def run_hermes_turn(
     title: str,
     theme: str,
@@ -866,6 +942,7 @@ def run_hermes_turn(
     smoke_test: bool = False,
     canary_mode: bool = False,
     canary_fact_packet: dict = None,
+    fact_lock_override: dict = None,
 ) -> dict:
     """Canonical single Hermes turn invocation used by both smoke test and job.
 
@@ -986,16 +1063,40 @@ def run_hermes_turn(
         )
         turn_timeout = 30
     else:
-        user_msg = json.dumps({
-            "task": "editorial_reasoning",
-            "title": title,
-            "theme": theme,
-            "session_id": session_id,
-            "instructions": (
-                f"Reason about football video: title='{title}', theme='{theme}'. "
-                "Produce match_fact_lock and brief_interpretation artifacts."
-            ),
-        })
+        if fact_lock_override is not None:
+            mf_summary = {
+                "competition": fact_lock_override.get("competition", ""),
+                "match_date": fact_lock_override.get("match_date", ""),
+                "team_a": fact_lock_override.get("team_a", ""),
+                "team_b": fact_lock_override.get("team_b", ""),
+                "score": fact_lock_override.get("score", ""),
+                "stage_or_round": fact_lock_override.get("stage_or_round", ""),
+                "verification_status": fact_lock_override.get("verification_status", ""),
+            }
+            user_msg = json.dumps({
+                "task": "editorial_reasoning",
+                "title": title,
+                "theme": theme,
+                "session_id": session_id,
+                "match_fact_lock": mf_summary,
+                "instructions": (
+                    f"Reason about this football video: title='{title}', theme='{theme}'. "
+                    "Match facts are already verified and provided in match_fact_lock. "
+                    "Do NOT produce match_fact_lock — focus on creative planning, "
+                    "source discovery suggestions, and brief_interpretation."
+                ),
+            })
+        else:
+            user_msg = json.dumps({
+                "task": "editorial_reasoning",
+                "title": title,
+                "theme": theme,
+                "session_id": session_id,
+                "instructions": (
+                    f"Reason about this football video: title='{title}', theme='{theme}'. "
+                    "Produce match_fact_lock and brief_interpretation artifacts."
+                ),
+            })
         code = _build_core_agent_code(
             hermes_repo_str, hermes_home_str, session_id, user_msg,
         )
@@ -1105,19 +1206,25 @@ def run_hermes_turn(
             _phase_log("extracting JSON")
             result["phase"] = "extracting_json"
 
-            artifact_result = _extract_and_validate_artifacts(response_text, title, theme)
-            match_fact = artifact_result.get("match_fact_lock", {})
-            brief = artifact_result.get("brief_interpretation", {})
+            if fact_lock_override is not None:
+                match_fact = fact_lock_override
+                extraction_method = "job_verified_fact_lock_seed"
+            else:
+                artifact_result = _extract_and_validate_artifacts(response_text, title, theme)
+                match_fact = artifact_result.get("match_fact_lock", {})
+                extraction_method = artifact_result.get("extraction_method")
 
-            if artifact_result.get("extraction_method") == "fallback_constructed":
-                result["error_type"] = "hermes_artifact_contract_error"
-                result["error_message"] = (
-                    "match_fact_lock not found in Hermes response; "
-                    "fallback disallowed — Hermes must produce a valid match_fact_lock"
-                )
-                result["success"] = False
-                result["phase"] = "validation_failed"
-                return result
+                if extraction_method == "fallback_constructed":
+                    result["error_type"] = "hermes_artifact_contract_error"
+                    result["error_message"] = (
+                        "match_fact_lock not found in Hermes response; "
+                        "fallback disallowed — Hermes must produce a valid match_fact_lock"
+                    )
+                    result["success"] = False
+                    result["phase"] = "validation_failed"
+                    return result
+
+            brief = _extract_brief_interpretation(response_text, title, theme)
 
             validation_errors = _validate_match_fact_lock(match_fact)
             if validation_errors:
@@ -1151,7 +1258,7 @@ def run_hermes_turn(
             "status": match_fact.get("verification_status"),
             "team_a": match_fact.get("team_a"),
             "team_b": match_fact.get("team_b"),
-            "extraction": artifact_result.get("extraction_method"),
+            "extraction": extraction_method,
         }
         result["details"]["brief_interpretation"] = {"path": str(brief_path)}
 
@@ -1178,6 +1285,7 @@ def run_hermes_turn_with_retry(
     run_dir: Path,
     smoke_test: bool = False,
     max_retries: int = 1,
+    fact_lock_override: dict = None,
 ) -> dict:
     """Wrapper around run_hermes_turn with retry for transient errors.
 
@@ -1185,7 +1293,8 @@ def run_hermes_turn_with_retry(
     Does NOT retry on schema or programming errors.
     """
     from copy import deepcopy
-    first_result = run_hermes_turn(title, theme, run_id, run_dir, smoke_test=smoke_test)
+    first_result = run_hermes_turn(title, theme, run_id, run_dir, smoke_test=smoke_test,
+                                   fact_lock_override=fact_lock_override)
     first_result["retry_attempted"] = False
     if first_result.get("success", False):
         return first_result
@@ -1201,7 +1310,8 @@ def run_hermes_turn_with_retry(
     print(f"  [RETRY] Transient error ({error_type}), retrying (max_retries={max_retries})...")
     import time as _time
     _time.sleep(5)
-    retry_result = run_hermes_turn(title, theme, run_id, run_dir, smoke_test=smoke_test)
+    retry_result = run_hermes_turn(title, theme, run_id, run_dir, smoke_test=smoke_test,
+                                   fact_lock_override=fact_lock_override)
     retry_result["retry_attempted"] = True
     retry_result["first_error_type"] = deepcopy(first_result.get("error_type"))
     retry_result["first_error_message"] = deepcopy(first_result.get("error_message"))

@@ -60,14 +60,23 @@ def write_failure_summary(run_id, failed_stage, exception_info, stages, run_dir)
         "timestamp_utc": datetime.now(timezone.utc).isoformat() + "Z",
         "root_exception_type": exception_info.get("type"),
         "original_traceback": exception_info.get("traceback"),
-        "stage_inputs": ac.validate_stage_inputs(failed_stage, run_id) if failed_stage else [],
-        "stage_outputs": ac.validate_stage_outputs(failed_stage, run_id) if failed_stage else [],
+        "stage_inputs": [],
+        "stage_outputs": [],
         "expected_contract": None,
         "actual_contract": None,
         "recommended_repair": None,
         "stages_skipped": [],
         "resume_command": f"python3 -m scripts.run_title_theme_job <job.yaml> --resume-run {run_id}" if run_id else None,
     }
+    if failed_stage:
+        try:
+            summary["stage_inputs"] = ac.validate_stage_inputs(failed_stage, run_id)
+        except (ValueError, Exception):
+            summary["stage_inputs"] = []
+        try:
+            summary["stage_outputs"] = ac.validate_stage_outputs(failed_stage, run_id)
+        except (ValueError, Exception):
+            summary["stage_outputs"] = []
     contracts = ac._load_contracts()
     for s in contracts.get("stages", []):
         if s["stage_name"] == failed_stage:
@@ -221,10 +230,54 @@ def main():
             print("  [SYNTHETIC] Proceeding to synthetic source discovery and media analysis.")
             _run_synthetic_stages(run_id, run_dir, outputs_dir, stages, job_path, title, theme, job)
         else:
+            # Stage 3.5: FactLockGenerator — deterministic seed-based match_fact_lock
+            fact_lock_override = None
+            fact_lock_seed = job.get("fact_lock_seed")
+            if fact_lock_seed:
+                from scripts.hermes_runtime import generate_fact_lock_from_seed, _validate_match_fact_lock, validate_fact_lock_seed_structure
+                seed_errors = validate_fact_lock_seed_structure(fact_lock_seed)
+                if seed_errors:
+                    print(f"  FAIL: fact_lock_seed missing critical fields: {'; '.join(seed_errors)}")
+                    notify(f"[{run_id}] FactLockGenerator FAILED: seed missing critical fields")
+                    failed_stage = "fact_lock_generator"
+                    exception_info = {"type": "seed_validation_error", "message": "; ".join(seed_errors), "traceback": None}
+                    try:
+                        write_failure_summary(run_id, failed_stage, exception_info, stages, run_dir)
+                    except Exception:
+                        pass
+                    sys.exit(1)
+                mf = generate_fact_lock_from_seed(fact_lock_seed)
+                validation_errors = _validate_match_fact_lock(mf)
+                if validation_errors:
+                    print(f"  FAIL: fact_lock_seed produces invalid match_fact_lock: {'; '.join(validation_errors)}")
+                    notify(f"[{run_id}] FactLockGenerator FAILED: seed validation error")
+                    failed_stage = "fact_lock_generator"
+                    exception_info = {"type": "seed_validation_error", "message": "; ".join(validation_errors), "traceback": None}
+                    write_failure_summary(run_id, failed_stage, exception_info, stages, run_dir)
+                    sys.exit(1)
+                artifacts_dir = run_dir / "hermes_artifacts"
+                artifacts_dir.mkdir(parents=True, exist_ok=True)
+                ac.atomic_write_json(artifacts_dir / "match_fact_lock.json", mf)
+                brief = {"title": title, "theme": theme, "emotional_arc": "determined_from_content"}
+                ac.atomic_write_json(artifacts_dir / "brief_interpretation.json", brief)
+                fact_lock_override = mf
+                stages["fact_lock_generator"] = {
+                    "seed_found": True,
+                    "valid": True,
+                    "extraction_method": "job_verified_fact_lock_seed",
+                    "team_a": mf.get("team_a"),
+                    "team_b": mf.get("team_b"),
+                    "verification_status": mf.get("verification_status"),
+                }
+                print(f"  FactLockGenerator: seed found — match_fact_lock generated ({mf.get('team_a')} vs {mf.get('team_b')}, status={mf.get('verification_status')})")
+            else:
+                stages["fact_lock_generator"] = {"seed_found": False}
+                print("  FactLockGenerator: no seed — using Hermes path")
+
             # Stage 4: Hermes runtime — canonical run_hermes_turn (with retry for transient errors)
             notify(f"[{run_id}] Stage 4/22: Hermes runtime")
             from scripts.hermes_runtime import run_hermes_turn_with_retry
-            hermes_result = run_hermes_turn_with_retry(title, theme, run_id, run_dir, max_retries=1)
+            hermes_result = run_hermes_turn_with_retry(title, theme, run_id, run_dir, max_retries=1, fact_lock_override=fact_lock_override)
             stages["hermes_runtime"] = hermes_result
 
             print(f"  Hermes success: {hermes_result.get('success', False)}")
