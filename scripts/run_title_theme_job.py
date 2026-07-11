@@ -34,22 +34,30 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 def notify(msg):
     subprocess.run(
-        [sys.executable, str(BASE_DIR / "scripts" / "discord_notify.py"), msg],
-        capture_output=True
+        [sys.executable, "-m", "scripts.discord_notify", msg],
+        capture_output=True,
+        cwd=str(BASE_DIR),
+        env={**os.environ, "PYTHONPATH": str(BASE_DIR)},
     )
 
 
-def run_script(script_name, args=None, stage_label=None):
-    script_path = BASE_DIR / "scripts" / script_name
-    cmd = [sys.executable, str(script_path)]
+def run_script_module(module_name, args=None, stage=None, env=None):
+    cmd = [sys.executable, "-m", f"scripts.{module_name}"]
     if args:
         cmd.extend(args)
+    merged_env = os.environ.copy()
+    merged_env["PYTHONPATH"] = str(BASE_DIR)
+    if env:
+        merged_env.update(env)
     print(f"\n{'='*60}")
-    print(f"  STAGE: {stage_label or script_name}")
+    print(f"  STAGE: {stage or module_name}")
     print(f"{'='*60}")
-    result = subprocess.run(cmd, capture_output=False, text=True)
+    result = subprocess.run(
+        cmd, capture_output=False, text=True,
+        cwd=str(BASE_DIR), env=merged_env,
+    )
     if result.returncode != 0:
-        print(f"FAIL: {script_name} exited with code {result.returncode}")
+        print(f"FAIL: {module_name} exited with code {result.returncode}")
     return result.returncode
 
 
@@ -276,7 +284,7 @@ def main():
 
             # Stage 3.75: Source provider preflight — BEFORE Hermes
             notify(f"[{run_id}] Stage 3.75/22: source provider preflight")
-            rc = run_script("source_provider_preflight.py", [], "source_provider_preflight")
+            rc = run_script_module("source_provider_preflight", [], "source_provider_preflight")
             stages["source_provider_preflight"] = {"exit_code": rc}
             if rc != 0:
                 failed_stage = "source_provider_preflight"
@@ -384,7 +392,7 @@ def main():
                 sys.exit(0)
             # Stage 6: source discovery and verification
             notify(f"[{run_id}] Stage 6/22: source discovery")
-            rc = run_script("source_discovery.py", [job_path, "--run-id", run_id], "source_discovery")
+            rc = run_script_module("source_discovery", [job_path, "--run-id", run_id], "source_discovery")
             stages["source_discovery"] = {"exit_code": rc}
             candidates_path = run_dir / "source_candidates.json"
             if candidates_path.is_file():
@@ -412,7 +420,7 @@ def main():
             # Stage 7: proxy download
             if candidates_path.is_file():
                 notify(f"[{run_id}] Stage 7/22: proxy download")
-                rc = run_script("download_sources.py", [str(candidates_path), "--run-id", run_id], "download_sources")
+                rc = run_script_module("download_sources", [str(candidates_path), "--run-id", run_id], "download_sources")
                 stages["download_sources"] = {"exit_code": rc}
 
                 if rc != 0:
@@ -426,14 +434,14 @@ def main():
 
             # Stage 8: visual/audio analysis
             notify(f"[{run_id}] Stage 8/22: visual/audio analysis")
-            rc = run_script("media_analysis.py", [run_id], "media_analysis")
+            rc = run_script_module("media_analysis", [run_id], "media_analysis")
             stages["media_analysis"] = {"exit_code": rc}
 
         # Stage 12: artifact gate
         self_hermes_success = stages.get("hermes_runtime", {}).get("success", False)
         self_mf_valid = stages.get("match_fact_lock", {}).get("schema_valid", False)
         notify(f"[{run_id}] Stage 12/22: artifact gate")
-        rc = run_script("editorial_artifact_gate.py", [run_id], "artifact_gate")
+        rc = run_script_module("editorial_artifact_gate", [run_id], "artifact_gate")
         stages["artifact_gate"] = {"exit_code": rc, "hermes_success": self_hermes_success, "match_fact_schema_valid": self_mf_valid}
         gate_result = run_dir / "artifact_gate_result.json"
         if gate_result.is_file():
@@ -458,8 +466,8 @@ def main():
         candidates_path = run_dir / "source_candidates.json"
         if assets_path.is_file() and candidates_path.is_file():
             notify(f"[{run_id}] Stage 14/22: OpenMontage render")
-            rc = run_script(
-                "render_with_openmontage.py",
+            rc = run_script_module(
+                "render_with_openmontage",
                 [job_path, str(assets_path), str(candidates_path), "--run-id", run_id],
                 "render_with_openmontage",
             )
@@ -470,7 +478,7 @@ def main():
 
         # Stage 15: QA
         notify(f"[{run_id}] Stage 15/22: QA")
-        rc = run_script("qa_check.py", [run_id], "qa_check")
+        rc = run_script_module("qa_check", [run_id], "qa_check")
         stages["qa_check"] = {"exit_code": rc}
         qa_report = run_dir / "full_qa_report.json"
         if qa_report.is_file():
@@ -606,13 +614,13 @@ def main():
     if not is_synthetic and render_success:
         # Stage 17: one memory update
         notify(f"[{run_id}] Stage 17/22: memory update")
-        rc = run_script("memory_sync.py", ["collect", "--run-id", run_id], "memory_collect")
+        rc = run_script_module("memory_sync", ["collect", "--run-id", run_id], "memory_collect")
         stages["memory_update"] = {"exit_code": rc}
         final_result["memory_collection_attempted"] = True
 
         # Stage 18: one GitHub push
         notify(f"[{run_id}] Stage 18/22: GitHub push")
-        rc = run_script("memory_sync.py", ["push", "--run-id", run_id], "memory_push")
+        rc = run_script_module("memory_sync", ["push", "--run-id", run_id], "memory_push")
         stages["github_push"] = {"exit_code": rc}
         final_result["memory_push_attempted"] = True
     elif is_synthetic:
@@ -802,7 +810,7 @@ def _run_synthetic_stages(run_id, run_dir, outputs_dir, stages, job_path, title,
     # Stage 8: media analysis
     if has_ffmpeg:
         print("  Running synthetic media analysis...")
-        rc = run_script("media_analysis.py", [run_id], "media_analysis")
+        rc = run_script_module("media_analysis", [run_id], "media_analysis")
         stages["media_analysis"] = {"exit_code": rc, "synthetic": True}
         # Copy analysis outputs to hermes_artifacts for the artifact gate
         for fname in ["media_probe.json", "visual_scene_analysis.json"]:

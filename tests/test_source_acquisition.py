@@ -282,10 +282,10 @@ def test_tavily_fallback_when_ytdlp_unavailable():
 def test_zero_candidates_stop_pipeline():
     """Test: zero source candidates stops pipeline before download_sources."""
     content = (SCRIPTS_DIR / "run_title_theme_job.py").read_text()
-    source_call_idx = content.find('run_script("source_discovery.py')
-    download_call_idx = content.find('run_script("download_sources.py')
-    media_call_idx = content.find('run_script("media_analysis.py')
-    gate_call_idx = content.find('run_script("editorial_artifact_gate.py')
+    source_call_idx = content.find('run_script_module("source_discovery"')
+    download_call_idx = content.find('run_script_module("download_sources"')
+    media_call_idx = content.find('run_script_module("media_analysis"')
+    gate_call_idx = content.find('run_script_module("editorial_artifact_gate"')
     zero_cand_check = content.find("source_candidates_missing")
     assert_test("zero_candidates_check_exists",
                  zero_cand_check >= 0,
@@ -492,6 +492,105 @@ def test_ensure_yt_dlp_no_secrets():
 
 
 # ---------------------------------------------------------------------------
+# 15. Module invocation contract
+# ---------------------------------------------------------------------------
+
+
+PRODUCTION_MODULES = [
+    "source_provider_preflight",
+    "source_discovery",
+    "download_sources",
+    "media_analysis",
+    "editorial_artifact_gate",
+    "render_with_openmontage",
+    "qa_check",
+    "memory_sync",
+]
+
+
+def test_run_script_module_uses_minus_m():
+    """Test: run_script_module uses -m scripts.<name> invocation."""
+    content = (SCRIPTS_DIR / "run_title_theme_job.py").read_text()
+    assert_test("has_run_script_module",
+                 "def run_script_module" in content,
+                 "run_script_module helper must exist")
+    assert_test("uses_minus_m_flag",
+                 "scripts." in content and "-m" in content,
+                 "must use python3 -m scripts.<module>")
+    assert_test("sets_pythonpath",
+                 "PYTHONPATH" in content and "BASE_DIR" in content,
+                 "must set PYTHONPATH to BASE_DIR")
+    assert_test("sets_cwd",
+                 "cwd=str(BASE_DIR)" in content,
+                 "must set cwd to BASE_DIR")
+
+
+def test_all_production_stages_use_module_invocation():
+    """Test: every production stage uses run_script_module (not file path)."""
+    content = (SCRIPTS_DIR / "run_title_theme_job.py").read_text()
+    for mod in PRODUCTION_MODULES:
+        has_module_call = f'"{mod}"' in content and "run_script_module" in content
+        has_file_path = f"scripts/{mod}.py" in content
+        assert_test(f"stage_{mod}_module_invocation",
+                     has_module_call,
+                     f"stage {mod} must use run_script_module (not file path)")
+        if has_file_path:
+            assert_test(f"stage_{mod}_no_file_path",
+                         False,
+                         f"stage {mod} must not reference scripts/{mod}.py as file path")
+
+
+def test_no_production_file_path_invocations():
+    """Test: no production subprocess invokes scripts/*.py by file path."""
+    content = (SCRIPTS_DIR / "run_title_theme_job.py").read_text()
+    for mod in PRODUCTION_MODULES:
+        file_path_pattern = f'"{mod}.py"' in content or f"'{mod}.py'" in content
+        assert_test(f"no_file_path_{mod}",
+                     not file_path_pattern,
+                     f"must not invoke {mod}.py by file path")
+
+
+def test_notify_uses_module_invocation():
+    """Test: notify() uses module invocation for discord_notify."""
+    content = (SCRIPTS_DIR / "run_title_theme_job.py").read_text()
+    has_module = '"scripts.discord_notify"' in content
+    assert_test("notify_uses_module",
+                 has_module,
+                 "notify must use -m scripts.discord_notify")
+
+
+def test_run_script_module_accepts_env():
+    """Test: run_script_module signature includes env parameter."""
+    content = (SCRIPTS_DIR / "run_title_theme_job.py").read_text()
+    assert_test("has_env_param",
+                 "def run_script_module(module_name, args=None, stage=None, env=None):" in content,
+                 "env parameter must be in signature")
+
+
+def test_source_provider_preflight_works_as_module():
+    """Test: source_provider_preflight import works under -m invocation."""
+    import scripts.source_provider_preflight as preflight_mod
+    saved_tavily = os.environ.pop("TAVILY_API_KEY", None)
+    try:
+        with patch.object(preflight_mod, "ensure_yt_dlp_available") as mock_ensure, \
+             patch.object(preflight_mod, "check_ytdlp_availability") as mock_check, \
+             patch.object(preflight_mod, "sys", spec=["exit", "path"]) as mock_sys:
+            mock_ensure.return_value = {"available": True, "method": "python_module", "version": "2024.12.06"}
+            mock_check.return_value = {"ytdlp_installed": True, "status": "available"}
+            mock_sys.exit.side_effect = SystemExit(0)
+            try:
+                preflight_mod.main()
+            except SystemExit:
+                pass
+            assert_test("preflight_module_import_works",
+                         True,
+                         "source_provider_preflight runs without ModuleNotFoundError when imported")
+    finally:
+        if saved_tavily is not None:
+            os.environ["TAVILY_API_KEY"] = saved_tavily
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -520,6 +619,12 @@ def run_all():
         ("Source provider preflight importable", test_source_provider_preflight_importable),
         ("Preflight no provider exits nonzero", test_preflight_no_provider_exits_nonzero),
         ("ensure_yt_dlp no secrets", test_ensure_yt_dlp_no_secrets),
+        ("run_script_module uses -m", test_run_script_module_uses_minus_m),
+        ("All stages use module invocation", test_all_production_stages_use_module_invocation),
+        ("No file path invocations", test_no_production_file_path_invocations),
+        ("notify uses module invocation", test_notify_uses_module_invocation),
+        ("run_script_module accepts env", test_run_script_module_accepts_env),
+        ("Preflight module import works", test_source_provider_preflight_works_as_module),
     ]
 
     for name, func in tests:
