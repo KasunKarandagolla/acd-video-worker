@@ -2,7 +2,7 @@ job_id: argentina_hardest_victory_2026
 input_mode: title_theme_only
 
 title: "Argentina's Hardest Victory Nobody Expected"
-theme: "most recent Argentina World Cup match in 2026"
+theme: "Argentina vs Egypt, 2026 FIFA World Cup Round of 16, July 7 2026"
 
 # Deterministic match_fact_lock seed — primary path, not fallback.
 # When present, FactLockGenerator builds match_fact_lock.json before Hermes,

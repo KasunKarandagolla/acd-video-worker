@@ -59,6 +59,7 @@ def search_ytdlp(query, max_results=10):
                     "platform": "youtube",
                     "source_type": "unknown",
                     "query_used": query,
+                    "provider": "yt_dlp_search",
                     "downloadable": "yes",
                     "rights_risk": "needs_review",
                     "verification_status": "unverified",
@@ -71,6 +72,55 @@ def search_ytdlp(query, max_results=10):
         print("WARN: yt-dlp search timed out.")
     except Exception as e:
         print(f"WARN: yt-dlp search error: {e}")
+    return results
+
+
+def search_tavily(query, max_results=10):
+    """Search using Tavily API for YouTube and credible web sources."""
+    results = []
+    api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+    if not api_key:
+        print("WARN: TAVILY_API_KEY not set. Cannot perform Tavily search.")
+        return results
+    try:
+        import requests as req
+        resp = req.post(
+            "https://api.tavily.com/search",
+            json={"query": query, "max_results": max_results, "include_domains": ["youtube.com"]},
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            tavily_results = data.get("results", [])
+            for r in tavily_results:
+                url = r.get("url", "")
+                title = r.get("title", "")
+                if not url:
+                    continue
+                source_id = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+                platform = "youtube" if "youtube.com" in url.lower() or "youtu.be" in url.lower() else "web"
+                results.append({
+                    "source_id": source_id,
+                    "canonical_url": url,
+                    "title": title,
+                    "channel": r.get("source", ""),
+                    "platform": platform,
+                    "source_type": "unknown",
+                    "query_used": query,
+                    "provider": "tavily_search",
+                    "downloadable": "yes" if platform == "youtube" else "unknown",
+                    "rights_risk": "needs_review",
+                    "verification_status": "unverified",
+                    "reason_to_consider": f"Tavily search result for: {query}",
+                    "title_lower": (title or "").lower(),
+                })
+        else:
+            print(f"WARN: Tavily search returned status {resp.status_code}")
+    except ImportError:
+        print("WARN: requests module not available for Tavily search.")
+    except Exception as e:
+        print(f"WARN: Tavily search error: {e}")
     return results
 
 
@@ -203,10 +253,36 @@ def main():
 
     queries = list(dict.fromkeys(queries))
 
+    yt_dlp_failed = False
     for query in queries:
-        print(f"Searching: {query}")
+        print(f"Searching (yt-dlp): {query}")
         results = search_ytdlp(query, max_results=8)
         all_candidates.extend(results)
+        if not results:
+            yt_dlp_failed = True
+
+    if not all_candidates and yt_dlp_failed:
+        tavily_queries = queries
+        if match_facts:
+            opponent = match_facts.get("opponent", "")
+            date_str = match_facts.get("date", "")
+            stage = match_facts.get("competition_stage", "") or match_facts.get("stage_or_round", "")
+            match_name = match_facts.get("match", "")
+            tavily_queries = []
+            if opponent and date_str:
+                tavily_queries.append(f"{opponent} vs Egypt 2026 FIFA World Cup {stage} {date_str}")
+                tavily_queries.append(f"{opponent} Egypt World Cup 2026 highlights")
+                tavily_queries.append(f"{opponent} vs Egypt 2026 {stage} highlights")
+            if match_name:
+                tavily_queries.append(match_name)
+            tavily_queries = list(dict.fromkeys(tavily_queries))
+            if not tavily_queries:
+                tavily_queries = queries
+        print("yt-dlp returned no results. Falling back to Tavily search...")
+        for query in tavily_queries:
+            print(f"Searching (Tavily): {query}")
+            results = search_tavily(query, max_results=10)
+            all_candidates.extend(results)
 
     candidates = deduplicate(all_candidates)
 

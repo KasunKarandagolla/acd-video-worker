@@ -274,6 +274,16 @@ def main():
                 stages["fact_lock_generator"] = {"seed_found": False}
                 print("  FactLockGenerator: no seed — using Hermes path")
 
+            # Stage 3.75: Source provider preflight — BEFORE Hermes
+            notify(f"[{run_id}] Stage 3.75/22: source provider preflight")
+            rc = run_script("source_provider_preflight.py", [], "source_provider_preflight")
+            stages["source_provider_preflight"] = {"exit_code": rc}
+            if rc != 0:
+                failed_stage = "source_provider_preflight"
+                exception_info = {"type": "source_provider_unavailable", "message": "No source provider available. Cannot proceed.", "traceback": None}
+                write_failure_summary(run_id, failed_stage, exception_info, stages, run_dir)
+                sys.exit(rc)
+
             # Stage 4: Hermes runtime — canonical run_hermes_turn (with retry for transient errors)
             notify(f"[{run_id}] Stage 4/22: Hermes runtime")
             from scripts.hermes_runtime import run_hermes_turn_with_retry
@@ -388,6 +398,16 @@ def main():
                 exception_info = {"type": "exit_code", "message": f"source_discovery exited with {rc}", "traceback": None}
                 write_failure_summary(run_id, failed_stage, exception_info, stages, run_dir)
                 sys.exit(rc)
+
+            # Fail-fast: zero candidates or blocker stops pipeline immediately
+            if cand_data.get("blocker") or cand_data.get("total_candidates", 0) == 0:
+                blocker_msg = cand_data.get("blocker", "No source candidates found.")
+                print(f"  FAIL: source_discovery returned zero candidates or blocker: {blocker_msg}")
+                notify(f"[{run_id}] source_discovery FAILED: {blocker_msg}")
+                failed_stage = "source_discovery"
+                exception_info = {"type": "source_candidates_missing", "message": blocker_msg, "traceback": None}
+                write_failure_summary(run_id, failed_stage, exception_info, stages, run_dir)
+                sys.exit(1)
 
             # Stage 7: proxy download
             if candidates_path.is_file():

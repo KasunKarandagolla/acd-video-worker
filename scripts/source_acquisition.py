@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -28,6 +29,87 @@ class SourceStatus:
 
 class SourceAcquisitionBlocked(Exception):
     pass
+
+
+def _is_kaggle_runtime() -> bool:
+    return bool(os.environ.get("KAGGLE_KERNEL_RUN_TYPE")) or "/kaggle/working" in str(Path.cwd())
+
+
+def ensure_yt_dlp_available() -> dict:
+    """Ensure yt-dlp is available for source acquisition.
+
+    Checks:
+    1. Python import of yt_dlp
+    2. yt-dlp command-line executable
+    3. If running in Kaggle/runtime, attempt pip install
+    4. If still missing, fail with source_provider_unavailable
+
+    Never prints secrets.
+    """
+    result = {
+        "available": False,
+        "method": None,
+        "error": None,
+    }
+
+    try:
+        import yt_dlp
+        result["available"] = True
+        result["method"] = "python_module"
+        return result
+    except ImportError:
+        pass
+
+    try:
+        proc = subprocess.run(
+            ["yt-dlp", "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            result["available"] = True
+            result["method"] = "cli"
+            result["version"] = proc.stdout.strip()
+            return result
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        result["error"] = str(e)[:200]
+
+    if _is_kaggle_runtime():
+        print("yt-dlp not found. Attempting pip install in Kaggle runtime...")
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", "yt-dlp"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode == 0:
+                try:
+                    import yt_dlp
+                    result["available"] = True
+                    result["method"] = "kaggle_pip_install"
+                    return result
+                except ImportError:
+                    pass
+                try:
+                    proc2 = subprocess.run(
+                        ["yt-dlp", "--version"],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if proc2.returncode == 0:
+                        result["available"] = True
+                        result["method"] = "kaggle_pip_install"
+                        result["version"] = proc2.stdout.strip()
+                        return result
+                except FileNotFoundError:
+                    pass
+            error_detail = (proc.stderr or "")[:300]
+            result["error"] = f"pip install failed: {error_detail}"
+        except Exception as e:
+            result["error"] = f"pip install exception: {str(e)[:200]}"
+    else:
+        result["error"] = "yt-dlp not installed and not in Kaggle runtime"
+
+    return result
 
 
 def _get_youtube_cookies_path() -> str:
