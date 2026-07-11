@@ -640,18 +640,92 @@ def main():
             return 1
 
         # ------------------------------------------------------------------
-        # Step 6: generate readiness report (runtime only)
+        # Step 6: generate readiness report (offline evidence summary)
         # ------------------------------------------------------------------
         print(f"\n{'='*60}")
         print(f"  STEP 6/6: generate_readiness_report")
         print(f"{'='*60}")
-        s6 = run_step(
-            "generate_readiness_report",
-            [sys.executable, "-m", "scripts.check_readiness"],
-            step_dir=steps_dir / "generate_readiness_report",
-            timeout=120,
+
+        # Safety guard: inspect generate_readiness_report source for forbidden references
+        from scripts.generate_readiness_report import (
+            check_forbidden_references,
+            generate_readiness_report,
+            write_readiness_report_files,
         )
-        if not s6["passed"]:
+        import inspect as _inspect
+        _gen_source = _inspect.getsource(generate_readiness_report)
+        _violations = check_forbidden_references(_gen_source)
+        if _violations:
+            print(f"\n  SAFETY GUARD VIOLATION: generate_readiness_report references forbidden code")
+            for _v in _violations:
+                print(f"    Forbidden: {_v}")
+            print()
+            _print_exit_banner(False, "generate_readiness_report safety guard")
+            return 1
+
+        step_dir = steps_dir / "generate_readiness_report"
+        _ensure_empty_dir(step_dir)
+
+        cmd_info = {
+            "label": "generate_readiness_report",
+            "command": ["generate_readiness_report", "in-process"],
+            "cwd": str(BASE_DIR),
+            "env_keys": ["inherit"],
+            "timeout": 15,
+            "started_at": datetime.now(timezone.utc).isoformat() + "Z",
+        }
+        _write_json(step_dir / "command.json", cmd_info)
+
+        start_mono = time.monotonic()
+        s6_passed = False
+        s6_error = None
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        try:
+            _readiness_commit = get_git_commit()
+            _report = generate_readiness_report(
+                cert_id, cert_dir, steps_dir,
+                cert_start.isoformat() + "Z",
+                _readiness_commit,
+            )
+            s6_passed = _report["production_ready"]
+
+            write_readiness_report_files(cert_dir, _report)
+
+            if not s6_passed:
+                blockers = _report.get("blockers") or []
+                s6_error = "Readiness blocked: " + "; ".join(blockers)
+                stderr_lines.append(s6_error)
+
+        except Exception as _e:
+            s6_passed = False
+            s6_error = f"{type(_e).__name__}: {_e}"
+            stderr_lines.append(s6_error)
+            stderr_lines.append(traceback.format_exc())
+
+        duration = round(time.monotonic() - start_mono, 3)
+
+        (step_dir / "stdout.log").write_text("\n".join(stdout_lines))
+        (step_dir / "stderr.log").write_text("\n".join(stderr_lines))
+
+        _write_json(step_dir / "result.json", {
+            "label": "generate_readiness_report",
+            "passed": s6_passed,
+            "exit_code": 0 if s6_passed else 1,
+            "duration_s": duration,
+            "timed_out": False,
+            "error": s6_error,
+            "stdout_path": str(step_dir / "stdout.log"),
+            "stderr_path": str(step_dir / "stderr.log"),
+        })
+
+        _status = "PASSED" if s6_passed else "FAILED"
+        print(f"\n  {_status}: generate_readiness_report ({duration}s)")
+        if s6_error:
+            print(f"    {s6_error}")
+
+        if not s6_passed:
             print()
             _print_exit_banner(False, "generate_readiness_report")
             return 1

@@ -22,6 +22,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import json
+from datetime import timedelta
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 PASS = 0
 FAIL = 0
@@ -685,6 +688,537 @@ def test_step4_no_hermes_artifact_canary_yaml():
                  True, "STEP 4 does not use hermes_artifact_canary.yaml")
 
 
+# ---------------------------------------------------------------------------
+# STEP 6 — generate_readiness_report tests
+# ---------------------------------------------------------------------------
+
+
+def _make_grr_test_env(prefix: str) -> tuple:
+    """Create a temporary cert environment for generate_readiness_report testing.
+
+    Returns (td, cert_id, cert_dir, steps_dir, now, current_commit).
+    Caller should populate step results and canary report as needed.
+    """
+    import tempfile
+    from datetime import datetime, timezone
+    td = Path(tempfile.mkdtemp(prefix=prefix))
+    cert_id = "test_cert_grr"
+    cert_dir = td / "state" / "runs" / cert_id
+    steps_dir = cert_dir / "steps"
+    cert_dir.mkdir(parents=True)
+    steps_dir.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    current_commit = "a" * 40
+    return td, cert_id, cert_dir, steps_dir, now, current_commit
+
+
+def _write_step_result(steps_dir: Path, name: str, passed: bool, command: list = None, started_at: str = None):
+    """Write result.json and command.json for a certification step."""
+    import json as _json
+    (steps_dir / name).mkdir(parents=True, exist_ok=True)
+    if started_at is None:
+        from datetime import datetime, timezone
+        started_at = datetime.now(timezone.utc).isoformat() + "Z"
+    default_cmd = ["python", "-m", f"scripts.{name}"]
+    cmd_data = {
+        "label": name,
+        "command": command or default_cmd,
+        "started_at": started_at,
+    }
+    (steps_dir / name / "command.json").write_text(_json.dumps(cmd_data))
+    result_data = {"label": name, "passed": passed}
+    (steps_dir / name / "result.json").write_text(_json.dumps(result_data))
+
+
+def test_generate_readiness_report_offline_only():
+    """Test: generate_readiness_report function contains no subprocess/network calls."""
+    import scripts.generate_readiness_report as grr
+    import inspect
+    source = inspect.getsource(grr.generate_readiness_report)
+    banned = ["subprocess.run", "subprocess.Popen", "os.system", "requests.", "urllib."]
+    for b in banned:
+        assert_test(f"grr_offline_no_{b.replace('.', '_')}",
+                     b not in source,
+                     f"banned pattern '{b}' found in source")
+
+
+def test_generate_readiness_report_no_forbidden_references():
+    """Test: generate_readiness_report function does not reference banned modules."""
+    import scripts.generate_readiness_report as grr
+    import inspect
+    source = inspect.getsource(grr.generate_readiness_report)
+    violations = grr.check_forbidden_references(source)
+    assert_test("grr_no_forbidden_references",
+                 len(violations) == 0,
+                 f"forbidden references found: {violations}")
+
+
+def test_generate_readiness_report_reads_prior_step_jsons():
+    """Test: generate_readiness_report reads step result.json and command.json files."""
+    import scripts.generate_readiness_report as grr
+    import inspect
+    source = inspect.getsource(grr.generate_readiness_report)
+    assert_test("grr_reads_result_json",
+                 "result.json" in source,
+                 "must read step result.json files")
+    assert_test("grr_reads_command_json",
+                 "command.json" in source,
+                 "must read step command.json files")
+
+
+def test_generate_readiness_report_passes_with_mocked_artifacts():
+    """Test: generate_readiness_report passes when all steps succeeded."""
+    from scripts.generate_readiness_report import generate_readiness_report
+    td, cert_id, cert_dir, steps_dir, now, current_commit = _make_grr_test_env("grr_pass_")
+    cert_start_utc = now.isoformat() + "Z"
+
+    # Write all passing step results
+    for name in ["pipeline_doctor", "synthetic_e2e", "validate_synthetic_evidence",
+                  "hermes_artifact_canary", "validate_canary_evidence"]:
+        cmd = ["python", "-m", f"scripts.{name}"]
+        if name == "synthetic_e2e":
+            cmd = ["python", "-m", "scripts.run_title_theme_job", "job.yaml", "--run-id", f"syn_{cert_id}"]
+        _write_step_result(steps_dir, name, True, command=cmd,
+                          started_at=(now + timedelta(seconds=1)).isoformat() + "Z")
+
+    # Synthetic e2e final_result.json with no fallback
+    syn_run_dir = td / "state" / "runs" / f"syn_{cert_id}"
+    syn_run_dir.mkdir(parents=True)
+    syn_final = {
+        "run_id": f"syn_{cert_id}",
+        "openmontage_success": True,
+        "pipeline_success": True,
+        "final_success": True,
+        "compose_tool_invoked": True,
+        "compose_tool_returned_success": True,
+        "qa_passed": True,
+        "fallback_used": False,
+        "memory_collection_attempted": False,
+        "memory_push_attempted": False,
+        "discord_final_attempted": False,
+    }
+    (syn_run_dir / "final_result.json").write_text(json.dumps(syn_final))
+
+    # Fresh canary report matching current commit
+    canary_run_dir = td / "state" / "runs" / "canary_fresh"
+    canary_run_dir.mkdir(parents=True)
+    canary_report = {
+        "canary_pass": True,
+        "timestamp_utc": now.isoformat() + "Z",
+        "git_commit": current_commit,
+        "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23,
+        "conversation_executed": True,
+        "response_nonempty": True,
+        "session_or_trace_exists": True,
+        "schema_valid": True,
+        "verification_status": "verified",
+        "runtime_seconds": 30,
+    }
+    (canary_run_dir / "canary_report.json").write_text(json.dumps(canary_report))
+
+    report = generate_readiness_report(cert_id, cert_dir, steps_dir, cert_start_utc, current_commit)
+    assert_test("grr_passes_all_gates",
+                 report["production_ready"],
+                 f"blockers: {report.get('blockers')}")
+    assert_test("grr_json_production_ready_true",
+                 report.get("production_ready") is True,
+                 "production_ready must be true")
+    assert_test("grr_no_blockers",
+                 report.get("blockers") is None,
+                 f"unexpected blockers: {report.get('blockers')}")
+
+
+def test_generate_readiness_report_fails_if_canary_missing():
+    """Test: generate_readiness_report fails when canary evidence is missing."""
+    from scripts.generate_readiness_report import generate_readiness_report
+    td, cert_id, cert_dir, steps_dir, now, current_commit = _make_grr_test_env("grr_nocanary_")
+    cert_start_utc = now.isoformat() + "Z"
+
+    for name in ["pipeline_doctor", "synthetic_e2e", "validate_synthetic_evidence",
+                  "hermes_artifact_canary", "validate_canary_evidence"]:
+        _write_step_result(steps_dir, name, True, started_at=(now + timedelta(seconds=1)).isoformat() + "Z")
+
+    syn_run_dir = td / "state" / "runs" / f"syn_{cert_id}"
+    syn_run_dir.mkdir(parents=True)
+    (syn_run_dir / "final_result.json").write_text(json.dumps({"fallback_used": False}))
+
+    # No canary report directory created
+    report = generate_readiness_report(cert_id, cert_dir, steps_dir, cert_start_utc, current_commit)
+    assert_test("grr_fails_canary_missing",
+                 not report["production_ready"],
+                 "should be blocked when canary is missing")
+    blockers = report.get("blockers") or []
+    assert_test("grr_canary_missing_blocker",
+                 any("canary" in b.lower() for b in blockers),
+                 f"blockers: {blockers}")
+
+
+def test_generate_readiness_report_fails_if_canary_stale():
+    """Test: generate_readiness_report fails when canary evidence is stale."""
+    from scripts.generate_readiness_report import generate_readiness_report
+    td, cert_id, cert_dir, steps_dir, now, current_commit = _make_grr_test_env("grr_stale_")
+    cert_start_utc = now.isoformat() + "Z"
+
+    for name in ["pipeline_doctor", "synthetic_e2e", "validate_synthetic_evidence",
+                  "hermes_artifact_canary", "validate_canary_evidence"]:
+        _write_step_result(steps_dir, name, True, started_at=(now + timedelta(seconds=1)).isoformat() + "Z")
+
+    syn_run_dir = td / "state" / "runs" / f"syn_{cert_id}"
+    syn_run_dir.mkdir(parents=True)
+    (syn_run_dir / "final_result.json").write_text(json.dumps({"fallback_used": False}))
+
+    # Canary report with timestamp before cert start
+    canary_run_dir = td / "state" / "runs" / "canary_stale"
+    canary_run_dir.mkdir(parents=True)
+    stale_ts = (now - timedelta(hours=2)).isoformat() + "Z"
+    canary_report = {
+        "canary_pass": True,
+        "timestamp_utc": stale_ts,
+        "git_commit": current_commit,
+        "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23,
+        "conversation_executed": True,
+        "response_nonempty": True,
+        "session_or_trace_exists": True,
+        "schema_valid": True,
+        "verification_status": "verified",
+        "runtime_seconds": 30,
+    }
+    (canary_run_dir / "canary_report.json").write_text(json.dumps(canary_report))
+
+    report = generate_readiness_report(cert_id, cert_dir, steps_dir, cert_start_utc, current_commit)
+    assert_test("grr_fails_canary_stale",
+                 not report["production_ready"],
+                 "should be blocked when canary is stale")
+    blockers = report.get("blockers") or []
+    assert_test("grr_stale_blocker_mentions_stale",
+                 any("stale" in b.lower() for b in blockers),
+                 f"blockers: {blockers}")
+
+
+def test_generate_readiness_report_fails_if_git_commit_mismatch():
+    """Test: generate_readiness_report fails when canary git commit doesn't match."""
+    from scripts.generate_readiness_report import generate_readiness_report
+    td, cert_id, cert_dir, steps_dir, now, _ = _make_grr_test_env("grr_gitmm_")
+    cert_start_utc = now.isoformat() + "Z"
+    current_commit = "b" * 40  # actual current commit
+
+    for name in ["pipeline_doctor", "synthetic_e2e", "validate_synthetic_evidence",
+                  "hermes_artifact_canary", "validate_canary_evidence"]:
+        _write_step_result(steps_dir, name, True, started_at=(now + timedelta(seconds=1)).isoformat() + "Z")
+
+    syn_run_dir = td / "state" / "runs" / f"syn_{cert_id}"
+    syn_run_dir.mkdir(parents=True)
+    (syn_run_dir / "final_result.json").write_text(json.dumps({"fallback_used": False}))
+
+    # Canary report with different commit
+    canary_run_dir = td / "state" / "runs" / "canary_mismatch"
+    canary_run_dir.mkdir(parents=True)
+    canary_report = {
+        "canary_pass": True,
+        "timestamp_utc": now.isoformat() + "Z",
+        "git_commit": "0" * 40,  # different commit
+        "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23,
+        "conversation_executed": True,
+        "response_nonempty": True,
+        "session_or_trace_exists": True,
+        "schema_valid": True,
+        "verification_status": "verified",
+        "runtime_seconds": 30,
+    }
+    (canary_run_dir / "canary_report.json").write_text(json.dumps(canary_report))
+
+    report = generate_readiness_report(cert_id, cert_dir, steps_dir, cert_start_utc, current_commit)
+    assert_test("grr_fails_git_commit_mismatch",
+                 not report["production_ready"],
+                 "should be blocked when git commit mismatches")
+    blockers = report.get("blockers") or []
+    assert_test("grr_git_mismatch_blocker",
+                 any("commit" in b.lower() for b in blockers),
+                 f"blockers: {blockers}")
+
+
+def test_generate_readiness_report_fails_if_synthetic_failed():
+    """Test: generate_readiness_report fails when synthetic evidence failed."""
+    from scripts.generate_readiness_report import generate_readiness_report
+    td, cert_id, cert_dir, steps_dir, now, current_commit = _make_grr_test_env("grr_synfail_")
+    cert_start_utc = now.isoformat() + "Z"
+
+    for name in ["pipeline_doctor", "synthetic_e2e", "validate_synthetic_evidence",
+                  "hermes_artifact_canary", "validate_canary_evidence"]:
+        passed = name != "synthetic_e2e"
+        _write_step_result(steps_dir, name, passed,
+                          started_at=(now + timedelta(seconds=1)).isoformat() + "Z")
+
+    syn_run_dir = td / "state" / "runs" / f"syn_{cert_id}"
+    syn_run_dir.mkdir(parents=True)
+    (syn_run_dir / "final_result.json").write_text(json.dumps({"fallback_used": False}))
+
+    canary_run_dir = td / "state" / "runs" / "canary_fresh"
+    canary_run_dir.mkdir(parents=True)
+    canary_report = {
+        "canary_pass": True,
+        "timestamp_utc": now.isoformat() + "Z",
+        "git_commit": current_commit,
+        "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23,
+        "conversation_executed": True,
+        "response_nonempty": True,
+        "session_or_trace_exists": True,
+        "schema_valid": True,
+        "verification_status": "verified",
+        "runtime_seconds": 30,
+    }
+    (canary_run_dir / "canary_report.json").write_text(json.dumps(canary_report))
+
+    report = generate_readiness_report(cert_id, cert_dir, steps_dir, cert_start_utc, current_commit)
+    assert_test("grr_fails_synthetic_failed",
+                 not report["production_ready"],
+                 "should be blocked when synthetic failed")
+    blockers = report.get("blockers") or []
+    assert_test("grr_synthetic_fail_blocker",
+                 any("synthetic" in b.lower() for b in blockers),
+                 f"blockers: {blockers}")
+
+
+def test_generate_readiness_report_json_has_production_ready():
+    """Test: readiness_report.json contains production_ready field with correct value."""
+    from scripts.generate_readiness_report import generate_readiness_report, write_readiness_report_files
+    td, cert_id, cert_dir, steps_dir, now, current_commit = _make_grr_test_env("grr_json_")
+    cert_start_utc = now.isoformat() + "Z"
+
+    for name in ["pipeline_doctor", "synthetic_e2e", "validate_synthetic_evidence",
+                  "hermes_artifact_canary", "validate_canary_evidence"]:
+        _write_step_result(steps_dir, name, True,
+                          started_at=(now + timedelta(seconds=1)).isoformat() + "Z")
+
+    syn_run_dir = td / "state" / "runs" / f"syn_{cert_id}"
+    syn_run_dir.mkdir(parents=True)
+    (syn_run_dir / "final_result.json").write_text(json.dumps({"fallback_used": False}))
+
+    canary_run_dir = td / "state" / "runs" / "canary_fresh"
+    canary_run_dir.mkdir(parents=True)
+    canary_report = {
+        "canary_pass": True,
+        "timestamp_utc": now.isoformat() + "Z",
+        "git_commit": current_commit,
+        "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23,
+        "conversation_executed": True,
+        "response_nonempty": True,
+        "session_or_trace_exists": True,
+        "schema_valid": True,
+        "verification_status": "verified",
+        "runtime_seconds": 30,
+    }
+    (canary_run_dir / "canary_report.json").write_text(json.dumps(canary_report))
+
+    report = generate_readiness_report(cert_id, cert_dir, steps_dir, cert_start_utc, current_commit)
+    json_path, md_path = write_readiness_report_files(cert_dir, report)
+
+    assert_test("grr_json_file_exists",
+                 json_path.is_file(),
+                 f"readiness_report.json should exist at {json_path}")
+    if json_path.is_file():
+        with open(json_path) as f:
+            saved = json.load(f)
+        assert_test("grr_json_has_production_ready",
+                     "production_ready" in saved,
+                     "json must contain production_ready key")
+        assert_test("grr_json_production_ready_value",
+                     saved["production_ready"] == report["production_ready"],
+                     f"expected {report['production_ready']}, got {saved['production_ready']}")
+
+
+def test_generate_readiness_report_md_written():
+    """Test: readiness_report.md is written by write_readiness_report_files."""
+    from scripts.generate_readiness_report import generate_readiness_report, write_readiness_report_files
+    td, cert_id, cert_dir, steps_dir, now, current_commit = _make_grr_test_env("grr_md_")
+    cert_start_utc = now.isoformat() + "Z"
+
+    for name in ["pipeline_doctor", "synthetic_e2e", "validate_synthetic_evidence",
+                  "hermes_artifact_canary", "validate_canary_evidence"]:
+        _write_step_result(steps_dir, name, True,
+                          started_at=(now + timedelta(seconds=1)).isoformat() + "Z")
+
+    syn_run_dir = td / "state" / "runs" / f"syn_{cert_id}"
+    syn_run_dir.mkdir(parents=True)
+    (syn_run_dir / "final_result.json").write_text(json.dumps({"fallback_used": False}))
+    canary_run_dir = td / "state" / "runs" / "canary_fresh"
+    canary_run_dir.mkdir(parents=True)
+    (canary_run_dir / "canary_report.json").write_text(json.dumps({
+        "canary_pass": True, "timestamp_utc": now.isoformat() + "Z",
+        "git_commit": current_commit, "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23, "conversation_executed": True,
+        "response_nonempty": True, "session_or_trace_exists": True,
+        "schema_valid": True, "verification_status": "verified", "runtime_seconds": 30,
+    }))
+
+    report = generate_readiness_report(cert_id, cert_dir, steps_dir, cert_start_utc, current_commit)
+    json_path, md_path = write_readiness_report_files(cert_dir, report)
+    assert_test("grr_md_file_exists",
+                 md_path.is_file(),
+                 f"readiness_report.md should exist at {md_path}")
+    if md_path.is_file():
+        content = md_path.read_text()
+        assert_test("grr_md_has_verdict",
+                     "PRODUCTION_RUN_READY" in content or "PRODUCTION_RUN_BLOCKED" in content,
+                     "md must contain verdict")
+
+
+def test_generate_readiness_report_fails_if_fallback_used():
+    """Test: generate_readiness_report fails when fallback was used in synthetic_e2e."""
+    from scripts.generate_readiness_report import generate_readiness_report
+    td, cert_id, cert_dir, steps_dir, now, current_commit = _make_grr_test_env("grr_fb_")
+    cert_start_utc = now.isoformat() + "Z"
+
+    for name in ["pipeline_doctor", "synthetic_e2e", "validate_synthetic_evidence",
+                  "hermes_artifact_canary", "validate_canary_evidence"]:
+        cmd = ["python", "-m", f"scripts.{name}"]
+        if name == "synthetic_e2e":
+            cmd = ["python", "-m", "scripts.run_title_theme_job", "job.yaml", "--run-id", f"syn_{cert_id}"]
+        _write_step_result(steps_dir, name, True, command=cmd,
+                          started_at=(now + timedelta(seconds=1)).isoformat() + "Z")
+
+    # Synthetic e2e with fallback_used=True
+    syn_run_dir = td / "state" / "runs" / f"syn_{cert_id}"
+    syn_run_dir.mkdir(parents=True)
+    (syn_run_dir / "final_result.json").write_text(json.dumps({"fallback_used": True}))
+
+    canary_run_dir = td / "state" / "runs" / "canary_fresh"
+    canary_run_dir.mkdir(parents=True)
+    (canary_run_dir / "canary_report.json").write_text(json.dumps({
+        "canary_pass": True, "timestamp_utc": now.isoformat() + "Z",
+        "git_commit": current_commit, "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23, "conversation_executed": True,
+        "response_nonempty": True, "session_or_trace_exists": True,
+        "schema_valid": True, "verification_status": "verified", "runtime_seconds": 30,
+    }))
+
+    report = generate_readiness_report(cert_id, cert_dir, steps_dir, cert_start_utc, current_commit)
+    assert_test("grr_fails_fallback_used",
+                 not report["production_ready"],
+                 "should be blocked when fallback was used")
+    blockers = report.get("blockers") or []
+    assert_test("grr_fallback_blocker",
+                 any("fallback" in b.lower() for b in blockers),
+                 f"blockers: {blockers}")
+
+
+def test_step6_timeout_max_15():
+    """Test: STEP 6 timeout is at most 15 seconds."""
+    source = (BASE_DIR / "scripts" / "preproduction_certify.py").read_text()
+    step6_region = source.split("STEP 6")[1] if "STEP 6" in source else ""
+    has_15 = '"timeout": 15' in step6_region
+    assert_test("step6_timeout_max_15",
+                 has_15,
+                 "STEP 6 must enforce timeout <= 15")
+
+
+def test_step6_in_process_no_subprocess():
+    """Test: STEP 6 uses in-process function call, not subprocess."""
+    source = (BASE_DIR / "scripts" / "preproduction_certify.py").read_text()
+    step6_region = source.split("STEP 6")[1] if "STEP 6" in source else ""
+    # Must NOT call run_step for generate_readiness_report
+    has_run_step = 'run_step(' in step6_region and 'generate_readiness_report' in step6_region
+    has_in_process = 'generate_readiness_report(' in step6_region
+    assert_test("step6_in_process_call",
+                 has_in_process and not has_run_step,
+                 "STEP 6 must use in-process call, not run_step subprocess")
+
+
+def test_step6_cannot_reach_production_job_code():
+    """Test: STEP 6 source cannot reference production job code."""
+    source = (BASE_DIR / "scripts" / "preproduction_certify.py").read_text()
+    step6_region = source.split("STEP 6")[1] if "STEP 6" in source else ""
+    forbidden_in_step6 = [
+        "run_title_theme_job",
+        "hermes_runtime",
+        "llm_key_check",
+        "source_discovery",
+        "download_sources",
+        "render_with_openmontage",
+        "memory_sync",
+        "discord",
+    ]
+    for fb in forbidden_in_step6:
+        assert_test(f"step6_no_{fb}",
+                     fb not in step6_region,
+                     f"STEP 6 must not reference '{fb}'")
+
+
+def test_generate_readiness_report_production_ready_only_all_gates():
+    """Test: production_ready=true only when all gates pass."""
+    from scripts.generate_readiness_report import generate_readiness_report
+    td, cert_id, cert_dir, steps_dir, now, current_commit = _make_grr_test_env("grr_gates_")
+    cert_start_utc = now.isoformat() + "Z"
+
+    # All steps passing
+    for name in ["pipeline_doctor", "synthetic_e2e", "validate_synthetic_evidence",
+                  "hermes_artifact_canary", "validate_canary_evidence"]:
+        _write_step_result(steps_dir, name, True,
+                          started_at=(now + timedelta(seconds=1)).isoformat() + "Z")
+
+    syn_run_dir = td / "state" / "runs" / f"syn_{cert_id}"
+    syn_run_dir.mkdir(parents=True)
+    (syn_run_dir / "final_result.json").write_text(json.dumps({"fallback_used": False}))
+    canary_run_dir = td / "state" / "runs" / "canary_fresh"
+    canary_run_dir.mkdir(parents=True)
+    (canary_run_dir / "canary_report.json").write_text(json.dumps({
+        "canary_pass": True, "timestamp_utc": now.isoformat() + "Z",
+        "git_commit": current_commit, "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23, "conversation_executed": True,
+        "response_nonempty": True, "session_or_trace_exists": True,
+        "schema_valid": True, "verification_status": "verified", "runtime_seconds": 30,
+    }))
+
+    report = generate_readiness_report(cert_id, cert_dir, steps_dir, cert_start_utc, current_commit)
+    gates = report.get("gates", {})
+    all_pass = all(gates.values())
+    assert_test("grr_all_gates_pass_when_all_true",
+                 all_pass,
+                 f"not all gates pass: {gates}")
+    assert_test("grr_production_ready_true",
+                 report["production_ready"] == all_pass,
+                 f"production_ready={report['production_ready']} != all_pass={all_pass}")
+
+
+def test_generate_readiness_report_fails_if_cert_commit_unknown():
+    """Test: generate_readiness_report fails when current_commit is 'unknown'."""
+    from scripts.generate_readiness_report import generate_readiness_report
+    td, cert_id, cert_dir, steps_dir, now, _ = _make_grr_test_env("grr_unk_")
+    cert_start_utc = now.isoformat() + "Z"
+
+    for name in ["pipeline_doctor", "synthetic_e2e", "validate_synthetic_evidence",
+                  "hermes_artifact_canary", "validate_canary_evidence"]:
+        _write_step_result(steps_dir, name, True,
+                          started_at=(now + timedelta(seconds=1)).isoformat() + "Z")
+
+    syn_run_dir = td / "state" / "runs" / f"syn_{cert_id}"
+    syn_run_dir.mkdir(parents=True)
+    (syn_run_dir / "final_result.json").write_text(json.dumps({"fallback_used": False}))
+    canary_run_dir = td / "state" / "runs" / "canary_fresh"
+    canary_run_dir.mkdir(parents=True)
+    (canary_run_dir / "canary_report.json").write_text(json.dumps({
+        "canary_pass": True, "timestamp_utc": now.isoformat() + "Z",
+        "git_commit": "unknown", "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23, "conversation_executed": True,
+        "response_nonempty": True, "session_or_trace_exists": True,
+        "schema_valid": True, "verification_status": "verified", "runtime_seconds": 30,
+    }))
+
+    report = generate_readiness_report(cert_id, cert_dir, steps_dir, cert_start_utc, "unknown")
+    assert_test("grr_fails_unknown_commit",
+                 not report["production_ready"],
+                 "should be blocked when commit is unknown")
+    blockers = report.get("blockers") or []
+    assert_test("grr_unknown_commit_blocker",
+                 any("commit" in b.lower() for b in blockers),
+                 f"blockers: {blockers}")
+
+
 def run_all():
     global PASS, FAIL, TOTAL
     print(f"\n{'='*60}")
@@ -719,6 +1253,22 @@ def run_all():
         ("STEP 4 no hermes_artifact_canary.yaml", test_step4_no_hermes_artifact_canary_yaml),
         ("Canary deterministic accepted", test_canary_deterministic_report_accepted),
         ("Fallback constructed rejected", test_canary_fallback_constructed_rejected),
+        ("GRR offline only", test_generate_readiness_report_offline_only),
+        ("GRR no forbidden references", test_generate_readiness_report_no_forbidden_references),
+        ("GRR reads prior step JSONs", test_generate_readiness_report_reads_prior_step_jsons),
+        ("GRR passes with mocked artifacts", test_generate_readiness_report_passes_with_mocked_artifacts),
+        ("GRR fails if canary missing", test_generate_readiness_report_fails_if_canary_missing),
+        ("GRR fails if canary stale", test_generate_readiness_report_fails_if_canary_stale),
+        ("GRR fails if git commit mismatch", test_generate_readiness_report_fails_if_git_commit_mismatch),
+        ("GRR fails if synthetic failed", test_generate_readiness_report_fails_if_synthetic_failed),
+        ("GRR JSON has production_ready", test_generate_readiness_report_json_has_production_ready),
+        ("GRR MD written", test_generate_readiness_report_md_written),
+        ("GRR fails if fallback used", test_generate_readiness_report_fails_if_fallback_used),
+        ("STEP 6 timeout max 15", test_step6_timeout_max_15),
+        ("STEP 6 in-process no subprocess", test_step6_in_process_no_subprocess),
+        ("STEP 6 cannot reach production job code", test_step6_cannot_reach_production_job_code),
+        ("GRR production_ready only all gates", test_generate_readiness_report_production_ready_only_all_gates),
+        ("GRR fails if commit unknown", test_generate_readiness_report_fails_if_cert_commit_unknown),
     ]
 
     for name, func in tests:
