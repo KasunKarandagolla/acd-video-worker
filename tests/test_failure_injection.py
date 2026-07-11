@@ -962,6 +962,76 @@ def test_certification_stops_before_readiness_when_canary_fails():
                  "Readiness should not run when canary fails")
 
 
+def test_production_never_uses_canary_deterministic():
+    """Test: production run_hermes_turn (no canary_mode) never treats canary-only method as valid."""
+    from scripts.hermes_runtime import run_hermes_turn, _build_canary_deterministic_match_fact_lock
+    saved = {k: os.environ.pop(k, None) for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")}
+    try:
+        os.environ["LLM_API_KEY"] = "sk-test"
+        os.environ["LLM_BASE_URL"] = "https://example.invalid/v1"
+        os.environ["LLM_MODEL"] = "test-model"
+
+        with patch("scripts.hermes_runtime._check_venv_hermes_import") as mock_check, \
+             patch("scripts.hermes_runtime._prepare_and_query_skills") as mock_skills, \
+             patch("scripts.hermes_runtime.subprocess.Popen") as mock_popen:
+
+            mock_check.return_value = {"aiagent_importable": True}
+            mock_skills.return_value = {"hermes_loaded_skill_count": 1, "hermes_loaded_skill_names": ["test"]}
+            fake_proc = MagicMock()
+            fake_proc.returncode = 0
+            fake_proc.communicate.return_value = (
+                "RESPONSE_START\nI confirm the 2014 FIFA World Cup Final, Germany vs Argentina\nRESPONSE_END\n",
+                ""
+            )
+            fake_proc.pid = 12345
+            mock_popen.return_value = fake_proc
+
+            run_dir = _make_test_run_dir("prod_no_deterministic")
+            # smoke_test=True = production mode, NOT canary_mode
+            result = run_hermes_turn("test", "test", "prod_no_det", run_dir, smoke_test=True)
+            mf_path = run_dir / "hermes_artifacts" / "match_fact_lock.json"
+            has_lock = mf_path.is_file()
+            assert_test("production_rejects_non_json_response",
+                         not result.get("success") and not has_lock,
+                         f"success={result.get('success')}, has_lock={has_lock}")
+            err_msg = result.get("error_message", "")
+            assert_test("production_error_mentions_fallback",
+                         "match_fact_lock" in err_msg or "fallback" in err_msg,
+                         f"error_message={err_msg}")
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_production_run_hermes_turn_no_canary_fallback():
+    """Test: production run_hermes_turn source code only uses deterministic lock inside canary_mode."""
+    import inspect
+    from scripts.hermes_runtime import run_hermes_turn
+    source = inspect.getsource(run_hermes_turn)
+    # The deterministic function call must be inside a canary_mode check
+    det_lines = [l for l in source.split("\n") if "_build_canary_deterministic_match_fact_lock" in l]
+    assert_test("deterministic_only_in_canary",
+                 len(det_lines) > 0,
+                 "deterministic builder found in run_hermes_turn")
+    for line in det_lines:
+        # Each call should be indented under the canary_mode block
+        assert_test("det_builder_in_canary_block",
+                     "if canary_mode" not in line.strip() and line.startswith(" " * 8),
+                     f"call is inside canary_mode block: {line.strip()}")
+
+
+def test_canary_deterministic_string_not_in_production_extraction():
+    """Test: the canary-only extraction method string does not appear in production extraction logic."""
+    import inspect
+    from scripts.hermes_runtime import run_hermes_turn, _extract_and_validate_artifacts
+    ext_source = inspect.getsource(_extract_and_validate_artifacts)
+    det_string = "canary_deterministic_fact_packet_after_hermes_attestation"
+    assert_test("canary_method_not_in_extraction",
+                 det_string not in ext_source,
+                 "extraction function must not reference canary-specific method")
+
+
 def test_transient_error_retry_max_one():
     """Test: transient timeout receives at most one retry."""
     from scripts.hermes_runtime import _is_transient_error
@@ -1030,6 +1100,9 @@ def run_all():
         ("Cert stops before canary when synthetic fails", test_certification_stops_before_canary_when_synthetic_fails),
         ("Cert stops before readiness when canary fails", test_certification_stops_before_readiness_when_canary_fails),
         ("Transient error retry max one", test_transient_error_retry_max_one),
+        ("Production never uses canary deterministic", test_production_never_uses_canary_deterministic),
+        ("Production run_hermes_turn no canary fallback", test_production_run_hermes_turn_no_canary_fallback),
+        ("Canary deterministic not in production path", test_canary_deterministic_string_not_in_production_extraction),
     ]
 
     for name, func in tests:

@@ -466,6 +466,17 @@ def validate_canary_evidence(cert_start: datetime) -> dict:
     mf_lock_path = report.get("match_fact_lock_path")
     if mf_lock_path and Path(mf_lock_path).is_file():
         result["evidence_paths"].append(mf_lock_path)
+        try:
+            mf_data = json.loads(Path(mf_lock_path).read_text())
+            extraction_method = mf_data.get("extraction_method", "")
+            is_canary_deterministic = extraction_method == "canary_deterministic_fact_packet_after_hermes_attestation"
+            checks.append({"check": "extraction_method_canary_deterministic", "passed": is_canary_deterministic})
+            checks.append({"check": "canary_only_true", "passed": mf_data.get("canary_only") is True})
+            checks.append({"check": "production_fallback_not_used", "passed": mf_data.get("production_fallback_used") is False})
+            checks.append({"check": "hermes_response_sha256_present", "passed": bool(mf_data.get("hermes_response_sha256"))})
+            checks.append({"check": "fact_packet_sha256_present", "passed": bool(mf_data.get("fact_packet_sha256"))})
+        except Exception:
+            checks.append({"check": "match_fact_lock_readable", "passed": False})
 
     result["checks"] = checks
     result["passed"] = all(c["passed"] for c in checks)

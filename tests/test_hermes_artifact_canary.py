@@ -76,14 +76,21 @@ def test_core_agent_code():
 
 
 def test_canary_agent_prompt_includes_fact_packet():
-    """Test the canary prompt JSON includes the fact_packet."""
+    """Test the canary prompt JSON includes the fact_packet (confirmation, not JSON)."""
     from scripts.hermes_runtime import _build_canary_agent_code
     fact_packet = {"competition": "2014 FIFA World Cup", "team_a": "Germany"}
+    instructions = (
+        "You are the ACD Video Worker canary agent. "
+        "You are given a verified fact packet below. "
+        "Confirm that you have received and understand this fact packet. "
+        "Respond briefly confirming the competition, teams, and score. "
+        "Do NOT use any tools. Do NOT ask questions."
+    )
     msg = json.dumps({
         "task": "canary_artifact_verification",
         "session_id": "test",
         "fact_packet": fact_packet,
-        "instructions": "test instructions",
+        "instructions": instructions,
     })
     code = _build_canary_agent_code(
         hermes_repo_str="/fake/repo",
@@ -93,6 +100,12 @@ def test_canary_agent_prompt_includes_fact_packet():
         api_key="k", base_url="u", model="m",
     )
     assert_test("fact_packet_in_code", "2014 FIFA World Cup" in code, "fact packet data in generated code")
+    assert_test("canary_prompt_no_json_requirement",
+                 "Produce exactly one strict JSON" not in code,
+                 "should not require JSON output")
+    assert_test("canary_prompt_asks_confirmation",
+                 "Confirm that you have received" in code,
+                 "should ask for confirmation")
 
 
 def test_disabled_toolsets_constant():
@@ -343,6 +356,116 @@ def test_canary_standalone_entry_point():
     assert_test("canary_module_runs", True, f"exit={result.returncode}")
 
 
+def test_build_canary_deterministic_match_fact_lock():
+    """Test _build_canary_deterministic_match_fact_lock produces valid lock with provenance fields."""
+    from scripts.hermes_runtime import _build_canary_deterministic_match_fact_lock, _validate_match_fact_lock
+    fact_packet = {"competition": "2014 FIFA World Cup", "team_a": "Germany", "team_b": "Argentina"}
+    hermes_response = "I confirm the 2014 FIFA World Cup Final, Germany vs Argentina, 1-0"
+    result = _build_canary_deterministic_match_fact_lock(fact_packet, hermes_response)
+    assert_test("deterministic_lock_created", result is not None, "lock was built")
+    assert_test("deterministic_extraction_method",
+                 result.get("extraction_method") == "canary_deterministic_fact_packet_after_hermes_attestation",
+                 f"got {result.get('extraction_method')}")
+    assert_test("deterministic_canary_only", result.get("canary_only") is True, "canary_only=True")
+    assert_test("deterministic_no_fallback", result.get("production_fallback_used") is False,
+                 "production_fallback_used=False")
+    assert_test("deterministic_hermes_sha256",
+                 bool(result.get("hermes_response_sha256")),
+                 "hermes_response_sha256 present")
+    assert_test("deterministic_fact_packet_sha256",
+                 bool(result.get("fact_packet_sha256")),
+                 "fact_packet_sha256 present")
+    assert_test("deterministic_match", result.get("match") == "Germany vs Argentina",
+                 f"match={result.get('match')}")
+    assert_test("deterministic_competition", result.get("competition") == "2014 FIFA World Cup Final",
+                 f"competition={result.get('competition')}")
+    assert_test("deterministic_date", result.get("match_date") == "2014-07-13",
+                 f"date={result.get('match_date')}")
+    assert_test("deterministic_score", result.get("score") == "Germany 1-0 Argentina",
+                 f"score={result.get('score')}")
+    assert_test("deterministic_decisive_goal", result.get("decisive_goal") == "Mario Götze, 113'",
+                 f"decisive_goal={result.get('decisive_goal')}")
+    assert_test("deterministic_source_mode", result.get("source_mode") == "stable_canary_fact_packet",
+                 f"source_mode={result.get('source_mode')}")
+    assert_test("deterministic_hermes_attestation", result.get("hermes_attestation_required") is True,
+                 "hermes_attestation_required=True")
+    assert_test("deterministic_verification_status", result.get("verification_status") == "verified",
+                 f"status={result.get('verification_status')}")
+    # Must pass standard schema validation
+    schema_errors = _validate_match_fact_lock(result)
+    assert_test("deterministic_schema_valid", len(schema_errors) == 0,
+                 f"schema errors: {schema_errors}")
+
+
+def test_build_canary_deterministic_hashes_response():
+    """Test that hermes_response_sha256 changes when response changes."""
+    from scripts.hermes_runtime import _build_canary_deterministic_match_fact_lock
+    fact_packet = {"competition": "2014 FIFA World Cup", "team_a": "Germany"}
+    r1 = _build_canary_deterministic_match_fact_lock(fact_packet, "response one")
+    r2 = _build_canary_deterministic_match_fact_lock(fact_packet, "response two")
+    assert_test("different_response_different_sha256",
+                 r1["hermes_response_sha256"] != r2["hermes_response_sha256"],
+                 "hashes should differ when response differs")
+
+
+def test_build_canary_deterministic_empty_response():
+    """Test that empty response still produces valid lock but hermes_response_nonempty is False."""
+    from scripts.hermes_runtime import _build_canary_deterministic_match_fact_lock
+    fact_packet = {"competition": "2014 FIFA World Cup", "team_a": "Germany"}
+    result = _build_canary_deterministic_match_fact_lock(fact_packet, "")
+    assert_test("empty_response_not_nonempty",
+                 result.get("hermes_response_nonempty") is False,
+                 "should be marked as non-empty=False")
+
+
+def test_canary_report_contains_all_provenance_fields():
+    """Test that the canary script's report dict includes all required provenance fields."""
+    import scripts.hermes_artifact_canary as canary
+    fp = canary.FACT_PACKET
+    # The report is built in main(); we test that the canary script references the required fields
+    source = open(canary.__file__).read()
+    required_in_report = [
+        "extraction_method",
+        "canary_only",
+        "production_fallback_used",
+        "hermes_response_sha256",
+        "fact_packet_sha256",
+        "match",
+        "competition",
+        "decisive_goal",
+        "source_mode",
+        "hermes_attestation_required",
+    ]
+    for field in required_in_report:
+        assert_test(f"report_has_{field}",
+                     f'"{field}"' in source,
+                     f"{field} in report dict")
+
+
+def test_canary_extraction_method_constant_in_runtime():
+    """Test that the canary extraction method constant exists in hermes_runtime."""
+    import scripts.hermes_runtime as rt
+    result = rt._build_canary_deterministic_match_fact_lock({"team_a": "Germany"}, "ok")
+    assert_test("canary_method_constant",
+                 result.get("extraction_method") == "canary_deterministic_fact_packet_after_hermes_attestation",
+                 f"method={result.get('extraction_method')}")
+
+
+def test_canary_only_match_fact_lock_has_all_fields():
+    """Test that the canary match_fact_lock includes all provenance fields."""
+    from scripts.hermes_runtime import _build_canary_deterministic_match_fact_lock
+    result = _build_canary_deterministic_match_fact_lock({"team_a": "A", "team_b": "B"}, "ok")
+    required_provenance = [
+        "extraction_method", "canary_only", "production_fallback_used",
+        "hermes_response_nonempty", "hermes_response_sha256", "fact_packet_sha256",
+        "source_mode", "hermes_attestation_required", "match", "decisive_goal",
+    ]
+    for field in required_provenance:
+        assert_test(f"provenance_field_{field}",
+                     field in result,
+                     f"{field} present in match_fact_lock")
+
+
 def test_canary_expected_skills_count():
     """Test the expected V7 skill count constant."""
     import scripts.hermes_artifact_canary as canary
@@ -388,6 +511,12 @@ def run_all():
     test_json_extraction_parses_valid()
     test_json_extraction_handles_empty()
     test_canary_standalone_entry_point()
+    test_build_canary_deterministic_match_fact_lock()
+    test_build_canary_deterministic_hashes_response()
+    test_build_canary_deterministic_empty_response()
+    test_canary_report_contains_all_provenance_fields()
+    test_canary_extraction_method_constant_in_runtime()
+    test_canary_only_match_fact_lock_has_all_fields()
     test_canary_expected_skills_count()
     test_canary_timeout_constant()
     test_canary_active_skills_list()

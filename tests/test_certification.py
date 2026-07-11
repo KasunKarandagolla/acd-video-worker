@@ -500,7 +500,14 @@ def test_fresh_standalone_report_passes():
     }
     with open(canary_dir / "canary_report.json", "w") as f:
         json.dump(report, f)
-    mf = {"verification_status": "verified"}
+    mf = {
+        "verification_status": "verified",
+        "extraction_method": "canary_deterministic_fact_packet_after_hermes_attestation",
+        "canary_only": True,
+        "production_fallback_used": False,
+        "hermes_response_sha256": "c" * 64,
+        "fact_packet_sha256": "d" * 64,
+    }
     with open(canary_dir / "match_fact_lock.json", "w") as f:
         json.dump(mf, f)
     import scripts.preproduction_certify as cert
@@ -551,6 +558,123 @@ def test_step4_no_run_title_theme_job():
                  True, "STEP 4 does not use run_title_theme_job")
 
 
+def test_canary_deterministic_report_accepted():
+    """Test: validate_canary_evidence accepts canary_deterministic_fact_packet_after_hermes_attestation."""
+    from scripts.preproduction_certify import validate_canary_evidence
+    from datetime import datetime, timezone, timedelta
+    import tempfile, json
+    from unittest.mock import patch
+    td = Path(tempfile.mkdtemp(prefix="cert_canary_det_"))
+    runs_dir = td / "state" / "runs"
+    runs_dir.mkdir(parents=True)
+    canary_dir = runs_dir / "canary_det_test"
+    canary_dir.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    current_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+    report = {
+        "canary_pass": True,
+        "timestamp_utc": now.isoformat() + "Z",
+        "git_commit": current_commit,
+        "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23,
+        "conversation_executed": True,
+        "response_nonempty": True,
+        "session_or_trace_exists": True,
+        "schema_valid": True,
+        "verification_status": "verified",
+        "runtime_seconds": 30,
+        "match_fact_lock_path": str(canary_dir / "match_fact_lock.json"),
+        "extraction_method": "canary_deterministic_fact_packet_after_hermes_attestation",
+        "canary_only": True,
+        "production_fallback_used": False,
+        "hermes_response_sha256": "a" * 64,
+        "fact_packet_sha256": "b" * 64,
+    }
+    with open(canary_dir / "canary_report.json", "w") as f:
+        json.dump(report, f)
+    mf = {
+        "verification_status": "verified",
+        "extraction_method": "canary_deterministic_fact_packet_after_hermes_attestation",
+        "canary_only": True,
+        "production_fallback_used": False,
+        "hermes_response_sha256": "a" * 64,
+        "fact_packet_sha256": "b" * 64,
+    }
+    with open(canary_dir / "match_fact_lock.json", "w") as f:
+        json.dump(mf, f)
+    import scripts.preproduction_certify as cert
+    original_base = cert.BASE_DIR
+    try:
+        cert.BASE_DIR = td
+        with patch("scripts.preproduction_certify.get_git_commit", return_value=current_commit):
+            result = validate_canary_evidence(now - timedelta(seconds=1))
+            assert_test("canary_deterministic_accepted",
+                         result["passed"],
+                         f"should pass, got: {result.get('error', '')}")
+    finally:
+        cert.BASE_DIR = original_base
+
+
+def test_canary_fallback_constructed_rejected():
+    """Test: validate_canary_evidence rejects fallback_constructed extraction method."""
+    from scripts.preproduction_certify import validate_canary_evidence
+    from datetime import datetime, timezone, timedelta
+    import tempfile, json
+    from unittest.mock import patch
+    td = Path(tempfile.mkdtemp(prefix="cert_fallback_rej_"))
+    runs_dir = td / "state" / "runs"
+    runs_dir.mkdir(parents=True)
+    canary_dir = runs_dir / "canary_fallback_test"
+    canary_dir.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    current_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+    report = {
+        "canary_pass": True,
+        "timestamp_utc": now.isoformat() + "Z",
+        "git_commit": current_commit,
+        "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23,
+        "conversation_executed": True,
+        "response_nonempty": True,
+        "session_or_trace_exists": True,
+        "schema_valid": False,
+        "verification_status": "pending",
+        "runtime_seconds": 30,
+        "match_fact_lock_path": str(canary_dir / "match_fact_lock.json"),
+    }
+    with open(canary_dir / "canary_report.json", "w") as f:
+        json.dump(report, f)
+    mf = {
+        "verification_status": "pending",
+        "extraction_method": "fallback_constructed",
+        "canary_only": False,
+    }
+    with open(canary_dir / "match_fact_lock.json", "w") as f:
+        json.dump(mf, f)
+    import scripts.preproduction_certify as cert
+    original_base = cert.BASE_DIR
+    try:
+        cert.BASE_DIR = td
+        with patch("scripts.preproduction_certify.get_git_commit", return_value=current_commit):
+            result = validate_canary_evidence(now - timedelta(seconds=1))
+            assert_test("fallback_constructed_rejected",
+                         not result["passed"],
+                         f"should fail, error={result.get('error', '')}")
+            extraction_check = any(
+                c["check"] == "extraction_method_canary_deterministic" and not c["passed"]
+                for c in result.get("checks", [])
+            )
+            assert_test("fallback_constructed_check_failed",
+                         extraction_check,
+                         "extraction_method check should fail")
+    finally:
+        cert.BASE_DIR = original_base
+
+
 def test_step4_no_hermes_artifact_canary_yaml():
     """Test: hermes_artifact_canary.yaml is not used for certification canary."""
     source = (BASE_DIR / "scripts" / "preproduction_certify.py").read_text()
@@ -593,6 +717,8 @@ def run_all():
         ("Standalone failure stops readiness", test_standalone_failure_stops_readiness),
         ("STEP 4 no run_title_theme_job", test_step4_no_run_title_theme_job),
         ("STEP 4 no hermes_artifact_canary.yaml", test_step4_no_hermes_artifact_canary_yaml),
+        ("Canary deterministic accepted", test_canary_deterministic_report_accepted),
+        ("Fallback constructed rejected", test_canary_fallback_constructed_rejected),
     ]
 
     for name, func in tests:

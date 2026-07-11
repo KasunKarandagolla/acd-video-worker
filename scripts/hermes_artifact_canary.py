@@ -234,9 +234,58 @@ def main() -> int:
     if vs != "verified":
         print(f"FAIL: verification_status='{vs}' (expected 'verified')", flush=True)
         return 1
-
     print(f"  verification_status: {vs}", flush=True)
     print(f"  Match: {match_fact.get('team_a')} vs {match_fact.get('team_b')}", flush=True)
+
+    # Canary-specific provenance field verification
+    extraction_method = match_fact.get("extraction_method", "")
+    expected_method = "canary_deterministic_fact_packet_after_hermes_attestation"
+    if extraction_method != expected_method:
+        print(f"FAIL: extraction_method='{extraction_method}' (expected '{expected_method}')", flush=True)
+        return 1
+    print(f"  extraction_method: {extraction_method}", flush=True)
+
+    if match_fact.get("canary_only") is not True:
+        print(f"FAIL: canary_only flag must be true", flush=True)
+        return 1
+    print(f"  canary_only: True", flush=True)
+
+    if match_fact.get("production_fallback_used") is not False:
+        print(f"FAIL: production_fallback_used must be false", flush=True)
+        return 1
+    print(f"  production_fallback_used: False", flush=True)
+
+    hermes_response_sha256 = match_fact.get("hermes_response_sha256", "")
+    if not hermes_response_sha256:
+        print(f"FAIL: hermes_response_sha256 is missing", flush=True)
+        return 1
+    print(f"  hermes_response_sha256: {hermes_response_sha256[:16]}...", flush=True)
+
+    fact_packet_sha256 = match_fact.get("fact_packet_sha256", "")
+    if not fact_packet_sha256:
+        print(f"FAIL: fact_packet_sha256 is missing", flush=True)
+        return 1
+    print(f"  fact_packet_sha256: {fact_packet_sha256[:16]}...", flush=True)
+
+    provenance_checks = [
+        ("match", "Germany vs Argentina"),
+        ("competition", "2014 FIFA World Cup Final"),
+        ("match_date", "2014-07-13"),
+        ("score", "Germany 1-0 Argentina"),
+        ("decisive_goal", "Mario Götze, 113'"),
+        ("source_mode", "stable_canary_fact_packet"),
+    ]
+    for field, expected in provenance_checks:
+        actual = match_fact.get(field, "")
+        if actual != expected:
+            print(f"FAIL: {field}='{actual}' (expected '{expected}')", flush=True)
+            return 1
+        print(f"  {field}: {actual}", flush=True)
+
+    if match_fact.get("hermes_attestation_required") is not True:
+        print(f"FAIL: hermes_attestation_required must be true", flush=True)
+        return 1
+    print(f"  hermes_attestation_required: True", flush=True)
 
     if elapsed > CANARY_TIMEOUT_SECONDS:
         print(f"FAIL: Canary exceeded {CANARY_TIMEOUT_SECONDS}s timeout ({elapsed:.1f}s)", flush=True)
@@ -267,6 +316,16 @@ def main() -> int:
         "run_dir": str(run_dir),
         "match_fact_lock_path": str(match_fact_path),
         "violations": violations,
+        "extraction_method": match_fact.get("extraction_method"),
+        "canary_only": match_fact.get("canary_only"),
+        "production_fallback_used": match_fact.get("production_fallback_used"),
+        "hermes_response_sha256": match_fact.get("hermes_response_sha256"),
+        "fact_packet_sha256": match_fact.get("fact_packet_sha256"),
+        "match": match_fact.get("match"),
+        "competition": match_fact.get("competition"),
+        "decisive_goal": match_fact.get("decisive_goal"),
+        "source_mode": match_fact.get("source_mode"),
+        "hermes_attestation_required": match_fact.get("hermes_attestation_required"),
     }
 
     report_path = run_dir / "canary_report.json"
