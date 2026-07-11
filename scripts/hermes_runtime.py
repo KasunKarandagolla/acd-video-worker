@@ -17,8 +17,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import textwrap
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -675,6 +677,22 @@ def _get_hermes_timeout() -> int:
         return 120
 
 
+_CANARY_DISABLED_TOOLSETS = [
+    "terminal", "web", "search", "vision", "file", "browser",
+    "code_execution", "delegation", "memory", "todo", "cronjob",
+    "session_search", "clarify", "image_gen", "text_to_speech",
+    "process", "kanban", "moa", "rl", "discord", "discord_admin",
+    "messaging", "spotify", "yuanbao", "homeassistant",
+    "feishu_doc", "feishu_drive", "debugging", "safe", "tts",
+    "video", "project", "context_engine", "curator",
+]
+
+_CANARY_ENABLED_SKILL_NAMES = [
+    "football-match-identification",
+    "football-fact-provenance-gate",
+]
+
+
 def _is_transient_error(error_type: str, error_message: str) -> bool:
     """Check if an error is transient and should be retried."""
     if error_type == "timeout":
@@ -691,12 +709,113 @@ def _is_transient_error(error_type: str, error_message: str) -> bool:
     return False
 
 
+def _phase_log(msg: str) -> None:
+    """Emit a flushed phase log line with timestamp."""
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:12]
+    line = f"[CANARY {ts}] {msg}"
+    print(line, flush=True)
+
+
+def _build_canary_agent_code(
+    hermes_repo_str: str,
+    hermes_home_str: str,
+    session_id: str,
+    user_msg: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+) -> str:
+    """Build the child-process Python code for a canary Hermes turn.
+
+    The agent is constructed with no tools (enabled_toolsets=[]),
+    max_iterations=2, and all unnecessary features disabled.
+    Every phase emits a flushed log line.
+    """
+    import textwrap
+
+    return textwrap.dedent(f'''\
+    import sys, json, os, time as _time
+    from datetime import timezone, datetime
+    sys.path.insert(0, {repr(hermes_repo_str)})
+    os.environ['HERMES_HOME'] = {repr(hermes_home_str)}
+    os.environ['HERMES_SKIP_MEMORY'] = '1'
+    os.environ['HERMES_DISABLE_DELEGATION'] = '1'
+
+    def _pl(msg):
+        ts = datetime.fromtimestamp(_time.time(), tz=timezone.utc).strftime("%H:%M:%S.%f")[:12]
+        print(f"[CANARY_CHILD {{ts}}] {{msg}}", flush=True)
+
+    _pl("importing AIAgent")
+    from run_agent import AIAgent
+    _pl("constructing AIAgent")
+    _api_key = os.environ['LLM_API_KEY']
+    _base_url = os.environ['LLM_BASE_URL']
+    _model = os.environ['LLM_MODEL']
+    _agent = AIAgent(
+        base_url=_base_url,
+        api_key=_api_key,
+        model=_model,
+        provider='nvidia',
+        session_id={repr(session_id)},
+        max_iterations=2,
+        enabled_toolsets=[],
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    _pl("starting conversation")
+    _resp = _agent.run_conversation({repr(user_msg)})
+    _pl("model response received")
+    _safe = str(_resp)[:5000] if _resp else ""
+    print("RESPONSE_START", flush=True)
+    print(_safe, flush=True)
+    print("RESPONSE_END", flush=True)
+    ''')
+
+
+def _build_core_agent_code(
+    hermes_repo_str: str,
+    hermes_home_str: str,
+    session_id: str,
+    user_msg: str,
+) -> str:
+    """Build the child-process Python code for a standard Hermes turn."""
+    import textwrap
+
+    return textwrap.dedent(f'''\
+    import sys, json, os
+    sys.path.insert(0, {repr(hermes_repo_str)})
+    os.environ['HERMES_HOME'] = {repr(hermes_home_str)}
+    from run_agent import AIAgent
+    api_key = os.environ['LLM_API_KEY']
+    base_url = os.environ['LLM_BASE_URL']
+    model = os.environ['LLM_MODEL']
+    agent = AIAgent(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        provider='nvidia',
+        session_id={repr(session_id)},
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    response = agent.run_conversation({repr(user_msg)})
+    safe = str(response)[:5000] if response else ''
+    print('RESPONSE_START')
+    print(safe)
+    print('RESPONSE_END')
+    ''')
+
+
 def run_hermes_turn(
     title: str,
     theme: str,
     run_id: str,
     run_dir: Path,
     smoke_test: bool = False,
+    canary_mode: bool = False,
+    canary_fact_packet: dict = None,
 ) -> dict:
     """Canonical single Hermes turn invocation used by both smoke test and job.
 
@@ -711,6 +830,12 @@ def run_hermes_turn(
       - nonempty model response
       - session/trace evidence exists
       - Hermes-loaded skill count > 0
+
+    When canary_mode=True:
+      - AIAgent uses enabled_toolsets=[] (no tools), max_iterations=2
+      - Phase logging with flushed timestamps
+      - Prompt includes the stable fact packet
+      - Subprocess uses process group for clean timeout
     """
     result = {
         "success": False,
@@ -723,13 +848,19 @@ def run_hermes_turn(
         "error_type": None,
         "error_message": None,
         "details": {},
+        "phase": None,
+        "runtime_seconds": 0.0,
     }
+
+    if canary_mode:
+        _phase_log("preparing skill runtime")
 
     try:
         _ensure_hermes_repo()
     except RuntimeError as e:
         result["error_type"] = "repo_not_found"
         result["error_message"] = str(e)
+        result["phase"] = "repo_check"
         return result
 
     try:
@@ -737,16 +868,21 @@ def run_hermes_turn(
     except ValueError as e:
         result["error_type"] = "endpoint_configuration_error"
         result["error_message"] = str(e)
+        result["phase"] = "endpoint_config"
         return result
 
     v7 = _discover_v7_skills()
     result["v7_skills_present_count"] = v7.get("v7_skill_count", 0)
+
+    if canary_mode:
+        _phase_log("querying official skill loader")
 
     venv_check = _check_venv_hermes_import()
     result["aiagent_importable"] = venv_check.get("aiagent_importable", False)
     if not result["aiagent_importable"]:
         result["error_type"] = "aiagent_not_importable"
         result["error_message"] = venv_check.get("import_error", "unknown")
+        result["phase"] = "import_check"
         return result
 
     loaded = _prepare_and_query_skills()
@@ -758,6 +894,7 @@ def run_hermes_turn(
     if result["hermes_loaded_skill_count"] == 0:
         result["error_type"] = "zero_skills_loaded"
         result["error_message"] = "Hermes loaded zero skills"
+        result["phase"] = "skill_loading"
         return result
 
     session_id = str(uuid.uuid4())
@@ -771,10 +908,35 @@ def run_hermes_turn(
     api_key = endpoint["api_key"]
     base_url = endpoint["base_url"]
     model = endpoint["model"]
-    v7_skills_base = str(BASE_DIR / "skills" / "football-emotion" / "skills")
+    hermes_home_str = str(_get_worker_hermes_home())
 
-    if smoke_test:
+    if canary_mode:
+        fact = canary_fact_packet or {}
+        fact_json = json.dumps(fact, indent=2)
+        user_msg = json.dumps({
+            "task": "canary_artifact_verification",
+            "session_id": session_id,
+            "fact_packet": fact,
+            "instructions": (
+                "You are the ACD Video Worker canary agent. "
+                "You are given a verified fact packet below. "
+                "Produce exactly one strict JSON object with the schema of match_fact_lock "
+                "using the supplied fact packet data. "
+                "Do NOT use any tools. Do NOT ask questions. Respond with ONLY valid JSON. "
+                "No markdown, no explanation."
+            ),
+        })
+        code = _build_canary_agent_code(
+            hermes_repo_str, hermes_home_str, session_id, user_msg,
+            api_key, base_url, model,
+        )
+        turn_timeout = 90
+    elif smoke_test:
         user_msg = "Respond with one word: hello"
+        code = _build_core_agent_code(
+            hermes_repo_str, hermes_home_str, session_id, user_msg,
+        )
+        turn_timeout = 30
     else:
         user_msg = json.dumps({
             "task": "editorial_reasoning",
@@ -786,45 +948,72 @@ def run_hermes_turn(
                 "Produce match_fact_lock and brief_interpretation artifacts."
             ),
         })
+        code = _build_core_agent_code(
+            hermes_repo_str, hermes_home_str, session_id, user_msg,
+        )
+        turn_timeout = _get_hermes_timeout()
 
-    script_lines = [
-        "import sys, json, os",
-        f"sys.path.insert(0, '{hermes_repo_str}')",
-        f"os.environ['HERMES_HOME'] = {repr(str(_get_worker_hermes_home()))}",
-        "from run_agent import AIAgent",
-        "api_key = os.environ['LLM_API_KEY']",
-        "base_url = os.environ['LLM_BASE_URL']",
-        "model = os.environ['LLM_MODEL']",
-        f"agent = AIAgent(",
-        f"    base_url=base_url,",
-        f"    api_key=api_key,",
-        f"    model=model,",
-        f"    provider='nvidia',",
-        f"    session_id={repr(session_id)},",
-        f"    quiet_mode=True,",
-        f"    skip_context_files=True,",
-        f"    skip_memory=True,",
-        f")",
-        f"response = agent.run_conversation({repr(user_msg)})",
-        "safe = str(response)[:5000] if response else ''",
-        "print('RESPONSE_START')",
-        "print(safe)",
-        "print('RESPONSE_END')",
-    ]
-    code = "\n".join(script_lines)
+    if canary_mode:
+        _phase_log("starting conversation subprocess")
+
+    _start_ts = datetime.now(timezone.utc)
 
     try:
         child_env = dict(os.environ)
         child_env["LLM_API_KEY"] = api_key
         child_env["LLM_BASE_URL"] = base_url
         child_env["LLM_MODEL"] = model
-        proc = subprocess.run(
+        child_env["PYTHONUNBUFFERED"] = "1"
+
+        proc = subprocess.Popen(
             [python, "-c", code],
-            capture_output=True, text=True, timeout=_get_hermes_timeout(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=child_env,
+            text=True,
+            start_new_session=True,
         )
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
+        result["phase"] = "child_running"
+
+        stdout_parts = []
+        stderr_parts = []
+        try:
+            stdout_data, stderr_data = proc.communicate(timeout=turn_timeout)
+            stdout_parts.append(stdout_data or "")
+            stderr_parts.append(stderr_data or "")
+        except subprocess.TimeoutExpired:
+            result["phase"] = "timeout_termination"
+            import signal
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                outs, errs = proc.communicate(timeout=15)
+                stdout_parts.append(outs or "")
+                stderr_parts.append(errs or "")
+            except (subprocess.TimeoutExpired, ValueError):
+                proc.kill()
+                stdout_parts.append(proc.stdout.read() if proc.stdout else "")
+                stderr_parts.append(proc.stderr.read() if proc.stderr else "")
+
+        _elapsed = (datetime.now(timezone.utc) - _start_ts).total_seconds()
+        result["runtime_seconds"] = round(_elapsed, 1)
+
+        stdout = "".join(stdout_parts)
+        stderr = "".join(stderr_parts)
+        result["details"]["child_stderr"] = stderr[:1000]
+
+        if result["phase"] == "timeout_termination":
+            result["error_type"] = "timeout"
+            result["error_message"] = (
+                f"Hermes turn timed out after {turn_timeout}s. "
+                f"Phase at timeout: child_running. "
+                f"Latest stdout tail: {stdout[-500:] if len(stdout) > 500 else stdout}"
+            )
+            result["phase"] = "timed_out"
+            return result
 
         in_response = False
         response_parts = []
@@ -847,23 +1036,31 @@ def run_hermes_turn(
             result["error_message"] = (
                 f"exit={proc.returncode}: {response_text[:300] or stderr[:300]}"
             )
+            result["phase"] = "conversation_failed"
             return result
 
         (session_dir / "hermes_raw_response.json").write_text(
             json.dumps({"response": response_text[:3000], "length": len(response_text)})
         )
-        result["success"] = True
 
-        # Extract and write production artifacts from Hermes response
+        if canary_mode:
+            _phase_log("extracting JSON")
+            result["phase"] = "extracting_json"
+
         artifact_result = _extract_and_validate_artifacts(response_text, title, theme)
         match_fact = artifact_result.get("match_fact_lock", {})
         brief = artifact_result.get("brief_interpretation", {})
+
+        if canary_mode:
+            _phase_log("validating match_fact_lock")
+            result["phase"] = "validating_artifacts"
 
         validation_errors = _validate_match_fact_lock(match_fact)
         if validation_errors:
             result["error_type"] = "hermes_artifact_contract_error"
             result["error_message"] = "; ".join(validation_errors)
             result["success"] = False
+            result["phase"] = "validation_failed"
             return result
 
         match_fact_path = session_dir / "match_fact_lock.json"
@@ -876,8 +1073,15 @@ def run_hermes_turn(
             result["error_type"] = "artifact_write_error"
             result["error_message"] = str(e)
             result["success"] = False
+            result["phase"] = "write_failed"
             return result
 
+        if canary_mode:
+            _phase_log("writing session/trace")
+            result["phase"] = "writing_evidence"
+
+        result["success"] = True
+        result["phase"] = "complete"
         result["details"]["match_fact_lock"] = {
             "path": str(match_fact_path),
             "status": match_fact.get("verification_status"),
@@ -888,12 +1092,17 @@ def run_hermes_turn(
         result["details"]["brief_interpretation"] = {"path": str(brief_path)}
 
     except subprocess.TimeoutExpired:
-        timeout_val = _get_hermes_timeout()
+        timeout_val = turn_timeout
         result["error_type"] = "timeout"
         result["error_message"] = f"Hermes conversation timed out after {timeout_val}s"
+        result["phase"] = "timed_out"
     except Exception as e:
         result["error_type"] = "exception"
         result["error_message"] = str(e)
+        result["phase"] = "exception"
+
+    _elapsed = (datetime.now(timezone.utc) - _start_ts).total_seconds()
+    result["runtime_seconds"] = round(_elapsed, 1)
 
     return result
 

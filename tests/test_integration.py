@@ -1077,26 +1077,40 @@ def test_smoke_and_production_share_resolver():
 
 def test_generated_code_no_embedded_secrets():
     """Test: generated subprocess code reads from env, not embedding secret literals."""
-    from scripts.hermes_runtime import run_hermes_turn
+    from scripts.hermes_runtime import _build_core_agent_code, _build_canary_agent_code
     import inspect
-    source = inspect.getsource(run_hermes_turn)
-    # The generated code must read api_key/base_url/model from os.environ
-    assert "api_key = os.environ['LLM_API_KEY']" in source
-    assert "base_url = os.environ['LLM_BASE_URL']" in source
-    assert "model = os.environ['LLM_MODEL']" in source
-    # Must NOT embed repr(api_key) or repr(base_url) or repr(model) in AIAgent() call
-    lines_to_check = source.split("\n")
-    agent_section = False
-    for line in lines_to_check:
-        if "agent = AIAgent(" in line:
-            agent_section = True
-        if agent_section:
-            if "api_key" in line and "os.environ" not in line:
-                assert "repr" not in line, f"API key must not be embedded in code: {line.strip()}"
-            if "base_url" in line and "os.environ" not in line:
-                assert "repr" not in line, f"Base URL must not be embedded in AIAgent call: {line.strip()}"
-            if "model" in line and "os.environ" not in line:
-                assert "repr" not in line, f"Model must not be embedded in AIAgent call: {line.strip()}"
+    # Check core agent code
+    core_source = inspect.getsource(_build_core_agent_code)
+    assert "api_key = os.environ['LLM_API_KEY']" in core_source, \
+        "core code must read api_key from env"
+    assert "base_url = os.environ['LLM_BASE_URL']" in core_source, \
+        "core code must read base_url from env"
+    assert "model = os.environ['LLM_MODEL']" in core_source, \
+        "core code must read model from env"
+    # Check canary agent code
+    canary_source = inspect.getsource(_build_canary_agent_code)
+    # Canary code uses different variable naming (_api_key etc.)
+    assert "_base_url = os.environ[" in canary_source, \
+        "canary code must read base_url from env"
+    assert "os.environ['LLM_MODEL']" in canary_source, \
+        "canary code must read model from env"
+    # Neither should embed secret literals in AIAgent() call
+    for src, name in [(core_source, "core"), (canary_source, "canary")]:
+        lines = src.split("\n")
+        in_agent = False
+        for line in lines:
+            if "AIAgent(" in line:
+                in_agent = True
+            if in_agent:
+                if "api_key" in line and "os.environ" not in line:
+                    assert "repr" not in line, \
+                        f"API key must not be embedded in {name} AIAgent call: {line.strip()}"
+                if "base_url" in line and "os.environ" not in line:
+                    assert "repr" not in line, \
+                        f"Base URL must not be embedded in {name} AIAgent call: {line.strip()}"
+                if "model" in line and "os.environ" not in line:
+                    assert "repr" not in line, \
+                        f"Model must not be embedded in {name} AIAgent call: {line.strip()}"
     print(f"  Generated code no embedded secrets: OK")
 
 
