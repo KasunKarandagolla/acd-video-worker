@@ -372,65 +372,107 @@ def validate_synthetic_evidence(run_id: str) -> dict:
     return result
 
 
-def validate_canary_evidence(run_id: str) -> dict:
-    """Validate Hermes artifact canary evidence."""
-    result = {"passed": False, "checks": [], "evidence_paths": []}
-    run_dir = BASE_DIR / "state" / "runs" / run_id
-
-    if not run_dir.is_dir():
-        result["error"] = f"Canary run directory not found: {run_id}"
-        return result
-
-    hermes_report = run_dir / "hermes_run_report.json"
-    if not hermes_report.is_file():
-        result["error"] = "hermes_run_report.json not found"
-        return result
-    result["evidence_paths"].append(str(hermes_report))
+def get_git_commit() -> str:
     try:
-        with open(hermes_report) as f:
-            hr = json.load(f)
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(BASE_DIR),
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def find_latest_run(prefix: str) -> Path | None:
+    runs_dir = BASE_DIR / "state" / "runs"
+    if not runs_dir.is_dir():
+        return None
+    candidates = sorted(
+        [d for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith(prefix)],
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def validate_canary_evidence(cert_start: datetime) -> dict:
+    """Validate Hermes artifact canary evidence from standalone canary.
+
+    Locates the newest canary_* run directory, reads canary_report.json,
+    and validates the full evidence contract.
+
+    Rejects:
+    - stale reports (timestamp before certification start)
+    - foreign Git commit reports
+    - incomplete or failed canary
+    """
+    result = {"passed": False, "checks": [], "evidence_paths": []}
+    current_commit = get_git_commit()
+
+    run_dir = find_latest_run("canary_")
+    if not run_dir:
+        result["error"] = "No canary run directory found (looking for canary_* in state/runs/)"
+        return result
+
+    report_path = run_dir / "canary_report.json"
+    if not report_path.is_file():
+        result["error"] = f"canary_report.json not found in {run_dir}"
+        result["evidence_paths"].append(str(report_path))
+        return result
+    result["evidence_paths"].append(str(report_path))
+
+    try:
+        with open(report_path) as f:
+            report = json.load(f)
     except Exception as e:
-        result["error"] = f"Cannot parse hermes_run_report.json: {e}"
+        result["error"] = f"Cannot parse canary_report.json: {e}"
         return result
 
     checks = []
-    aiagent_importable = hr.get("aiagent_importable", False) or hr.get("hermes_available", False)
-    checks.append({"check": "aiagent_importable", "passed": aiagent_importable})
 
-    skill_count = hr.get("hermes_loaded_skill_count", 0) or hr.get("v7_skills", {}).get("v7_skill_count", 0)
-    checks.append({"check": "hermes_loaded_skill_count_23", "passed": skill_count >= 23})
+    # Timestamp check — must be after certification session started
+    report_ts_str = report.get("timestamp_utc", "")
+    try:
+        import re as _re
+        ts = report_ts_str
+        if ts.endswith("Z"):
+            ts = ts[:-1]
+        if not _re.search(r'[+-]\d{2}:\d{2}(:\d{2})?$', ts) and "T" in ts:
+            ts += "+00:00"
+        report_ts = datetime.fromisoformat(ts)
+        report_during_session = report_ts >= cert_start
+    except (ValueError, AttributeError, TypeError):
+        report_during_session = False
+    checks.append({"check": "report_created_during_session", "passed": report_during_session})
 
-    hermes_invoked = hr.get("hermes_invoked", False)
-    conversation_executed = hr.get("exit_status") is not None or hermes_invoked
-    checks.append({"check": "conversation_executed", "passed": hermes_invoked or conversation_executed})
+    # Git commit check — must match current worker commit
+    report_commit = report.get("git_commit", "")
+    commit_matches = current_commit != "unknown" and report_commit == current_commit
+    checks.append({"check": "report_git_commit_matches", "passed": commit_matches})
 
-    tool_calls = hr.get("tool_calls", [])
-    response_nonempty = bool(tool_calls) and any(tc.get("status") == "completed" for tc in tool_calls)
-    checks.append({"check": "response_nonempty", "passed": response_nonempty or hermes_invoked})
+    # Contract field checks from the standalone canary report
+    checks.append({"check": "success", "passed": report.get("canary_pass", False) is True})
+    checks.append({"check": "aiagent_importable", "passed": report.get("aiagent_importable", False) is True})
+    checks.append({"check": "hermes_loaded_skill_count_23", "passed": report.get("hermes_loaded_skill_count", 0) >= 23})
+    checks.append({"check": "conversation_executed", "passed": report.get("conversation_executed", False) is True})
+    checks.append({"check": "response_nonempty", "passed": report.get("response_nonempty", False) is True})
+    checks.append({"check": "session_or_trace_exists", "passed": report.get("session_or_trace_exists", False) is True})
+    checks.append({"check": "schema_valid", "passed": report.get("schema_valid", False) is True})
+    checks.append({"check": "verification_status_verified", "passed": report.get("verification_status") == "verified"})
+    checks.append({"check": "total_runtime_seconds_under_120", "passed": report.get("runtime_seconds", 999) < 120})
 
-    artifacts_dir = run_dir / "hermes_artifacts"
-    mf_lock = artifacts_dir / "match_fact_lock.json"
-    has_mf = mf_lock.is_file()
-    checks.append({"check": "match_fact_lock_exists", "passed": has_mf})
-    if has_mf:
-        result["evidence_paths"].append(str(mf_lock))
-        try:
-            with open(mf_lock) as f:
-                mf_data = json.load(f)
-            vs = mf_data.get("verification_status", "")
-            checks.append({"check": "match_fact_lock_schema_valid", "passed": vs in ("verified", "creative_hypothesis")})
-            checks.append({"check": "match_fact_lock_verified", "passed": vs == "verified"})
-        except Exception:
-            checks.append({"check": "match_fact_lock_parseable", "passed": False})
-
-    session_or_trace = hr.get("session_id") is not None or artifacts_dir.is_dir()
-    checks.append({"check": "session_or_trace_exists", "passed": session_or_trace})
+    mf_lock_path = report.get("match_fact_lock_path")
+    if mf_lock_path and Path(mf_lock_path).is_file():
+        result["evidence_paths"].append(mf_lock_path)
 
     result["checks"] = checks
     result["passed"] = all(c["passed"] for c in checks)
     if not result["passed"]:
         failed = [c["check"] for c in checks if not c["passed"]]
-        result["error"] = f"Canary checks failed: {failed}"
+        result["error"] = f"Canary evidence checks failed: {failed}"
+
     return result
 
 
@@ -549,18 +591,11 @@ def main():
         print(f"\n{'='*60}")
         print(f"  STEP 4/6: hermes_artifact_canary")
         print(f"{'='*60}")
-        canary_run_id = f"canary_{cert_start.strftime('%Y%m%d_%H%M%S')}"
-        canary_env = dict(os.environ)
-        canary_env["HERMES_ARTIFACT_CANARY"] = "1"
-        canary_env["PIPELINE_SYNTHETIC_E2E"] = "0"
-        canary_env["HERMES_TURN_TIMEOUT_SECONDS"] = canary_env.get("HERMES_TURN_TIMEOUT_SECONDS", "300")
-        canary_yaml = str(BASE_DIR / "jobs" / "hermes_artifact_canary.yaml")
         s4 = run_step(
             "hermes_artifact_canary",
-            [sys.executable, "-m", "scripts.run_title_theme_job", canary_yaml, "--run-id", canary_run_id],
+            [sys.executable, "-m", "scripts.hermes_artifact_canary"],
             step_dir=steps_dir / "hermes_artifact_canary",
-            env=canary_env,
-            timeout=600,
+            timeout=150,
         )
         if not s4["passed"]:
             print()
@@ -573,7 +608,7 @@ def main():
         print(f"\n{'='*60}")
         print(f"  STEP 5/6: validate canary evidence")
         print(f"{'='*60}")
-        canary_val = validate_canary_evidence(canary_run_id)
+        canary_val = validate_canary_evidence(cert_start)
         s5_step_dir = steps_dir / "validate_canary_evidence"
         _ensure_empty_dir(s5_step_dir)
         _write_json(s5_step_dir / "result.json", {

@@ -66,6 +66,20 @@ FACT_PACKET = {
 }
 
 
+def _get_git_commit() -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(BASE_DIR),
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
 def _check_runtime_endpoint() -> dict:
     """Verify runtime endpoint env vars are set."""
     result = {"endpoint_configured": False, "missing": []}
@@ -238,6 +252,7 @@ def main() -> int:
         "canary_pass": True,
         "timestamp_utc": datetime.now(timezone.utc).isoformat() + "Z",
         "runtime_seconds": round(elapsed, 1),
+        "git_commit": _get_git_commit(),
         "aiagent_importable": turn_result.get("aiagent_importable"),
         "v7_skill_count": skills_check["v7_filesystem_count"],
         "hermes_loaded_skill_count": skills_check["hermes_loaded_count"],

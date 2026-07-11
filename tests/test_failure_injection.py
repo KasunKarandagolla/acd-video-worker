@@ -258,24 +258,29 @@ def test_hermes_success_no_match_fact_lock():
 
         with patch("scripts.hermes_runtime._check_venv_hermes_import") as mock_check, \
              patch("scripts.hermes_runtime._prepare_and_query_skills") as mock_skills, \
-             patch("scripts.hermes_runtime.subprocess.run") as mock_subprocess:
+             patch("scripts.hermes_runtime.subprocess.Popen") as mock_popen:
 
             mock_check.return_value = {"aiagent_importable": True}
             mock_skills.return_value = {"hermes_loaded_skill_count": 1, "hermes_loaded_skill_names": ["test"], "skill_runtime_preparation": {}}
             fake_proc = MagicMock()
             fake_proc.returncode = 0
-            fake_proc.stdout = "RESPONSE_START\nHello, I'm Hermes\nRESPONSE_END\n"
-            fake_proc.stderr = ""
-            mock_subprocess.return_value = fake_proc
+            fake_proc.communicate.return_value = (
+                "RESPONSE_START\nHello, I'm Hermes\nRESPONSE_END\n",
+                ""
+            )
+            fake_proc.pid = 12345
+            mock_popen.return_value = fake_proc
 
             run_dir = _make_test_run_dir("no_match_fact")
             result = run_hermes_turn("", "", "test", run_dir, smoke_test=True)
-            # Should still produce a fallback match_fact_lock from the artifact contract
             mf_path = run_dir / "hermes_artifacts" / "match_fact_lock.json"
             has_lock = mf_path.is_file()
-            assert_test("hermes_no_match_fact_fallback",
-                         has_lock,
-                         f"has_lock={has_lock}, success={result.get('success')}")
+            assert_test("hermes_no_match_fact_fails",
+                         not result.get("success") and not has_lock,
+                         f"success={result.get('success')}, has_lock={has_lock}, error_type={result.get('error_type')}")
+            assert_test("hermes_no_match_fact_diagnostic",
+                         "match_fact_lock" in (result.get("error_message") or ""),
+                         f"error_message={result.get('error_message')}")
     finally:
         for k, v in saved.items():
             if v: os.environ[k] = v

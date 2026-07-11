@@ -1055,6 +1055,16 @@ def run_hermes_turn(
             _phase_log("validating match_fact_lock")
             result["phase"] = "validating_artifacts"
 
+        if artifact_result.get("extraction_method") == "fallback_constructed":
+            result["error_type"] = "hermes_artifact_contract_error"
+            result["error_message"] = (
+                "match_fact_lock not found in Hermes response; "
+                "fallback disallowed — Hermes must produce a valid match_fact_lock"
+            )
+            result["success"] = False
+            result["phase"] = "validation_failed"
+            return result
+
         validation_errors = _validate_match_fact_lock(match_fact)
         if validation_errors:
             result["error_type"] = "hermes_artifact_contract_error"

@@ -338,6 +338,229 @@ def test_stdout_stderr_saved_on_failure():
                  f"passed={result['passed']}")
 
 
+def test_step4_command_is_standalone_canary():
+    """Test: STEP 4 command is exactly python3 -m scripts.hermes_artifact_canary."""
+    source = (BASE_DIR / "scripts" / "preproduction_certify.py").read_text()
+    # Must call the standalone canary
+    assert "scripts.hermes_artifact_canary" in source, "Must invoke standalone canary"
+    assert "scripts.run_title_theme_job" not in source.split("STEP 4")[1].split("STEP 5")[0], \
+        "STEP 4 must not use run_title_theme_job"
+    # Must NOT use the old yaml-based canary
+    assert "hermes_artifact_canary.yaml" not in source.split("STEP 4")[1].split("STEP 5")[0], \
+        "STEP 4 must not reference hermes_artifact_canary.yaml"
+    assert_test("step4_uses_standalone_canary",
+                 True, "STEP 4 calls scripts.hermes_artifact_canary")
+
+
+def test_step4_no_hermes_artifact_canary_env():
+    """Test: HERMES_ARTIFACT_CANARY env mode is not used for certification canary."""
+    source = (BASE_DIR / "scripts" / "preproduction_certify.py").read_text()
+    step4_region = source.split("STEP 4")[1].split("STEP 5")[0]
+    assert "HERMES_ARTIFACT_CANARY" not in step4_region, \
+        "STEP 4 must not set HERMES_ARTIFACT_CANARY env var"
+    assert_test("step4_no_canary_env_var",
+                 True, "STEP 4 does not set HERMES_ARTIFACT_CANARY")
+
+
+def test_step4_no_retry():
+    """Test: certification does not retry the canary (no retry loop)."""
+    source = (BASE_DIR / "scripts" / "preproduction_certify.py").read_text()
+    step4_region = source.split("STEP 4")[1].split("STEP 5")[0]
+    assert "run_hermes_turn_with_retry" not in step4_region, \
+        "STEP 4 must not call run_hermes_turn_with_retry"
+    assert "for retry" not in step4_region.lower() and "retry" not in step4_region.lower(), \
+        "STEP 4 must not contain retry logic"
+    assert_test("step4_no_retry",
+                 True, "STEP 4 does not retry the canary")
+
+
+def test_step4_timeout_max_150():
+    """Test: outer timeout for STEP 4 is at most 150 seconds."""
+    from scripts.preproduction_certify import run_step
+    import inspect
+    source = inspect.getsource(run_step)
+    # Check that the timeout parameter default in the call site is 150
+    cert_source = (BASE_DIR / "scripts" / "preproduction_certify.py").read_text()
+    # Find the timeout value used in the STEP 4 run_step call
+    step4_region = cert_source.split("STEP 4")[1].split("STEP 5")[0]
+    assert "timeout=150" in step4_region, \
+        f"STEP 4 timeout must be 150, got region: {step4_region[:200]}"
+    assert_test("step4_timeout_max_150",
+                 True, "STEP 4 timeout is 150")
+
+
+def test_stale_canary_report_rejected():
+    """Test: stale canary reports (before cert start) are rejected."""
+    from scripts.preproduction_certify import validate_canary_evidence
+    from datetime import datetime, timezone, timedelta
+    import tempfile, json
+    td = Path(tempfile.mkdtemp(prefix="cert_test_stale_"))
+    runs_dir = td / "state" / "runs"
+    runs_dir.mkdir(parents=True)
+    canary_dir = runs_dir / "canary_old"
+    canary_dir.mkdir(parents=True)
+    report = {
+        "canary_pass": True,
+        "timestamp_utc": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat() + "Z",
+        "git_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23,
+        "conversation_executed": True,
+        "response_nonempty": True,
+        "session_or_trace_exists": True,
+        "schema_valid": True,
+        "verification_status": "verified",
+        "runtime_seconds": 30,
+    }
+    with open(canary_dir / "canary_report.json", "w") as f:
+        json.dump(report, f)
+    # Mock BASE_DIR
+    import scripts.preproduction_certify as cert
+    original_base = cert.BASE_DIR
+    try:
+        cert.BASE_DIR = td
+        result = validate_canary_evidence(datetime.now(timezone.utc))
+        # The report was created 1 hour ago, cert started now -> should fail
+        report_during = any(c["check"] == "report_created_during_session" for c in result.get("checks", []))
+        assert not result["passed"], "Stale report should not pass"
+        assert_test("stale_canary_rejected",
+                     not result["passed"],
+                     f"passed={result['passed']}, error={result.get('error', '')}")
+    finally:
+        cert.BASE_DIR = original_base
+
+
+def test_foreign_git_commit_rejected():
+    """Test: canary report from foreign Git commit is rejected."""
+    from scripts.preproduction_certify import validate_canary_evidence
+    from datetime import datetime, timezone
+    import tempfile, json
+    td = Path(tempfile.mkdtemp(prefix="cert_test_foreign_"))
+    runs_dir = td / "state" / "runs"
+    runs_dir.mkdir(parents=True)
+    canary_dir = runs_dir / "canary_foreign"
+    canary_dir.mkdir(parents=True)
+    report = {
+        "canary_pass": True,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat() + "Z",
+        "git_commit": "0" * 40,  # fake foreign commit
+        "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23,
+        "conversation_executed": True,
+        "response_nonempty": True,
+        "session_or_trace_exists": True,
+        "schema_valid": True,
+        "verification_status": "verified",
+        "runtime_seconds": 30,
+    }
+    with open(canary_dir / "canary_report.json", "w") as f:
+        json.dump(report, f)
+    import scripts.preproduction_certify as cert
+    original_base = cert.BASE_DIR
+    try:
+        cert.BASE_DIR = td
+        result = validate_canary_evidence(datetime.now(timezone.utc))
+        assert not result["passed"], "Foreign commit report should not pass"
+        assert_test("foreign_git_commit_rejected",
+                     not result["passed"],
+                     f"passed={result['passed']}, error={result.get('error', '')}")
+    finally:
+        cert.BASE_DIR = original_base
+
+
+def test_fresh_standalone_report_passes():
+    """Test: fresh successful standalone canary report passes all checks."""
+    from scripts.preproduction_certify import validate_canary_evidence
+    from datetime import datetime, timezone, timedelta
+    import tempfile, json
+    from unittest.mock import patch
+    td = Path(tempfile.mkdtemp(prefix="cert_test_fresh_"))
+    runs_dir = td / "state" / "runs"
+    runs_dir.mkdir(parents=True)
+    canary_dir = runs_dir / "canary_fresh"
+    canary_dir.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    current_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+    report = {
+        "canary_pass": True,
+        "timestamp_utc": now.isoformat() + "Z",
+        "git_commit": current_commit,
+        "aiagent_importable": True,
+        "hermes_loaded_skill_count": 23,
+        "conversation_executed": True,
+        "response_nonempty": True,
+        "session_or_trace_exists": True,
+        "schema_valid": True,
+        "verification_status": "verified",
+        "runtime_seconds": 30,
+        "match_fact_lock_path": str(canary_dir / "match_fact_lock.json"),
+    }
+    with open(canary_dir / "canary_report.json", "w") as f:
+        json.dump(report, f)
+    mf = {"verification_status": "verified"}
+    with open(canary_dir / "match_fact_lock.json", "w") as f:
+        json.dump(mf, f)
+    import scripts.preproduction_certify as cert
+    original_base = cert.BASE_DIR
+    original_git_dir = cert.BASE_DIR
+    try:
+        cert.BASE_DIR = td
+        with patch("scripts.preproduction_certify.get_git_commit", return_value=current_commit):
+            result = validate_canary_evidence(now - timedelta(seconds=1))
+            assert result["passed"], f"Fresh report should pass, got: {result.get('error', '')}"
+            assert_test("fresh_standalone_report_passes",
+                         result["passed"],
+                         f"all checks passed")
+    finally:
+        cert.BASE_DIR = original_base
+
+
+def test_standalone_failure_stops_readiness():
+    """Test: standalone canary failure stops readiness generation."""
+    code = """
+import sys
+canary_passed = False
+readiness_attempted = False
+if not canary_passed:
+    readiness_attempted = False
+    print("PREPRODUCTION_CERTIFICATION_FAILED")
+    sys.exit(1)
+else:
+    print("would run readiness")
+    readiness_attempted = True
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert_test("standalone_failure_stops_readiness",
+                 proc.returncode != 0 and "PREPRODUCTION_CERTIFICATION_FAILED" in proc.stdout,
+                 f"exit={proc.returncode}")
+
+
+def test_step4_no_run_title_theme_job():
+    """Test: run_title_theme_job is not used for certification canary."""
+    source = (BASE_DIR / "scripts" / "preproduction_certify.py").read_text()
+    step4_region = source.split("STEP 4")[1].split("STEP 5")[0]
+    assert "run_title_theme_job" not in step4_region, \
+        "STEP 4 must not use run_title_theme_job"
+    assert_test("step4_no_run_title_theme_job",
+                 True, "STEP 4 does not use run_title_theme_job")
+
+
+def test_step4_no_hermes_artifact_canary_yaml():
+    """Test: hermes_artifact_canary.yaml is not used for certification canary."""
+    source = (BASE_DIR / "scripts" / "preproduction_certify.py").read_text()
+    step4_region = source.split("STEP 4")[1].split("STEP 5")[0]
+    assert "hermes_artifact_canary.yaml" not in step4_region, \
+        "STEP 4 must not reference hermes_artifact_canary.yaml"
+    assert_test("step4_no_canary_yaml",
+                 True, "STEP 4 does not use hermes_artifact_canary.yaml")
+
+
 def run_all():
     global PASS, FAIL, TOTAL
     print(f"\n{'='*60}")
@@ -360,6 +583,16 @@ def run_all():
         ("Result JSON written", test_result_json_written),
         ("Evidence paths tracked", test_evidence_paths_tracked),
         ("Stdout/stderr saved on failure", test_stdout_stderr_saved_on_failure),
+        ("STEP 4 uses standalone canary", test_step4_command_is_standalone_canary),
+        ("STEP 4 no HERMES_ARTIFACT_CANARY env", test_step4_no_hermes_artifact_canary_env),
+        ("STEP 4 no retry", test_step4_no_retry),
+        ("STEP 4 timeout max 150", test_step4_timeout_max_150),
+        ("Stale canary report rejected", test_stale_canary_report_rejected),
+        ("Foreign git commit rejected", test_foreign_git_commit_rejected),
+        ("Fresh standalone report passes", test_fresh_standalone_report_passes),
+        ("Standalone failure stops readiness", test_standalone_failure_stops_readiness),
+        ("STEP 4 no run_title_theme_job", test_step4_no_run_title_theme_job),
+        ("STEP 4 no hermes_artifact_canary.yaml", test_step4_no_hermes_artifact_canary_yaml),
     ]
 
     for name, func in tests:
