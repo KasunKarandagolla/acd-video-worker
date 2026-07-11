@@ -10,16 +10,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Dict, List
 
 
 class QualityGate(Enum):
     """Quality gates that can trigger loopbacks."""
-    RETENTION = "retention"           # football-retention-quality-control
-    AUDIO = "audio"                   # football-audio-quality-control
-    PLATFORM_EXPORT = "platform_export"  # football-platform-export-validator
-    SCHEMA = "schema"                 # OpenMontage schema validation
-    SOURCE_MEDIA = "source_media"     # source_media_review verification
+    RETENTION = "retention"
+    AUDIO = "audio"
+    PLATFORM_EXPORT = "platform_export"
+    SCHEMA = "schema"
+    SOURCE_MEDIA = "source_media"
 
 
 class FailureCategory(Enum):
@@ -57,24 +57,24 @@ LOOPBACK_TARGETS = {
     FailureCategory.FROZEN_FRAMES: "footage_acquisition",
     FailureCategory.BROKEN_VIDEO: "footage_acquisition",
     FailureCategory.BAD_ASPECT_RATIO: "visual_analysis",
-    
+
     # Clip scoring/selection issues
     FailureCategory.WEAK_CLIP: "clip_scoring",
     FailureCategory.DUPLICATE_CLIPS: "clip_scoring",
     FailureCategory.INVALID_TIMESTAMPS: "timestamp_extraction",
-    
+
     # Audio issues
     FailureCategory.AUDIO_CLIPPING: "audio_plan",
     FailureCategory.EXCESSIVE_SILENCE: "audio_plan",
     FailureCategory.MISSING_NARRATION: "narration",
     FailureCategory.MISSING_MUSIC: "audio_plan",
     FailureCategory.BAD_DUCKING: "audio_plan",
-    
+
     # Editorial issues
     FailureCategory.UNREADABLE_CAPTIONS: "edit_plan",
     FailureCategory.MISSING_STORY_SECTION: "edit_plan",
     FailureCategory.WEAK_EMOTIONAL_PROGRESSION: "edit_plan",
-    
+
     # OpenMontage issues
     FailureCategory.INVALID_EDIT_ARTIFACT: "edit_plan",
     FailureCategory.RENDER_FAILURE: "openmontage_compose",
@@ -119,34 +119,37 @@ class QAReport:
     schema_pass: bool
     source_media_pass: bool
     overall_pass: bool
-    findings: list[dict] = field(default_factory=list)
-    loopback_decisions: list[LoopbackDecision] = field(default_factory=list)
+    findings: List[Dict] = field(default_factory=list)
+    loopback_decisions: List[LoopbackDecision] = field(default_factory=list)
     generated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
 class LoopbackController:
     """
     Controls automatic loopbacks with configurable limits.
-    
+
     Prevents infinite loops by tracking attempt counts per failure category.
     """
-    
-    def __init__(self, max_loopbacks_per_category: int = 3):
+
+    def __init__(self, max_loopbacks_per_category: int = 3, max_total_loopbacks: int = 10):
         self.max_loopbacks = max_loopbacks_per_category
-        self.attempt_counts: dict[FailureCategory, int] = {}
-        self.loopback_history: list[LoopbackDecision] = []
-    
+        self.max_total = max_total_loopbacks
+        self.attempt_counts: Dict[FailureCategory, int] = {}
+        self.total_count = 0
+        self.loopback_history: List[LoopbackDecision] = []
+
     def can_loopback(self, category: FailureCategory) -> bool:
         """Check if we can attempt another loopback for this category."""
-        return self.attempt_counts.get(category, 0) < self.max_loopbacks
-    
+        cat_count = self.attempt_counts.get(category, 0)
+        return cat_count < self.max_loopbacks and self.total_count < self.max_total
+
     def get_target_stage(self, category: FailureCategory) -> Optional[str]:
         """Get the pipeline stage to loop back to for a failure category."""
         target = LOOPBACK_TARGETS.get(category)
         if target:
             return STAGE_NAME_MAP.get(target, target)
         return None
-    
+
     def create_loopback(
         self,
         category: FailureCategory,
@@ -156,10 +159,11 @@ class LoopbackController:
         """Create a loopback decision."""
         attempt = self.attempt_counts.get(category, 0) + 1
         self.attempt_counts[category] = attempt
-        
+        self.total_count += 1
+
         target = self.get_target_stage(category)
-        should_continue = attempt <= self.max_loopbacks
-        
+        should_continue = attempt <= self.max_loopbacks and self.total_count <= self.max_total
+
         decision = LoopbackDecision(
             failure_category=category,
             target_stage=target or "EDIT_PLAN",
@@ -169,16 +173,16 @@ class LoopbackController:
             max_attempts=self.max_loopbacks,
             should_continue=should_continue
         )
-        
+
         self.loopback_history.append(decision)
         return decision
-    
+
     def reset_category(self, category: FailureCategory) -> None:
         """Reset attempt count for a category (e.g., after successful retry)."""
         if category in self.attempt_counts:
             del self.attempt_counts[category]
-    
-    def get_stats(self) -> dict:
+
+    def get_stats(self) -> Dict:
         """Get loopback statistics."""
         return {
             "total_loopbacks": len(self.loopback_history),
@@ -198,11 +202,11 @@ class LoopbackController:
 class QualityGateRunner:
     """
     Runs the football QA skills and aggregates results.
-    
+
     Integrates with the orchestrator to execute quality checks at the
     QUALITY_REVIEW stage and produce loopback decisions.
     """
-    
+
     def __init__(
         self,
         hermes_runner,
@@ -213,40 +217,40 @@ class QualityGateRunner:
         self.project_dir = project_dir
         self.football_emotion_dir = project_dir / "football_emotion"
         self.loopback = loopback_controller or LoopbackController()
-    
-    def run_all_gates(self, context: dict) -> QAReport:
+
+    def run_all_gates(self, context: Dict) -> QAReport:
         """Run all three football QA gates and aggregate results."""
-        
+
         # Gate 1: Retention Quality Control
         retention_result = self._run_retention_qa(context)
-        
+
         # Gate 2: Audio Quality Control
         audio_result = self._run_audio_qa(context)
-        
+
         # Gate 3: Platform Export Validator
         platform_result = self._run_platform_validator(context)
-        
+
         # Aggregate findings
         all_findings = []
         loopback_decisions = []
-        
+
         for result in [retention_result, audio_result, platform_result]:
             if result.get("findings"):
                 for finding in result["findings"]:
                     finding["gate"] = result.get("gate", "unknown")
                     all_findings.append(finding)
-                    
+
                     # Check if this finding triggers a loopback
                     loopback = self._check_finding_for_loopback(finding)
                     if loopback:
                         loopback_decisions.append(loopback)
-        
+
         overall_pass = (
             retention_result.get("pass", False) and
             audio_result.get("pass", False) and
             platform_result.get("pass", False)
         )
-        
+
         return QAReport(
             retention_pass=retention_result.get("pass", False),
             audio_pass=audio_result.get("pass", False),
@@ -257,8 +261,8 @@ class QualityGateRunner:
             findings=all_findings,
             loopback_decisions=loopback_decisions
         )
-    
-    def _run_retention_qa(self, context: dict) -> dict:
+
+    def _run_retention_qa(self, context: Dict) -> Dict:
         """Run football-retention-quality-control skill."""
         prompt = f"""
 Run the football-retention-quality-control skill for this project.
@@ -276,7 +280,7 @@ Required input artifacts (already generated):
 
 The skill checks:
 1. Technical QA: black frames, frozen frames, broken video, aspect ratio, resolution
-2. Editorial QA: missing story sections, insufficient clip coverage, duplicate clips, 
+2. Editorial QA: missing story sections, insufficient clip coverage, duplicate clips,
    invalid timestamps, weak emotional progression
 3. Platform QA: aspect ratio, resolution, codec, safe zones for target platform
 4. Reused Content Gate: Content ID risk, transformative use, source diversity
@@ -285,15 +289,14 @@ The skill checks:
 Output: full_qa_report.json with pass/fail and detailed findings including
 required_loopbacks with target_stage, target_skill, reason, severity.
 """
-        
+
         result = self.hermes_runner.run_session(
             prompt=prompt,
             context=context,
             expected_skills=["football-retention-quality-control"]
         )
-        
+
         if result.success:
-            # Load generated report
             report_path = self.football_emotion_dir / "full_qa_report.json"
             if report_path.exists():
                 return {
@@ -301,10 +304,10 @@ required_loopbacks with target_stage, target_skill, reason, severity.
                     "pass": json.loads(report_path.read_text()).get("pass", False),
                     "findings": json.loads(report_path.read_text()).get("findings", [])
                 }
-        
+
         return {"gate": "retention", "pass": False, "findings": []}
-    
-    def _run_audio_qa(self, context: dict) -> dict:
+
+    def _run_audio_qa(self, context: Dict) -> Dict:
         """Run football-audio-quality-control skill."""
         prompt = f"""
 Run the football-audio-quality-control skill for this project.
@@ -329,13 +332,13 @@ The skill checks:
 
 Output: audio_qc_report.json with pass/fail and qc_report findings.
 """
-        
+
         result = self.hermes_runner.run_session(
             prompt=prompt,
             context=context,
             expected_skills=["football-audio-quality-control"]
         )
-        
+
         if result.success:
             report_path = self.football_emotion_dir / "audio_qc_report.json"
             if report_path.exists():
@@ -344,10 +347,10 @@ Output: audio_qc_report.json with pass/fail and qc_report findings.
                     "pass": json.loads(report_path.read_text()).get("pass", False),
                     "findings": json.loads(report_path.read_text()).get("findings", [])
                 }
-        
+
         return {"gate": "audio", "pass": False, "findings": []}
-    
-    def _run_platform_validator(self, context: dict) -> dict:
+
+    def _run_platform_validator(self, context: Dict) -> Dict:
         """Run football-platform-export-validator skill."""
         prompt = f"""
 Run the football-platform-export-validator skill for this project.
@@ -373,13 +376,13 @@ The skill validates:
 
 Output: export_profile.json with pass/fail and export_profile details.
 """
-        
+
         result = self.hermes_runner.run_session(
             prompt=prompt,
             context=context,
             expected_skills=["football-platform-export-validator"]
         )
-        
+
         if result.success:
             report_path = self.football_emotion_dir / "export_profile.json"
             if report_path.exists():
@@ -388,17 +391,17 @@ Output: export_profile.json with pass/fail and export_profile details.
                     "pass": json.loads(report_path.read_text()).get("pass", False),
                     "findings": json.loads(report_path.read_text()).get("findings", [])
                 }
-        
+
         return {"gate": "platform_export", "pass": False, "findings": []}
-    
-    def _check_finding_for_loopback(self, finding: dict) -> Optional[LoopbackDecision]:
+
+    def _check_finding_for_loopback(self, finding: Dict) -> Optional[LoopbackDecision]:
         """Analyze a QA finding and create loopback if needed."""
         finding_text = finding.get("finding", "").lower()
         severity = finding.get("severity", "medium")
-        
+
         # Map findings to failure categories
         category = None
-        
+
         # Technical findings
         if "black frame" in finding_text or "frozen frame" in finding_text:
             category = FailureCategory.BLACK_FRAMES
@@ -406,7 +409,7 @@ Output: export_profile.json with pass/fail and export_profile details.
             category = FailureCategory.BROKEN_VIDEO
         elif "aspect ratio" in finding_text:
             category = FailureCategory.BAD_ASPECT_RATIO
-        
+
         # Footage coverage
         elif "missing" in finding_text and ("footage" in finding_text or "clip" in finding_text):
             category = FailureCategory.MISSING_FOOTAGE
@@ -414,15 +417,15 @@ Output: export_profile.json with pass/fail and export_profile details.
             category = FailureCategory.INSUFFICIENT_COVERAGE
         elif "duplicate" in finding_text and "clip" in finding_text:
             category = FailureCategory.DUPLICATE_CLIPS
-        elif "invalid timestamp" in finding_text or "timestamp" in finding_text and "invalid" in finding_text:
+        elif "invalid timestamp" in finding_text or ("timestamp" in finding_text and "invalid" in finding_text):
             category = FailureCategory.INVALID_TIMESTAMPS
-        
+
         # Clip quality
         elif "weak clip" in finding_text or "low score" in finding_text:
             category = FailureCategory.WEAK_CLIP
-        
+
         # Audio
-        elif "clipping" in finding_text or "peak" in finding_text and "high" in finding_text:
+        elif "clipping" in finding_text or ("peak" in finding_text and "high" in finding_text):
             category = FailureCategory.AUDIO_CLIPPING
         elif "silence" in finding_text and ("excessive" in finding_text or "long" in finding_text):
             category = FailureCategory.EXCESSIVE_SILENCE
@@ -432,7 +435,7 @@ Output: export_profile.json with pass/fail and export_profile details.
             category = FailureCategory.MISSING_MUSIC
         elif "ducking" in finding_text and ("bad" in finding_text or "fail" in finding_text):
             category = FailureCategory.BAD_DUCKING
-        
+
         # Editorial
         elif "caption" in finding_text and "unreadable" in finding_text:
             category = FailureCategory.UNREADABLE_CAPTIONS
@@ -440,7 +443,7 @@ Output: export_profile.json with pass/fail and export_profile details.
             category = FailureCategory.MISSING_STORY_SECTION
         elif "emotional progression" in finding_text and "weak" in finding_text:
             category = FailureCategory.WEAK_EMOTIONAL_PROGRESSION
-        
+
         # OpenMontage
         elif "edit_decisions" in finding_text and ("invalid" in finding_text or "schema" in finding_text):
             category = FailureCategory.INVALID_EDIT_ARTIFACT
@@ -452,18 +455,18 @@ Output: export_profile.json with pass/fail and export_profile details.
             category = FailureCategory.REUSED_CONTENT_RISK
         elif "vibe" in finding_text and "fail" in finding_text:
             category = FailureCategory.VIBE_CHECK_FAILED
-        
+
         if category and self.loopback.can_loopback(category):
             return self.loopback.create_loopback(
                 category=category,
                 reason=finding.get("finding", "Quality gate failure"),
                 severity=severity
             )
-        
+
         return None
 
 
-def create_quality_gate_runner(hermes_runner, project_dir: Path, config: dict) -> QualityGateRunner:
+def create_quality_gate_runner(hermes_runner, project_dir: Path, config: Dict) -> QualityGateRunner:
     """Factory function to create QA runner with config."""
     loopback = LoopbackController(
         max_loopbacks_per_category=config.get("max_loopbacks_per_category", 3)
@@ -493,7 +496,7 @@ QUALITY_POLICIES = {
         "youtube_longform": {
             "aspect_ratio": "16:9",
             "min_resolution": "1920x1080",
-            "max_duration_seconds": 43200,  # 12 hours
+            "max_duration_seconds": 43200,
             "codec": "h264",
             "audio_codec": "aac",
             "container": "mp4",
@@ -529,15 +532,14 @@ QUALITY_POLICIES = {
 if __name__ == "__main__":
     # Test loopback controller
     controller = LoopbackController(max_loopbacks_per_category=3)
-    
-    # Test some loopbacks
+
     cat = FailureCategory.MISSING_FOOTAGE
     for i in range(4):
         decision = controller.create_loopback(cat, f"Missing footage in section {i}", "high")
         print(f"Loopback {i+1}: target={decision.target_stage}, continue={decision.should_continue}")
-    
+
     print(f"\nStats: {controller.get_stats()}")
-    
+
     # Test category mapping
     print(f"\nMissing footage -> {controller.get_target_stage(FailureCategory.MISSING_FOOTAGE)}")
     print(f"Weak clip -> {controller.get_target_stage(FailureCategory.WEAK_CLIP)}")

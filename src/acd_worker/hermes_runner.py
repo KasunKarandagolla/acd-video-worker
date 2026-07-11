@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, List, Dict
 
 
 @dataclass
@@ -23,79 +23,99 @@ class HermesSessionResult:
     output: str = ""
     error: Optional[str] = None
     returncode: int = -1
-    artifacts: dict = field(default_factory=dict)  # Parsed output artifacts
-    metadata: dict = field(default_factory=dict)
+    artifacts: Dict = field(default_factory=dict)
+    metadata: Dict = field(default_factory=dict)
 
 
 class HermesRunner:
     """
     Runs Hermes Agent sessions for the football-emotion skill system.
-    
+
     Handles session management, skill activation via description matching,
     artifact extraction, and error handling.
     """
-    
+
     def __init__(
         self,
         hermes_home: str,
         profile: str = "football-emotion",
         dry_run: bool = False,
-        timeout: int = 600
+        timeout: int = 600,
+        hermes_cli: Optional[str] = None
     ):
-        self.hermes_home = Path(hermes_home)
+        self.hermes_home = Path(hermes_home).expanduser().resolve()
         self.profile = profile
         self.dry_run = dry_run
         self.timeout = timeout
         self.profile_dir = self.hermes_home / "profiles" / profile
-        
+
+        # Resolve hermes CLI - use provided path, or find in PATH, or use bundled
+        if hermes_cli:
+            self.hermes_cli = Path(hermes_cli).expanduser().resolve()
+        else:
+            # Try to find hermes in PATH
+            import shutil
+            hermes_in_path = shutil.which("hermes")
+            if hermes_in_path:
+                self.hermes_cli = Path(hermes_in_path)
+            else:
+                # Fallback to common install location
+                self.hermes_cli = Path.home() / ".local" / "bin" / "hermes"
+
         # Verify profile exists
         if not self.profile_dir.exists():
             raise ValueError(f"Hermes profile not found: {self.profile_dir}")
-        
+
         # Session tracking
-        self.session_history: list[dict] = []
-    
+        self.session_history: List[Dict] = []
+
     def run_session(
         self,
         prompt: str,
-        context: dict = None,
+        context: Dict = None,
         session_id: Optional[str] = None,
         parent_session_id: Optional[str] = None,
-        expected_skills: list[str] = None
+        expected_skills: List[str] = None
     ) -> HermesSessionResult:
         """
         Execute a Hermes chat session with the given prompt.
-        
+
         Args:
             prompt: The prompt to send to Hermes (should trigger skills via description matching)
             context: Additional context to include in the prompt
             session_id: Optional existing session ID to continue
             parent_session_id: Optional parent session for sub-agent tracking
             expected_skills: Skills we expect to be activated (for validation)
-            
+
         Returns:
             HermesSessionResult with output and any extracted artifacts
         """
         if self.dry_run:
             return self._dry_run_result(prompt, expected_skills)
-        
+
         # Build environment
         env = os.environ.copy()
         env["HERMES_HOME"] = str(self.profile_dir)
-        
-        # Build command
-        cmd = ["hermes", "-p", self.profile, "chat", "-q", prompt]
-        
+
+        # Build command - use -q for single query mode, -Q for quiet (programmatic)
+        cmd = [
+            str(self.hermes_cli),
+            "-p", self.profile,
+            "chat",
+            "-q", prompt,
+            "-Q",  # Quiet mode for programmatic use
+        ]
+
         if session_id:
-            cmd.extend(["--session", session_id])
+            cmd.extend(["--resume", session_id])
         if parent_session_id:
             cmd.extend(["--parent-session", parent_session_id])
-        
+
         print(f"[HermesRunner] Running session with profile '{self.profile}'")
         print(f"[HermesRunner] Prompt length: {len(prompt)} chars")
         if expected_skills:
             print(f"[HermesRunner] Expected skills: {expected_skills}")
-        
+
         try:
             result = subprocess.run(
                 cmd,
@@ -104,20 +124,20 @@ class HermesRunner:
                 text=True,
                 timeout=self.timeout
             )
-            
+
             session_result = HermesSessionResult(
                 success=result.returncode == 0,
                 output=result.stdout,
                 error=result.stderr if result.returncode != 0 else None,
                 returncode=result.returncode
             )
-            
+
             # Try to extract session ID from output
             session_result.session_id = self._extract_session_id(result.stdout)
-            
+
             # Parse artifacts from output
             session_result.artifacts = self._extract_artifacts(result.stdout)
-            
+
             # Record in history
             self.session_history.append({
                 "session_id": session_result.session_id,
@@ -127,9 +147,9 @@ class HermesRunner:
                 "expected_skills": expected_skills or [],
                 "activated_skills": self._detect_activated_skills(result.stdout)
             })
-            
+
             return session_result
-            
+
         except subprocess.TimeoutExpired:
             return HermesSessionResult(
                 success=False,
@@ -140,15 +160,15 @@ class HermesRunner:
                 success=False,
                 error=f"Hermes execution failed: {e}"
             )
-    
+
     def run_skill_sequence(
         self,
-        stages: list[dict],
-        context: dict = None
-    ) -> list[HermesSessionResult]:
+        stages: List[Dict],
+        context: Dict = None
+    ) -> List[HermesSessionResult]:
         """
         Run a sequence of Hermes sessions for multiple stages.
-        
+
         Each stage dict should have:
         - name: stage name
         - prompt: prompt for this stage
@@ -157,43 +177,43 @@ class HermesRunner:
         """
         results = []
         accumulated_context = context or {}
-        
+
         for stage in stages:
             # Build prompt with accumulated context
             prompt = self._build_contextual_prompt(stage["prompt"], accumulated_context)
-            
+
             result = self.run_session(
                 prompt=prompt,
                 context=accumulated_context,
                 expected_skills=stage.get("expected_skills", [])
             )
             results.append(result)
-            
+
             if not result.success:
                 break
-            
+
             # Update accumulated context with new artifacts
             accumulated_context.update(result.artifacts)
             accumulated_context[f"{stage['name']}_output"] = result.output
-        
+
         return results
-    
-    def _build_contextual_prompt(self, base_prompt: str, context: dict) -> str:
+
+    def _build_contextual_prompt(self, base_prompt: str, context: Dict) -> str:
         """Enhance prompt with relevant context from previous stages."""
         if not context:
             return base_prompt
-        
+
         context_parts = ["Previous stage outputs (use as input):"]
         for key, value in context.items():
             if key.endswith("_output"):
-                continue  # Skip raw outputs
+                continue
             if isinstance(value, dict):
                 context_parts.append(f"\n{key}:")
-                context_parts.append(json.dumps(value, indent=2)[:2000])
-        
+                context_parts.append(json.dumps(value, indent=2)[:3000])
+
         return "\n".join(context_parts) + "\n\n" + base_prompt
-    
-    def _dry_run_result(self, prompt: str, expected_skills: list[str] = None) -> HermesSessionResult:
+
+    def _dry_run_result(self, prompt: str, expected_skills: List[str] = None) -> HermesSessionResult:
         """Generate a mock result for dry-run mode."""
         return HermesSessionResult(
             success=True,
@@ -201,11 +221,10 @@ class HermesRunner:
             output=f"[DRY RUN] Would execute Hermes with prompt ({len(prompt)} chars). Expected skills: {expected_skills or 'any'}",
             artifacts={}
         )
-    
+
     def _extract_session_id(self, output: str) -> Optional[str]:
         """Extract session ID from Hermes output."""
         import re
-        # Look for session ID patterns in output
         patterns = [
             r"session[_\s]?id[:\s]+([a-f0-9-]{8,})",
             r"Session[:\s]+([a-f0-9-]{8,})",
@@ -216,19 +235,17 @@ class HermesRunner:
             if match:
                 return match.group(1)
         return None
-    
-    def _extract_artifacts(self, output: str) -> dict:
+
+    def _extract_artifacts(self, output: str) -> Dict:
         """Extract structured artifacts from Hermes output."""
         artifacts = {}
-        
-        # Look for JSON blocks that might be artifacts
+
         import re
         json_blocks = re.findall(r"```json\n(.*?)\n```", output, re.DOTALL)
         for block in json_blocks:
             try:
                 data = json.loads(block)
                 if isinstance(data, dict):
-                    # Check if it looks like a known artifact
                     if "source_video_candidate" in str(data):
                         artifacts["source_candidates"] = data
                     elif "video_scene_analysis" in str(data):
@@ -252,19 +269,18 @@ class HermesRunner:
                     elif "hermes_memory_update" in str(data):
                         artifacts["memory_update"] = data
                     else:
-                        # Generic artifact
                         artifacts.setdefault("raw_artifacts", []).append(data)
             except json.JSONDecodeError:
                 pass
-        
+
         return artifacts
-    
-    def _detect_activated_skills(self, output: str) -> list[str]:
-        """Detect which skills were activated based on output."""
+
+    def _detect_activated_skills(self, output: str) -> List[str]:
+        """Detect which skills were activated based on output content."""
         skills = []
         skill_indicators = {
             "social-edit-reasoning": ["editorial_journey_state", "brief_interpretation"],
-            "football-story-strategy": ["story_plan", "user_instruction_profile"],
+            "football-story-strategy": ["story_plan", "user_instruction_profile", "footage_requirements"],
             "football-source-discovery": ["source_video_candidate", "deep_analysis_candidate"],
             "football-footage-acquisition": ["source_media_review", "asset_manifest"],
             "football-visual-scene-analysis": ["video_scene_analysis", "scene_candidate"],
@@ -286,22 +302,21 @@ class HermesRunner:
             "football-footage-rights-transformative-risk-assessor": ["footage_rights_risk_record"],
             "football-rights-safe-audio-license-checker": ["license_verification_record"],
         }
-        
+
         for skill, indicators in skill_indicators.items():
             if any(ind in output for ind in indicators):
                 skills.append(skill)
-        
+
         return skills
-    
-    def get_session_history(self) -> list[dict]:
+
+    def get_session_history(self) -> List[Dict]:
         """Get history of all sessions run."""
         return self.session_history
 
 
-# Convenience function for common prompts
-def build_skill_prompt(skill_name: str, task: str, inputs: dict) -> str:
+def build_skill_prompt(skill_name: str, task: str, inputs: Dict) -> str:
     """Build a prompt that will activate a specific skill via description matching."""
-    
+
     skill_descriptions = {
         "social-edit-reasoning": "Guide editorial reasoning for reusable emotional sourced-footage videos",
         "football-story-strategy": "Turn a football-emotion request into a concrete story arc",
@@ -326,9 +341,9 @@ def build_skill_prompt(skill_name: str, task: str, inputs: dict) -> str:
         "football-footage-rights-transformative-risk-assessor": "Assess transformative use risk",
         "football-rights-safe-audio-license-checker": "Verify audio license status",
     }
-    
+
     desc = skill_descriptions.get(skill_name, skill_name)
-    
+
     prompt = f"""As the AI Creative Director, you need to {desc}.
 
 TASK: {task}
@@ -342,17 +357,16 @@ Execute the appropriate skill(s) and produce the required output artifacts.
 
 
 if __name__ == "__main__":
-    # Test runner
     import sys
-    
+
     hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
     runner = HermesRunner(hermes_home, dry_run=True)
-    
+
     result = runner.run_session(
         prompt="Test prompt for football-story-strategy skill",
         expected_skills=["football-story-strategy"]
     )
-    
+
     print(f"Success: {result.success}")
     print(f"Session ID: {result.session_id}")
     print(f"Output: {result.output}")

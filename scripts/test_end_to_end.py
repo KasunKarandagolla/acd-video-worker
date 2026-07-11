@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from acd_worker.orchestrator import (
     StageOrchestrator, ProjectState, StageCheckpoint, StageName, StageStatus,
-    STAGE_ORDER, CheckpointManager
+    CANONICAL_STAGE_ORDER, CheckpointManager
 )
 from acd_worker.hermes_runner import HermesRunner
 from acd_worker.openmontage_runner import OpenMontageRunner, run_schema_lock_verification
