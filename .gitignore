@@ -1,0 +1,11 @@
+external/
+outputs/
+state/runs/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.log
+.DS_Store

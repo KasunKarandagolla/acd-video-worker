@@ -1,0 +1,14 @@
+{
+  "hermes_agent": {
+    "repository": "https://github.com/NousResearch/Hermes-Agent",
+    "commit": "5ecc07986f46463ca3096679b03a46402eb19cee",
+    "branch": "main",
+    "inspection_date": "2026-07-11"
+  },
+  "openmontage": {
+    "repository": "https://github.com/calesthio/OpenMontage",
+    "commit": "f633b5f428b9be9a2afecba851dfddd101619756",
+    "branch": "main",
+    "inspection_date": "2026-07-11"
+  }
+}

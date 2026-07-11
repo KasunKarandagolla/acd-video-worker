@@ -1,0 +1,253 @@
+# Quality Policy Configuration
+# Defines thresholds, gates, and validation rules for quality review
+
+# ─── Retention Quality Control (football-retention-quality-control) ──────────
+
+retention_qa:
+  # Technical thresholds
+  technical:
+    max_black_frames_percent: 0.5
+    max_frozen_frames_percent: 0.5
+    min_resolution_width: 1280
+    min_resolution_height: 720
+    required_aspect_ratios:
+      - "16:9"
+      - "9:16"
+    max_sync_drift_seconds: 0.5
+  
+  # Editorial thresholds
+  editorial:
+    # Minimum clips per story section
+    min_clips_per_section: 1
+    
+    # Maximum duplicate clips (same source video)
+    max_duplicate_clips: 0
+    
+    # Hook must appear within N seconds
+    hook_within_seconds: 10
+    
+    # Every major action must have a reaction shot
+    require_reaction_for_action: true
+    
+    # Minimum emotional reversals in story
+    min_emotional_reversals: 2
+    
+    # No three-in-a-row same shot type
+    max_consecutive_same_shot_type: 2
+    
+    # Ending must have meaning (not just last goal)
+    ending_must_have_meaning: true
+  
+  # Platform-specific checks
+  platform:
+    youtube_longform:
+      min_duration_seconds: 60
+      max_duration_seconds: 43200
+      safe_zone_margin_percent: 10
+    youtube_shorts:
+      min_duration_seconds: 15
+      max_duration_seconds: 60
+      aspect_ratio: "9:16"
+      safe_zone_margin_percent: 15
+    tiktok:
+      min_duration_seconds: 15
+      max_duration_seconds: 180
+      aspect_ratio: "9:16"
+    instagram_reels:
+      min_duration_seconds: 15
+      max_duration_seconds: 90
+      aspect_ratio: "9:16"
+
+  # Reused content gate
+  reused_content:
+    max_similarity_score: 0.8
+    min_transformative_score: 3
+    require_source_diversity: true
+    max_same_source_percent: 50
+
+  # Vibe check (subjective but codified)
+  vibe_check:
+    hook_effectiveness_threshold: 6
+    emotional_coherence_threshold: 6
+    pacing_appropriateness_threshold: 6
+    ending_impact_threshold: 6
+
+# ─── Audio Quality Control (football-audio-quality-control) ──────────────────
+
+audio_qa:
+  # Loudness standards (EBU R128 / YouTube)
+  loudness:
+    target_lufs: -14.0
+    tolerance_lufs: 1.0
+    max_true_peak_db: -1.0
+    max_lra_lu: 7.0
+  
+  # Ducking requirements
+  ducking:
+    required_for_commentary: true
+    required_for_narration: true
+    min_reduction_db: 6
+    max_attack_ms: 100
+    max_release_ms: 300
+    threshold_db: -20
+  
+  # Silence detection
+  silence:
+    max_unintended_silence_seconds: 2.0
+    silence_threshold_db: -60
+  
+  # Clipping detection
+  clipping:
+    max_clipped_samples_percent: 0.01
+    true_peak_margin_db: 1.0
+  
+  # Balance checks
+  balance:
+    music_vs_commentary_ratio_db: 12  # music should be 12dB below commentary
+    music_vs_narration_ratio_db: 10
+    sfx_max_level_db: -10
+
+# ─── Platform Export Validator (football-platform-export-validator) ──────────
+
+platform_export:
+  # Platform profiles with exact specs
+  profiles:
+    youtube_longform:
+      aspect_ratio: "16:9"
+      min_resolution: "1920x1080"
+      max_resolution: "3840x2160"
+      codec: "h264"
+      audio_codec: "aac"
+      container: "mp4"
+      target_lufs: -14.0
+      true_peak_db: -1.0
+      max_duration_seconds: 43200
+      hdr_metadata_policy: "strip"
+      color_space: "bt709"
+    
+    youtube_shorts:
+      aspect_ratio: "9:16"
+      min_resolution: "1080x1920"
+      max_resolution: "1080x1920"
+      codec: "h264"
+      audio_codec: "aac"
+      container: "mp4"
+      target_lufs: -14.0
+      true_peak_db: -1.0
+      max_duration_seconds: 60
+      hdr_metadata_policy: "strip"
+      color_space: "bt709"
+      vertical_required: true
+    
+    tiktok:
+      aspect_ratio: "9:16"
+      min_resolution: "1080x1920"
+      max_resolution: "1080x1920"
+      codec: "h264"
+      audio_codec: "aac"
+      container: "mp4"
+      target_lufs: -14.0
+      true_peak_db: -1.0
+      max_duration_seconds: 180
+      hdr_metadata_policy: "strip"
+      color_space: "bt709"
+      vertical_required: true
+    
+    instagram_reels:
+      aspect_ratio: "9:16"
+      min_resolution: "1080x1920"
+      max_resolution: "1080x1920"
+      codec: "h264"
+      audio_codec: "aac"
+      container: "mp4"
+      target_lufs: -14.0
+      true_peak_db: -1.0
+      max_duration_seconds: 90
+      hdr_metadata_policy: "strip"
+      color_space: "bt709"
+      vertical_required: true
+
+  # Validation behavior
+  validation:
+    fail_on_aspect_mismatch: true
+    fail_on_resolution_below_min: true
+    fail_on_codec_mismatch: true
+    fail_on_loudness_out_of_range: true
+    fail_on_true_peak_exceeded: true
+    fail_on_duration_exceeded: true
+    warn_on_hdr_present: true
+
+# ─── Schema Validation ────────────────────────────────────────────────────────
+
+schema_validation:
+  # OpenMontage artifact schemas that must validate
+  required_schemas:
+    - "edit_decisions"
+    - "asset_manifest"
+    - "scene_plan"
+    - "render_report"
+    - "brief"
+    - "source_media_review"
+    - "script"
+  
+  # Validation mode
+  mode: "strict"  # strict | lenient | warn_only
+  
+  # Stop pipeline on schema failure
+  block_on_failure: true
+
+# ─── Quality Gate Execution Order ────────────────────────────────────────────
+
+gate_execution_order:
+  1: "retention_qa"
+  2: "audio_qa"
+  3: "platform_export"
+  4: "schema_validation"
+
+# ─── Loopback Trigger Mapping ────────────────────────────────────────────────
+
+loopback_triggers:
+  # Technical failures
+  "black_frames": "FOOTAGE_ACQUISITION"
+  "frozen_frames": "FOOTAGE_ACQUISITION"
+  "broken_video": "FOOTAGE_ACQUISITION"
+  "bad_aspect_ratio": "VISUAL_ANALYSIS"
+  "invalid_timestamps": "TIMESTAMP_EXTRACTION"
+  
+  # Footage coverage
+  "missing_footage": "FOOTAGE_DISCOVERY"
+  "insufficient_coverage": "FOOTAGE_DISCOVERY"
+  "duplicate_clips": "CLIP_SCORING"
+  "weak_clip": "CLIP_SCORING"
+  
+  # Audio failures
+  "audio_clipping": "AUDIO_PLAN"
+  "excessive_silence": "AUDIO_PLAN"
+  "missing_narration": "NARRATION"
+  "missing_music": "AUDIO_PLAN"
+  "bad_ducking": "AUDIO_PLAN"
+  "loudness_out_of_range": "AUDIO_PLAN"
+  "true_peak_exceeded": "AUDIO_PLAN"
+  
+  # Editorial failures
+  "missing_story_section": "EDIT_PLAN"
+  "weak_emotional_progression": "EDIT_PLAN"
+  "unreadable_captions": "EDIT_PLAN"
+  "no_reaction_for_action": "EDIT_PLAN"
+  "three_same_shot_type": "EDIT_PLAN"
+  
+  # Platform/export
+  "aspect_mismatch": "EDIT_PLAN"
+  "resolution_too_low": "OPENMONTAGE_ASSETS"
+  "duration_exceeded": "EDIT_PLAN"
+  "codec_mismatch": "OPENMONTAGE_COMPOSE"
+  
+  # Schema/render
+  "schema_validation_failed": "EDIT_PLAN"
+  "render_failure": "OPENMONTAGE_COMPOSE"
+  
+  # Reused content
+  "reused_content_risk": "FOOTAGE_DISCOVERY"
+  
+  # Vibe
+  "vibe_check_failed": "EDIT_PLAN"

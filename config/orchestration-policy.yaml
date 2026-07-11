@@ -1,0 +1,201 @@
+# Orchestration Policy Configuration
+# Controls stage execution, loopbacks, checkpoints, and runtime behavior
+
+# ─── Stage Execution Policy ─────────────────────────────────────────────────
+
+stage_policy:
+  # Whether to enforce strict stage order (no skipping)
+  enforce_order: true
+  
+  # Stages that can run in parallel (empty for sequential)
+  parallel_stages: []
+  
+  # Stages that require human approval before proceeding
+  human_approval_stages:
+    - "OPENMONTAGE_IDEA"
+    - "OPENMONTAGE_SCENE_PLAN"
+    - "OPENMONTAGE_ASSETS"
+    - "OPENMONTAGE_EDIT"
+    - "OPENMONTAGE_COMPOSE"
+    - "QUALITY_REVIEW"
+  
+  # Maximum time per stage (seconds)
+  stage_timeout_seconds: 600
+
+# ─── Checkpoint & Resume Policy ─────────────────────────────────────────────
+
+checkpoint_policy:
+  # Save checkpoint after every stage
+  save_after_every_stage: true
+  
+  # Archive superseded checkpoints
+  archive_old_checkpoints: true
+  
+  # Maximum checkpoints to keep per stage
+  max_checkpoints_per_stage: 10
+  
+  # Resume from last completed stage on restart
+  auto_resume: true
+  
+  # Validate artifacts before marking stage complete
+  validate_artifacts: true
+
+# ─── Loopback Policy ────────────────────────────────────────────────────────
+
+loopback_policy:
+  # Maximum automatic loopbacks per failure category
+  max_loopbacks_per_category: 3
+  
+  # Maximum total loopbacks across all categories
+  max_total_loopbacks: 10
+  
+  # Categories that should NOT trigger automatic loopback
+  blocked_loopback_categories: []
+  
+  # Whether to escalate to human after max loopbacks
+  escalate_on_max: true
+  
+  # Delay before retrying (seconds)
+  retry_delay_seconds: 30
+
+# ─── Discovery & Acquisition Policy ──────────────────────────────────────────
+
+discovery_policy:
+  # Primary discovery method
+  primary_method: "yt_dlp_search"
+  
+  # Fallback discovery method
+  fallback_method: "tavily"
+  
+  # Minimum candidates per slot before fallback activates
+  min_candidates_per_slot: 3
+  
+  # Maximum candidates to keep per slot
+  max_candidates_per_slot: 10
+  
+  # Query styles to use (per architecture)
+  query_styles:
+    - "story"
+    - "moment"
+    - "editing_style"
+    - "official_source"
+    - "non_english"
+  
+  # Non-English languages to include
+  non_english_languages:
+    - "spanish"
+    - "french"
+    - "portuguese"
+    - "arabic"
+    - "hindi"
+    - "tamil"
+
+acquisition_policy:
+  # Sequential download (one at a time)
+  sequential_download: true
+  
+  # Maximum download attempts per slot
+  max_attempts_per_slot: 3
+  
+  # Retry transient network failures
+  max_transient_retries: 2
+  
+  # Download resolution cap
+  max_resolution: "720p"
+  
+  # Validation requirements
+  validation:
+    min_duration_seconds: 5
+    max_duration_seconds: 3600
+    min_width: 480
+    min_height: 270
+    require_audio: false
+  
+  # Clean up failed downloads
+  cleanup_on_failure: true
+  
+  # Cache analysis copies
+  cache_analysis_copies: true
+
+# ─── OpenMontage Pipeline Policy ─────────────────────────────────────────────
+
+openmontage_policy:
+  # Pipeline to use
+  pipeline: "documentary-montage"
+  
+  # Render runtime (locked for Kaggle)
+  render_runtime: "ffmpeg"
+  
+  # Require user confirmation for render runtime
+  require_runtime_confirmation: true
+  
+  # Schema lock must pass before native artifacts
+  enforce_schema_lock: true
+  
+  # Stage director skills to invoke
+  stages:
+    - "idea"
+    - "scene_plan"
+    - "assets"
+    - "edit"
+    - "compose"
+  
+  # Human approval per stage (from pipeline manifest)
+  human_approval_per_stage: true
+
+# ─── Memory & Learning Policy ────────────────────────────────────────────────
+
+memory_policy:
+  # Enforce MEMORY.md/USER.md size limits
+  enforce_size_limits: true
+  
+  # Max characters for MEMORY.md
+  memory_md_max_chars: 2200
+  
+  # Max characters for USER.md
+  user_md_max_chars: 1375
+  
+  # Only distilled lessons to MEMORY.md
+  distill_only: true
+  
+  # Full project record path
+  project_record_path: "projects/<project-id>/football_emotion/project_record.json"
+  
+  # Hindsight mode (if enabled)
+  hindsight_mode: "local_embedded"
+  hindsight_bank_template: "hermes-{profile}"
+
+# ─── Discord Notification Policy ──────────────────────────────────────────────
+
+discord_policy:
+  # Events that trigger notifications
+  notify_on:
+    - "run_started"
+    - "sourcing_completed"
+    - "editing_started"
+    - "render_failed"
+    - "quality_review_failed"
+    - "run_completed"
+    - "run_failed"
+    - "loopback_triggered"
+  
+  # Include output path in completion notification
+  include_output_path: true
+  
+  # Include error details in failure notification
+  include_error_details: true
+
+# ─── Kaggle Persistence Policy ────────────────────────────────────────────────
+
+kaggle_policy:
+  # Symlink paths for persistence
+  hermes_home_symlink: "/kaggle/working/.hermes"
+  projects_dir_symlink: "/kaggle/working/projects"
+  
+  # Auto-setup on startup
+  auto_setup_symlinks: true
+  
+  # Environment variables to set
+  env_vars:
+    HERMES_HOME: "/kaggle/working/.hermes"
+    OPENMONTAGE_PROJECTS_DIR: "/kaggle/working/projects"

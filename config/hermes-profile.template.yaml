@@ -1,0 +1,46 @@
+# Hermes Profile Template for football-emotion
+# Copy to config.yaml in profile directory (HERMES_HOME/config.yaml)
+
+model:
+  provider: "anthropic"
+  model: "claude-4-sonnet"
+  base_url: "https://api.anthropic.com"
+  custom_providers: []
+
+toolsets:
+  - file
+  - terminal
+  - web
+  - browser
+  - memory
+  - session_search
+  - skills
+
+platform_toolsets:
+  discord:
+    - discord
+    - discord_admin
+
+compression:
+  threshold: 0.75
+  codex_gpt55_autoraise: true
+
+memory:
+  provider: "builtin"
+
+display:
+  interface: "cli"
+  tool_progress: "all"
+
+moa:
+  enabled: false
+  preset: "balanced"
+  save_traces: false
+
+# Football-emotion specific
+skills:
+  external_dirs: []  # We install directly to profile skills dir
+
+# Kaggle-compatible defaults (no cloud providers)
+browser:
+  backend_preference: "auto"  # Will fail on Kaggle; handled at runtime

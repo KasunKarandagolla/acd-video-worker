@@ -1,0 +1,35 @@
+# Hermes Environment Template
+# Copy to .env in profile directory (HERMES_HOME/.env)
+# DO NOT COMMIT SECRETS
+
+# LLM Provider (required)
+LLM_API_KEY=
+LLM_BASE_URL=https://api.anthropic.com
+LLM_MODEL=claude-4-sonnet
+
+# Optional: Alternative providers
+# OPENAI_API_KEY=
+# OPENAI_BASE_URL=https://api.openai.com/v1
+# GOOGLE_API_KEY=
+
+# Browser backends (optional - only one needed)
+# BROWSERBASE_API_KEY=
+# BROWSERBASE_PROJECT_ID=
+# BROWSER_USE_API_KEY=
+# FIRECRAWL_API_KEY=
+# CAMOFOX_URL=
+
+# Hindsight (optional - Kaggle incompatible)
+# HINDSIGHT_API_KEY=
+# HINDSIGHT_API_URL=https://api.hindsight.vectorize.io
+# HINDSIGHT_MODE=local_embedded  # or cloud, local_external
+
+# Discord (for notifications)
+# DISCORD_WEBHOOK_URL=
+
+# Search
+# TAVILY_API_KEY=
+
+# Kaggle persistence
+HERMES_HOME=/kaggle/working/.hermes
+OPENMONTAGE_PROJECTS_DIR=/kaggle/working/projects
