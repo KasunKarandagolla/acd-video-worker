@@ -1,3 +1,5 @@
+> **Historical inspection snapshot. Use the current pinned-boundary evidence in `THIN_ORCHESTRATION_MODULE_MAP.md` for implementation decisions.**
+
 # Upstream Compatibility Report
 
 **Inspection Date:** 2026-07-11  

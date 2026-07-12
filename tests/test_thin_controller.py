@@ -1,0 +1,252 @@
+from __future__ import annotations
+
+import ast
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from acd_worker.hermes_runner import HermesRunner, HermesSessionResult
+from acd_worker.job_prompt import PRELOADED_SKILLS, build_job_prompt
+from acd_worker.media_validation import FinalMediaValidator
+from acd_worker.notifications import DiscordNotifier
+from acd_worker.run_state import RunState, RunStateStore, RunStatus, utc_now
+from acd_worker.source_service import SourceService, sanitize_reference
+from acd_worker.thin_controller import ThinControllerConfig, ThinRunController
+
+
+class FakeRunner:
+    def __init__(self, root: Path, behavior):
+        self.profile_dir = root / "hermes" / "profiles" / "football-emotion"
+        for skill in PRELOADED_SKILLS:
+            target = self.profile_dir / "skills" / "football-emotion-video" / "skills" / skill
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "SKILL.md").write_text(f"---\nname: {skill}\ndescription: test\n---\n", encoding="utf-8")
+        self.behavior = behavior
+        self.calls = []
+
+    def find_skill(self, name):
+        matches = list((self.profile_dir / "skills").rglob(f"{name}/SKILL.md"))
+        return matches[0] if matches else None
+
+    def run_session(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.behavior(kwargs)
+
+
+def config_for(root: Path, dry_run: bool = False) -> ThinControllerConfig:
+    om = root / "OpenMontage"
+    om.mkdir(exist_ok=True)
+    (om / "AGENT_GUIDE.md").write_text("native agent contract", encoding="utf-8")
+    return ThinControllerConfig(
+        worker_root=ROOT,
+        hermes_home=root / "hermes",
+        hermes_profile="football-emotion",
+        hermes_cli=None,
+        openmontage_root=om,
+        projects_dir=om / "projects",
+        state_dir=root / "state",
+        dry_run=dry_run,
+    )
+
+
+class RunStateTests(unittest.TestCase):
+    def test_macro_transitions_and_terminal_state(self):
+        now = utc_now()
+        state = RunState("1.0", "r1", "p1", "request", RunStatus.INTAKE, now, now, "/p", "/s", "/a", "/j")
+        state.transition(RunStatus.SOURCE_READY)
+        state.transition(RunStatus.AGENT_RUNNING)
+        state.transition(RunStatus.FAILED)
+        with self.assertRaises(ValueError):
+            state.transition(RunStatus.INTAKE)
+
+    def test_store_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = utc_now()
+            state = RunState("1.0", "resume_1", "p1", "request", RunStatus.INTAKE, now, now, "/p", "/s", "/a", "/j")
+            store = RunStateStore(Path(tmp))
+            store.save(state)
+            self.assertEqual(store.load("resume_1").status, RunStatus.INTAKE)
+
+
+class PromptAndBoundaryTests(unittest.TestCase):
+    def test_prompt_delegates_creative_and_native_pipeline(self):
+        prompt = build_job_prompt(
+            run_id="r1", project_id="p1", request="football emotion",
+            worker_root=ROOT, openmontage_root=ROOT / "external" / "OpenMontage",
+            project_dir=ROOT / "project", source_manifest_path=ROOT / "project" / "source.json",
+            result_path=ROOT / "project" / "result.json",
+        )
+        for skill in ("Football Emotion Skill System", "hermes-football-memory-learning", "video_compose"):
+            self.assertIn(skill, prompt)
+        self.assertIn("Never invent a command or rebuild OpenMontage stages", prompt)
+
+    def test_production_entrypoint_has_no_legacy_orchestrator_import(self):
+        tree = ast.parse((ROOT / "scripts" / "acd_worker.py").read_text(encoding="utf-8"))
+        imports = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                imports.append(node.module or "")
+            elif isinstance(node, ast.Import):
+                imports.extend(alias.name for alias in node.names)
+        joined = " ".join(imports)
+        self.assertNotIn("acd_worker.orchestrator", joined)
+        self.assertNotIn("openmontage_runner", joined)
+
+    def test_source_manifest_keeps_mixed_inputs_and_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            local = root / "clip.mp4"
+            local.write_bytes(b"not claimed as valid media")
+            path = root / "manifest.json"
+            manifest = SourceService().prepare_manifest(path, [str(local), "https://example.com/video"])
+            self.assertTrue(manifest["policy"]["free_only"])
+            self.assertEqual([s["kind"] for s in manifest["sources"]], ["local_file", "url"])
+
+    def test_source_reference_strips_credentials_but_keeps_video_id(self):
+        cleaned = sanitize_reference("https://user:pass@example.com/watch?v=abc123&access_token=secret#fragment")
+        self.assertEqual(cleaned, "https://example.com/watch?v=abc123")
+
+
+class HermesRunnerTests(unittest.TestCase):
+    def test_supported_profile_resume_and_skill_invocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli = root / "hermes"
+            cli.write_text("#!/bin/sh\n", encoding="utf-8")
+            cli.chmod(0o755)
+            profile = root / "home" / "profiles" / "football-emotion" / "skills" / "x"
+            profile.mkdir(parents=True)
+            completed = subprocess.CompletedProcess([], 0, stdout='{"status":"blocked"}\n', stderr="\nsession_id: 20260712_abc12345\n")
+            runner = HermesRunner(str(root / "home"), hermes_cli=str(cli), cwd=root, max_turns=17)
+            with patch("acd_worker.hermes_runner.subprocess.run", return_value=completed) as mocked:
+                result = runner.run_session("prompt", session_id="old_session", expected_skills=["skill-a"])
+            command = mocked.call_args.args[0]
+            self.assertEqual(command[:4], [str(cli), "-p", "football-emotion", "chat"])
+            self.assertIn("--resume", command)
+            self.assertIn("--skills", command)
+            self.assertEqual(mocked.call_args.kwargs["env"]["HERMES_HOME"], str(root / "home"))
+            self.assertEqual(result.session_id, "20260712_abc12345")
+
+    def test_secret_redaction(self):
+        token = "ghp" + "_abcdefghijk"
+        redacted = HermesRunner._redact(f"api_key=supersecret authorization: Bearer tokenvalue {token}")
+        self.assertNotIn("supersecret", redacted)
+        self.assertNotIn("tokenvalue", redacted)
+        self.assertNotIn(token, redacted)
+
+
+class OptionalInfrastructureTests(unittest.TestCase):
+    def test_discord_failure_is_non_fatal(self):
+        notifier = DiscordNotifier("https://example.invalid/webhook", timeout=1)
+        with patch("acd_worker.notifications.urllib.request.urlopen", side_effect=OSError("offline")):
+            notifier._send("title", "description", 0)
+
+    def test_persistence_excludes_env_and_symlinks(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from kaggle_persistence import copy_tree
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "destination"
+            source.mkdir()
+            (source / "state.db").write_text("durable", encoding="utf-8")
+            (source / ".env").write_text("SECRET=value", encoding="utf-8")
+            (source / "link").symlink_to(source / "state.db")
+            copy_tree(source, destination)
+            self.assertTrue((destination / "state.db").is_file())
+            self.assertFalse((destination / ".env").exists())
+            self.assertFalse((destination / "link").exists())
+
+    def test_profile_configuration_never_writes_api_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            secret = "test-secret-value"
+            environment = {
+                **__import__("os").environ,
+                "HERMES_HOME": str(root / "hermes"),
+                "HERMES_PROFILE": "football-emotion",
+                "LLM_BASE_URL": "https://free.example/v1",
+                "LLM_MODEL": "free-model",
+                "LLM_API_KEY": secret,
+            }
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "bootstrap" / "configure_hermes_profile.py")],
+                env=environment, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0)
+            config = (root / "hermes" / "profiles" / "football-emotion" / "config.yaml").read_text(encoding="utf-8")
+            self.assertNotIn(secret, config)
+            self.assertIn("key_env: LLM_API_KEY", config)
+
+
+class ControllerTests(unittest.TestCase):
+    def test_dry_run_is_blocked_not_delivered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root, dry_run=True)
+            runner = FakeRunner(root, lambda _: self.fail("Hermes must not run in dry-run"))
+            state = ThinRunController(cfg, runner=runner).start("test")
+            self.assertEqual(state.status, RunStatus.BLOCKED)
+            self.assertEqual(state.blocker.code, "DRY_RUN_ONLY")
+
+    def test_zero_exit_without_result_file_fails_protocol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+            runner = FakeRunner(root, lambda _: HermesSessionResult(success=True, session_id="session_12345678", returncode=0))
+            state = ThinRunController(cfg, runner=runner).start("test")
+            self.assertEqual(state.status, RunStatus.FAILED)
+            self.assertEqual(state.error.code, "PROTOCOL_ERROR")
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe required")
+    def test_only_real_ffprobe_media_delivers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+
+            def behavior(call):
+                match = next(line for line in call["prompt"].splitlines() if line.startswith("- mandatory final result file:"))
+                result_path = Path(match.split(":", 1)[1].strip())
+                project_dir = result_path.parent.parent
+                output = project_dir / "renders" / "final.mp4"
+                output.parent.mkdir(parents=True, exist_ok=True)
+                subprocess.run([
+                    "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=0.5",
+                    "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(output),
+                ], capture_output=True, check=True)
+                run_id = next(line.split(":", 1)[1].strip() for line in call["prompt"].splitlines() if line.startswith("RUN ID:"))
+                result_path.write_text(json.dumps({
+                    "schema_version": "1.0", "run_id": run_id, "status": "delivered",
+                    "output_media": [{"path": str(output), "role": "primary"}],
+                    "openmontage_artifacts": [], "source_requests": [], "blocker": None,
+                    "error": None, "summary": "real technical canary",
+                }), encoding="utf-8")
+                return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
+
+            runner = FakeRunner(root, behavior)
+            state = ThinRunController(cfg, runner=runner).start("test")
+            self.assertEqual(state.status, RunStatus.DELIVERED)
+            self.assertTrue(state.validation[0]["valid"])
+
+    def test_fake_mp4_bytes_cannot_deliver(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            fake = project / "final.mp4"
+            fake.write_bytes(b"fake mp4 fixture")
+            evidence = FinalMediaValidator(project).validate({"path": str(fake)})
+            self.assertFalse(evidence["valid"])
+
+
+if __name__ == "__main__":
+    unittest.main()

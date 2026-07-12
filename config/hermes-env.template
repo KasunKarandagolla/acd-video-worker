@@ -4,8 +4,8 @@
 
 # LLM Provider (required)
 LLM_API_KEY=
-LLM_BASE_URL=https://api.anthropic.com
-LLM_MODEL=claude-4-sonnet
+LLM_BASE_URL=
+LLM_MODEL=
 
 # Optional: Alternative providers
 # OPENAI_API_KEY=
@@ -32,4 +32,7 @@ LLM_MODEL=claude-4-sonnet
 
 # Kaggle persistence
 HERMES_HOME=/kaggle/working/.hermes
+HERMES_PROFILE=football-emotion
 OPENMONTAGE_PROJECTS_DIR=/kaggle/working/projects
+OPENMONTAGE_ROOT=/kaggle/working/acd-video-worker/external/OpenMontage
+ACD_STATE_DIR=/kaggle/working/acd-state/runs

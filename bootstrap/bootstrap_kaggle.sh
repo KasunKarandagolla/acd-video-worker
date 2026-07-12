@@ -1,112 +1,53 @@
 #!/usr/bin/env bash
-# Kaggle bootstrap — run inside Kaggle notebook
-# Sets up Hermes + OpenMontage with persistence to /kaggle/working/
+# Reproducible Kaggle bootstrap for the thin ACD runtime.
 
 set -euo pipefail
 
-PROJECT_ROOT="/home/kasun/Music/Director/acd-video-worker"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_DIR="$PROJECT_ROOT/bootstrap"
+export HERMES_HOME="${HERMES_HOME:-/kaggle/working/.hermes}"
+export HERMES_PROFILE="${HERMES_PROFILE:-football-emotion}"
+export OPENMONTAGE_ROOT="${OPENMONTAGE_ROOT:-$PROJECT_ROOT/external/OpenMontage}"
+export OPENMONTAGE_PROJECTS_DIR="${OPENMONTAGE_PROJECTS_DIR:-/kaggle/working/projects}"
+export ACD_STATE_DIR="${ACD_STATE_DIR:-/kaggle/working/acd-state/runs}"
+export ACD_PERSIST_EXPORT="${ACD_PERSIST_EXPORT:-/kaggle/working/acd-persist-export}"
 
-# Colors
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
+log() { printf '\033[1;33m→\033[0m %s\n' "$*"; }
+ok() { printf '\033[0;32m✓\033[0m %s\n' "$*"; }
 
-log() { echo -e "${YELLOW}→${NC} $*"; }
-ok() { echo -e "${GREEN}✓${NC} $*"; }
-err() { echo -e "${RED}✗${NC} $*" >&2; }
+mkdir -p "$HERMES_HOME" "$OPENMONTAGE_PROJECTS_DIR" "$ACD_STATE_DIR"
+python3 "$PROJECT_ROOT/scripts/kaggle_persistence.py" hydrate
+python3 -m pip install -r "$PROJECT_ROOT/requirements.txt"
 
-# 0. Kaggle-specific environment
-export HERMES_HOME="/kaggle/working/.hermes"
-export OPENMONTAGE_PROJECTS_DIR="/kaggle/working/projects"
+log "Installing pinned Hermes-Agent"
+bash "$SCRIPT_DIR/install_hermes.sh"
 
-log "Setting up Kaggle persistence..."
-mkdir -p "$HERMES_HOME" "$OPENMONTAGE_PROJECTS_DIR"
-
-# Safe symlink: only if ~/.hermes doesn't exist or is a symlink
-if [[ -L "$HOME/.hermes" ]]; then
-    CURRENT_TARGET=$(readlink "$HOME/.hermes")
-    if [[ "$CURRENT_TARGET" == "$HERMES_HOME" ]]; then
-        ok "~/.hermes already points to $HERMES_HOME"
-    else
-        log "Updating ~/.hermes symlink from $CURRENT_TARGET to $HERMES_HOME"
-        ln -sfn "$HERMES_HOME" "$HOME/.hermes"
-    fi
-elif [[ -e "$HOME/.hermes" ]]; then
-    err "~/.hermes exists and is not a symlink. Backing up and replacing."
-    mv "$HOME/.hermes" "$HOME/.hermes.bak.$(date +%s)"
-    ln -sfn "$HERMES_HOME" "$HOME/.hermes"
-    ok "~/.hermes symlinked to $HERMES_HOME"
-else
-    ln -sfn "$HERMES_HOME" "$HOME/.hermes"
-    ok "~/.hermes symlinked to $HERMES_HOME"
-fi
-
-# 1. Clone repos if not present
-if [[ ! -d "$PROJECT_ROOT/external/Hermes-Agent/.git" ]]; then
-    log "Cloning Hermes-Agent..."
-    git clone https://github.com/NousResearch/Hermes-Agent.git "$PROJECT_ROOT/external/Hermes-Agent"
-    cd "$PROJECT_ROOT/external/Hermes-Agent"
-    git checkout 5ecc07986f46463ca3096679b03a46402eb19cee
-    ok "Hermes-Agent cloned at pinned commit"
-else
-    ok "Hermes-Agent already cloned"
-fi
-
-if [[ ! -d "$PROJECT_ROOT/external/OpenMontage/.git" ]]; then
-    log "Cloning OpenMontage..."
-    git clone https://github.com/calesthio/OpenMontage.git "$PROJECT_ROOT/external/OpenMontage"
-    cd "$PROJECT_ROOT/external/OpenMontage"
-    git checkout f633b5f428b9be9a2afecba851dfddd101619756
-    ok "OpenMontage cloned at pinned commit"
-else
-    ok "OpenMontage already cloned"
-fi
-
-# 2. Install Hermes
-cd "$PROJECT_ROOT/external/Hermes-Agent"
-if command -v hermes &>/dev/null; then
-    ok "Hermes CLI already available"
-else
-    log "Running setup-hermes.sh..."
-    bash setup-hermes.sh
-    ok "Hermes installed"
-fi
-
-# 3. Create football-emotion profile
 if hermes profile list 2>/dev/null | grep -q "football-emotion"; then
-    ok "Profile 'football-emotion' already exists"
+    ok "Hermes profile exists"
 else
-    log "Creating Hermes profile 'football-emotion'..."
-    HERMES_HOME="$HERMES_HOME" hermes profile create football-emotion --clone-all
-    ok "Profile 'football-emotion' created"
+    hermes profile create football-emotion --clone-all
+    ok "Hermes profile created"
 fi
 
-# 4. Install OpenMontage (FFmpeg-only)
-cd "$PROJECT_ROOT/external/OpenMontage"
-if [[ -d ".venv" ]] && [[ -x ".venv/bin/python" ]]; then
-    ok "OpenMontage venv exists"
-else
-    log "Running 'make install' (FFmpeg-only, no Remotion/HyperFrames)..."
-    make install
-    ok "OpenMontage Python deps installed"
+python3 "$SCRIPT_DIR/configure_hermes_profile.py" || true
+
+log "Installing pinned OpenMontage with native local render runtimes"
+if [[ ! -d "$OPENMONTAGE_ROOT/.git" ]]; then
+    git clone https://github.com/calesthio/OpenMontage.git "$OPENMONTAGE_ROOT"
 fi
+git -C "$OPENMONTAGE_ROOT" fetch origin
+git -C "$OPENMONTAGE_ROOT" checkout f633b5f428b9be9a2afecba851dfddd101619756
+if [[ ! -x "$OPENMONTAGE_ROOT/.venv/bin/python" || ! -d "$OPENMONTAGE_ROOT/remotion-composer/node_modules" ]]; then
+    make -C "$OPENMONTAGE_ROOT" setup
+fi
+"$OPENMONTAGE_ROOT/.venv/bin/python" -m pip install -r "$PROJECT_ROOT/requirements.txt"
 
-# 5. Install skills
-log "Installing Football Emotion V7 skills..."
-"$SCRIPT_DIR/install_skills.sh"
+log "Installing complete Football Emotion Skill System"
+bash "$SCRIPT_DIR/install_skills.sh"
 
-# 6. Validate
-log "Validating setup..."
-"$SCRIPT_DIR/validate_setup.py"
+log "Running thin-runtime doctor"
+PYTHONPATH="$PROJECT_ROOT/src" python3 "$PROJECT_ROOT/bootstrap/validate_setup.py"
 
-ok "Kaggle bootstrap complete!"
-echo ""
-echo "Environment variables set:"
-echo "  HERMES_HOME=$HERMES_HOME"
-echo "  OPENMONTAGE_PROJECTS_DIR=$OPENMONTAGE_PROJECTS_DIR"
-echo ""
-echo "To use in notebook cells:"
-echo "  import os; os.environ['HERMES_HOME'] = '/kaggle/working/.hermes'"
-echo "  os.environ['OPENMONTAGE_PROJECTS_DIR'] = '/kaggle/working/projects'"
+python3 "$PROJECT_ROOT/scripts/kaggle_persistence.py" export
+ok "Kaggle setup complete"
+echo "Run: bash $PROJECT_ROOT/bootstrap/run_kaggle_job.sh \"<video request>\" [--input ...]"

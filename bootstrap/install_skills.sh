@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="/home/kasun/Music/Director/acd-video-worker"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_DIR="$PROJECT_ROOT/bootstrap"
 
 log() { echo -e "\033[1;33m→\033[0m $*"; }
@@ -13,12 +13,15 @@ err() { echo -e "\033[0;31m✗\033[0m $*" >&2; }
 # Use canonical repo-owned skill folder
 CANONICAL_SKILLS="$PROJECT_ROOT/skills/football-emotion-video"
 
-# Determine Hermes profile skills directory
-if [[ -n "${HERMES_HOME:-}" ]]; then
-    PROFILE_SKILLS_DIR="$HERMES_HOME/skills/football-emotion-video"
+# Determine the exact named-profile skills directory used by `hermes -p`.
+HERMES_ROOT="${HERMES_ROOT:-${HERMES_HOME:-$HOME/.hermes}}"
+HERMES_PROFILE="${HERMES_PROFILE:-football-emotion}"
+if [[ "$(basename "$(dirname "$HERMES_ROOT")")" == "profiles" ]]; then
+    PROFILE_HOME="$HERMES_ROOT"
 else
-    PROFILE_SKILLS_DIR="$HOME/.hermes/profiles/football-emotion/skills/football-emotion-video"
+    PROFILE_HOME="$HERMES_ROOT/profiles/$HERMES_PROFILE"
 fi
+PROFILE_SKILLS_DIR="$PROFILE_HOME/skills/football-emotion-video"
 
 # 1. Ensure canonical skills exist (extracted from ZIP)
 if [[ ! -d "$CANONICAL_SKILLS/skills" ]]; then
@@ -31,12 +34,8 @@ else
     ok "Canonical skills already exist"
 fi
 
-# 2. Apply corrections to canonical skills
-log "Applying corrections to canonical skills..."
-"$SCRIPT_DIR/apply_skill_corrections.sh"
-ok "Corrections applied"
-
-# 3. Validate canonical skills before installing
+# 2. Validate canonical skills before installing. Installation never rewrites
+# the finalized Football Emotion Skill System.
 log "Validating canonical skills..."
 if python3 "$CANONICAL_SKILLS/tools/validate_skill_system.py" "$CANONICAL_SKILLS" 2>&1 | grep -q "PASSED"; then
     ok "Canonical skills validation PASSED"
@@ -45,13 +44,13 @@ else
     exit 1
 fi
 
-# 4. Install to Hermes profile
+# 3. Install to Hermes profile
 log "Installing to Hermes profile: $PROFILE_SKILLS_DIR"
 mkdir -p "$PROFILE_SKILLS_DIR"
 rsync -a --delete "$CANONICAL_SKILLS/" "$PROFILE_SKILLS_DIR/"
 ok "Skills synced to Hermes profile"
 
-# 5. Validate installed skills
+# 4. Validate installed skills
 log "Validating installed skills..."
 if python3 "$PROFILE_SKILLS_DIR/tools/validate_skill_system.py" "$PROFILE_SKILLS_DIR" 2>&1 | grep -q "PASSED"; then
     ok "Installed skills validation PASSED"

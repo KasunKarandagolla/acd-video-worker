@@ -1,0 +1,93 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-12T08:57:56.220347+00:00",
+  "gates": [
+    {
+      "name": "hermes_pin",
+      "status": "passed",
+      "evidence": "5ecc07986f46463ca3096679b03a46402eb19cee; binary smudge difference ignored"
+    },
+    {
+      "name": "openmontage_pin",
+      "status": "passed",
+      "evidence": "f633b5f428b9be9a2afecba851dfddd101619756"
+    },
+    {
+      "name": "production_boundary",
+      "status": "passed",
+      "evidence": "thin controller only"
+    },
+    {
+      "name": "python_compile",
+      "status": "passed",
+      "evidence": "compiled"
+    },
+    {
+      "name": "focused_tests",
+      "status": "passed",
+      "evidence": "Discord notification failed: offline\n----------------------------------------------------------------------\nRan 15 tests in 0.942s\n\nOK"
+    },
+    {
+      "name": "hermes_cli",
+      "status": "blocked",
+      "evidence": "Hermes CLI is not installed"
+    },
+    {
+      "name": "hermes_profile",
+      "status": "blocked",
+      "evidence": "/root/.hermes/profiles/football-emotion"
+    },
+    {
+      "name": "football_skills",
+      "status": "blocked",
+      "evidence": "profile skills missing: /root/.hermes/profiles/football-emotion/skills"
+    },
+    {
+      "name": "canonical_skill_validation",
+      "status": "passed",
+      "evidence": "============================================================\nVALIDATION SUMMARY\n============================================================\nPassed checks:   230\nWarnings:        0\nErrors:          0\n\nResult: PASSED"
+    },
+    {
+      "name": "free_model_endpoint",
+      "status": "blocked",
+      "evidence": "Hermes profile config is missing"
+    },
+    {
+      "name": "openmontage_manifest",
+      "status": "passed",
+      "evidence": "/workspace/scratch/3ca37befe28d/acd-video-worker/external/OpenMontage/pipeline_defs/documentary-montage.yaml"
+    },
+    {
+      "name": "openmontage_registry",
+      "status": "blocked",
+      "evidence": "OpenMontage virtual environment is not installed"
+    },
+    {
+      "name": "remotion_runtime",
+      "status": "blocked",
+      "evidence": "node+npx+remotion node_modules"
+    },
+    {
+      "name": "ffmpeg_ffprobe",
+      "status": "passed",
+      "evidence": "required for render/validation"
+    },
+    {
+      "name": "source_acquisition",
+      "status": "blocked",
+      "evidence": "yt-dlp Python package"
+    },
+    {
+      "name": "discord",
+      "status": "blocked",
+      "evidence": "optional; run is unaffected when absent"
+    }
+  ],
+  "summary": {
+    "passed": 8,
+    "failed": 0,
+    "blocked": 8
+  },
+  "production_path_complete": true,
+  "live_certification": "blocked"
+}

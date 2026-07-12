@@ -1,229 +1,100 @@
-# Fresh Setup Overview — AI Creative Director Video Pipeline
+# AI Creative Director Video Worker
 
-## Purpose
+This repository is the thin, free-only control plane around two pinned upstream systems:
 
-This repository is being rebuilt from a clean starting point.
+- **Hermes-Agent** owns creative reasoning, Football Emotion skill use, reflection, memory and workflow decisions.
+- **OpenMontage** owns its native production pipeline, artifacts, tools, runtime routing, rendering and native review.
+- **The worker** owns only intake, source acquisition/replacement, policy, small run state, final independent validation, persistence and optional notification/packaging infrastructure.
 
-This document describes only the basic setup components for the fresh rebuild.
+The complete Football Emotion Skill System remains first-class under `skills/football-emotion-video/`. It teaches Hermes the project’s football-emotion storytelling, footage understanding, clip selection, cutting, pacing, audio, graphics, rights-risk and quality doctrine.
 
-No architecture decisions, workflow decisions, agent responsibilities, pipeline flow, or technical design choices are finalized here.
-
----
-
-## 1. Runtime Environment
-
-### Kaggle
-
-Kaggle will be used as the main runtime environment.
-
-The same existing Kaggle notebook and existing Kaggle secrets will be used.
-
-Required Kaggle setup:
-
-- Enable Internet access
-- Use the existing Kaggle notebook
-- Use the existing Kaggle Secrets
-- Clone this GitHub repo inside `/kaggle/working/`
-- Run setup/testing from a fresh Kaggle session when needed
-
-Required Kaggle secrets:
-
-- `GITHUB_TOKEN`
-- `PRIVATE_REPO_URL`
-- `LLM_API_KEY`
-- `LLM_BASE_URL`
-- `LLM_MODEL`
-- `DISCORD_WEBHOOK_URL`
-- `TAVILY_API_KEY`
-
----
-
-## 2. Discord Setup
-
-Discord will be used for runtime notifications and status updates.
-
-Required setup:
-
-- Discord server/channel
-- Discord webhook URL
-- Webhook saved in Kaggle Secrets as `DISCORD_WEBHOOK_URL`
-
-Expected notification use:
-
-- Run started
-- Run failed
-- Run completed
-- Output/report location shared
-
----
-
-## 3. Current Included Project File
-
-The only required project file currently stored in this repo is the football emotion skill system ZIP.
-
-Expected file:
+## Production flow
 
 ```text
-packages/football_emotion_skill_system_v7_final_runtime.zip
+request / mixed inputs
+        ↓
+thin ACD controller (7 macro states)
+        ↓
+Hermes + Football Emotion skills
+        ↓
+OpenMontage native agent pipeline + render review
+        ↓
+worker ffprobe validation
+        ↓
+DELIVERED / BLOCKED / FAILED
 ```
 
-This ZIP contains the custom football emotion skill system.
+The macro states are `INTAKE`, `SOURCE_READY`, `AGENT_RUNNING`, `VALIDATING`, `DELIVERED`, `BLOCKED`, and `FAILED`. The old 19-stage Python orchestrator is legacy code and is not imported by the production entrypoint.
 
-The ZIP should be installed/extracted later during setup into a runtime skill directory such as:
+## Setup
 
-```text
-skills/football-emotion/
+Pinned commits are recorded in `docs/upstream-lock.json`:
+
+- Hermes-Agent: `5ecc07986f46463ca3096679b03a46402eb19cee`
+- OpenMontage: `f633b5f428b9be9a2afecba851dfddd101619756`
+
+Install the pinned repositories and the unchanged skill system:
+
+```bash
+bash bootstrap/install_hermes.sh
+bash bootstrap/install_openmontage.sh
+HERMES_HOME="$HOME/.hermes" HERMES_PROFILE=football-emotion bash bootstrap/install_skills.sh
 ```
 
----
+Configure a free Hermes model endpoint in the named profile. Do not commit credentials.
 
-## 4. External Components To Be Added Later
+For a Kaggle session, expose the existing `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY` secrets as environment variables, then run:
 
-These components are not currently stored in the clean repo.
-
-They are expected to be cloned, installed, or connected later during setup.
-
-No technical design decision is finalized here.
-
----
-
-### Hermes-Agent
-
-Expected future location:
-
-```text
-external/Hermes-Agent/
+```bash
+bash bootstrap/bootstrap_kaggle.sh
+bash bootstrap/run_kaggle_job.sh "<video request>" --input <optional-path-or-url>
 ```
 
-Purpose in setup:
+Set `ACD_PERSIST_SOURCE` to a mounted prior `acd-persist-export` directory to hydrate earlier non-secret state. The launcher always exports updated state to `ACD_PERSIST_EXPORT` (default `/kaggle/working/acd-persist-export`) for the notebook version/output to preserve.
 
-- Agent runtime
-- Memory system
-- Tool/skill usage
+## Run
 
----
-
-### OpenMontage
-
-Expected future location:
-
-```text
-external/OpenMontage/
+```bash
+PYTHONPATH=src python3 scripts/acd_worker.py \
+  "Create a professional football-emotion video about an underdog comeback" \
+  --input /absolute/path/to/local-clip.mp4 \
+  --input https://example.com/reference
 ```
 
-Purpose in setup:
+Resume a non-terminal run:
 
-- Video editing / montage generation
-- Rendering support
-- FFmpeg-based output flow where required
-
----
-
-### Claude Video Editor
-
-Claude Video Editor can be considered later as an optional open-source component.
-
-It should only be included after checking:
-
-- Correct repository URL
-- License
-- Install requirements
-- Runtime cost
-- Kaggle compatibility
-- Whether it overlaps with or conflicts with OpenMontage
-
-Expected future placeholder:
-
-```text
-external/claude-video-editor/
+```bash
+PYTHONPATH=src python3 scripts/acd_worker.py --run-id <run-id>
 ```
 
-Status:
+Prepare intake and the Hermes job prompt without executing production:
 
-```text
-Optional / not finalized
+```bash
+PYTHONPATH=src python3 scripts/acd_worker.py --dry-run "test request"
 ```
 
----
+Dry-run always ends `BLOCKED`; it can never certify a render.
 
-## 5. Current Actual Repo Structure
+## Source acquisition boundary
 
-Current clean repo structure:
+Hermes may discover and rank sources, but downloads/replacements go through:
 
-```text
-acd-video-worker/
-├── README.md
-└── packages/
-    └── football_emotion_skill_system_v7_final_runtime.zip
+```bash
+PYTHONPATH=src python3 scripts/acquire_sources.py \
+  --manifest <project>/football_emotion/source_manifest.json \
+  --output-dir <project>/source_media \
+  --slot opening_pressure \
+  --url <candidate-1> \
+  --url <candidate-2>
 ```
 
----
+The adapter tries candidates sequentially, validates acquired media and records exact failures. It never bypasses DRM or access controls.
 
-## 6. Future Runtime Folder Structure
+## Validation
 
-The runtime folder structure may later become:
-
-```text
-acd-video-worker/
-├── README.md
-├── packages/
-│   └── football_emotion_skill_system_v7_final_runtime.zip
-├── skills/
-│   └── football-emotion/
-├── external/
-│   ├── Hermes-Agent/
-│   ├── OpenMontage/
-│   └── claude-video-editor/   # optional
-├── bootstrap/
-├── scripts/
-├── jobs/
-├── state/
-│   └── runs/
-└── outputs/
+```bash
+python3 -m compileall -q src scripts tests
+PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-This future structure is only a setup expectation, not an architecture decision.
-
----
-
-## 7. Fresh Setup Checklist
-
-Current completed base:
-
-- [x] Use current GitHub repo
-- [x] Use existing Kaggle notebook
-- [x] Use existing Kaggle secrets
-- [x] Add football emotion skill system ZIP
-
-Future setup tasks:
-
-- [ ] Clone project in Kaggle
-- [ ] Clone Hermes-Agent
-- [ ] Clone OpenMontage
-- [ ] Optionally inspect Claude Video Editor
-- [ ] Install runtime dependencies
-- [ ] Install/extract football skill ZIP
-- [ ] Validate skill system
-- [ ] Check LLM endpoint
-- [ ] Check Discord webhook
-- [ ] Check source/search tools
-- [ ] Run basic smoke test
-
----
-
-## 8. Important Note
-
-This repository is currently only a clean setup base.
-
-The following must be decided separately in a clean design document:
-
-- Architecture
-- Pipeline flow
-- Agent responsibilities
-- Hermes memory behavior
-- Model selection
-- Source acquisition strategy
-- Rendering strategy
-- OpenMontage usage
-- Claude Video Editor usage
-- Validation and testing strategy
+A run becomes `DELIVERED` only after a real output inside its OpenMontage project directory passes independent `ffprobe` validation. Exit code zero, JSON plans, fixtures, fake MP4 bytes and compose-only artifacts are insufficient.

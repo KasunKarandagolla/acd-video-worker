@@ -1,3 +1,5 @@
+> **Historical document — superseded by `FINAL_ARCHITECTURE.md` and `IMPLEMENTATION_CONTRACT.md` (2026-07-12). Do not implement this old worker-orchestrator plan.**
+
 # Session 2 Build Plan — Infrastructure & Skill Installation
 
 **Scope:** Exact work for next large OpenCode session  

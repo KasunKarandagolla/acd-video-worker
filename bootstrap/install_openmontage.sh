@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Install OpenMontage at pinned commit (FFmpeg-only path)
+# Install OpenMontage at pinned commit
 
 set -euo pipefail
 
-PROJECT_ROOT="/home/kasun/Music/Director/acd-video-worker"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_DIR="$PROJECT_ROOT/bootstrap"
 
 log() { echo -e "\033[1;33m→\033[0m $*"; }
@@ -31,7 +31,8 @@ else
     ok "OpenMontage already at pinned commit"
 fi
 
-# 3. Install FFmpeg-only (make install skips Remotion/HyperFrames/Piper)
+# 3. Install OpenMontage Python dependencies. Native render runtimes are
+# capability-checked separately; no worker-side runtime is invented here.
 if [[ -d ".venv" ]] && [[ -x ".venv/bin/python" ]]; then
     ok "OpenMontage venv exists"
 else

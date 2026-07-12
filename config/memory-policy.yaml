@@ -1,45 +1,21 @@
-# Memory Policy for Football Emotion System
+# Hermes owns memory/reflection. This file only records project constraints.
 
-# Hermes built-in memory limits (hard constraints)
-memory_limits:
-  MEMORY_md_chars: 2200      # Agent observations
-  USER_md_chars: 1375        # User preferences
+provider: builtin
+hindsight_optional: true
 
-# What to store in MEMORY.md (distilled lessons only)
-memory_store_rules:
-  - emotional_question_and_story_structure_that_worked
-  - chosen_openmontage_pipeline_and_render_runtime
-  - tool_capability_envelope_and_degraded_blocked
-  - source_types_that_worked_or_failed
-  - license_outcomes_and_rights_caveats
-  - clip_patterns_that_retained_emotional_value
-  - visual_audio_qa_problems_and_fixes
-  - final_result_status_and_project_record_path
+store:
+  - durable_story_and_editing_lessons
+  - verified_source_success_or_failure_patterns
+  - chosen_native_openmontage_pipeline_and_runtime
+  - rights_and_license_caveats
+  - visual_audio_quality_problems_and_fixes
+  - final_status_and_project_record_path
 
-# What NOT to store in MEMORY.md
-memory_blocklist:
-  - exact_scores_timestamps_from_current_events_unless_verified
-  - legal_safety_claims_for_third_party_match_footage
-  - hallucinated_performance_metrics
-  - complete_clip_lists_source_dumps_raw_catalog_rows
+never_store:
+  - hidden_chain_of_thought
+  - credentials
+  - unverified_current_event_claims_as_fact
+  - legal_safety_claims_for_third_party_footage
+  - raw_source_dumps_or_complete_clip_lists
 
-# Full project records go to project files
 project_record_path: "projects/<project-id>/football_emotion/project_record.json"
-
-# Hindsight configuration (if enabled)
-hindsight:
-  mode: "local_embedded"  # Only mode compatible with free remote LLM
-  bank_id_template: "hermes-{profile}"
-  llm_provider: "openai"
-  llm_model: "gpt-4o-mini"
-  memory_mode: "hybrid"
-  auto_recall: true
-  auto_retain: true
-  retain_every_n_turns: 1
-
-# Session search (SQLite FTS5) - always available
-session_search:
-  enabled: true
-  cross_profile: true
-  demote_cron: true
-  hide_subagent: true

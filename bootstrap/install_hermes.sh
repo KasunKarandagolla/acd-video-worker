@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="/home/kasun/Music/Director/acd-video-worker"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_DIR="$PROJECT_ROOT/bootstrap"
 
 log() { echo -e "\033[1;33m→\033[0m $*"; }

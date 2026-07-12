@@ -33,6 +33,7 @@ OPENMONTAGE_COMMIT=$(jq -r '.openmontage.commit' "$UPSTREAM_LOCK")
 log "Project root: $PROJECT_ROOT"
 log "Hermes commit: $HERMES_COMMIT"
 log "OpenMontage commit: $OPENMONTAGE_COMMIT"
+python3 -m pip install -r "$PROJECT_ROOT/requirements.txt"
 
 # 1. Clone/verify Hermes
 log "Setting up Hermes-Agent..."
@@ -106,6 +107,11 @@ else
     make install
     ok "OpenMontage Python deps installed"
 fi
+"$PROJECT_ROOT/external/OpenMontage/.venv/bin/python" -m pip install -r "$PROJECT_ROOT/requirements.txt"
+
+# Configure a free endpoint when LLM_* values are present; otherwise preserve
+# the profile and report the exact remaining manual setup.
+python3 "$SCRIPT_DIR/configure_hermes_profile.py" || true
 
 # 6. Install skills
 log "Installing Football Emotion V7 skills..."
