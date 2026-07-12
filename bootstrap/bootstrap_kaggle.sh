@@ -11,6 +11,7 @@ export OPENMONTAGE_ROOT="${OPENMONTAGE_ROOT:-$PROJECT_ROOT/external/OpenMontage}
 export OPENMONTAGE_PROJECTS_DIR="${OPENMONTAGE_PROJECTS_DIR:-/kaggle/working/projects}"
 export ACD_STATE_DIR="${ACD_STATE_DIR:-/kaggle/working/acd-state/runs}"
 export ACD_PERSIST_EXPORT="${ACD_PERSIST_EXPORT:-/kaggle/working/acd-persist-export}"
+export OPENMONTAGE_PYTHON_VERSION="${OPENMONTAGE_PYTHON_VERSION:-3.11}"
 export PATH="$HOME/.local/bin:$PATH"
 
 log() { printf '\033[1;33m→\033[0m %s\n' "$*"; }
@@ -38,8 +39,16 @@ if [[ ! -d "$OPENMONTAGE_ROOT/.git" ]]; then
 fi
 git -C "$OPENMONTAGE_ROOT" fetch origin
 git -C "$OPENMONTAGE_ROOT" checkout f633b5f428b9be9a2afecba851dfddd101619756
+
+# Kaggle's system Python 3.10 lacks ensurepip. Create a complete isolated
+# environment without modifying the pinned OpenMontage repository.
+if [[ ! -x "$OPENMONTAGE_ROOT/.venv/bin/python" ]] || \
+   ! "$OPENMONTAGE_ROOT/.venv/bin/python" -m pip --version >/dev/null 2>&1; then
+    uv venv --clear --seed --python "$OPENMONTAGE_PYTHON_VERSION" "$OPENMONTAGE_ROOT/.venv"
+fi
+
 if [[ ! -x "$OPENMONTAGE_ROOT/.venv/bin/python" || ! -d "$OPENMONTAGE_ROOT/remotion-composer/node_modules" ]]; then
-    make -C "$OPENMONTAGE_ROOT" setup
+    make -C "$OPENMONTAGE_ROOT" setup PYTHON_VERSION="$OPENMONTAGE_PYTHON_VERSION"
 fi
 "$OPENMONTAGE_ROOT/.venv/bin/python" -m pip install -r "$PROJECT_ROOT/requirements.txt"
 
