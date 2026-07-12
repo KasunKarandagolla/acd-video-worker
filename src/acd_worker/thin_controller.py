@@ -33,6 +33,7 @@ class ThinControllerConfig:
     state_dir: Path
     hermes_timeout: int = 3600
     hermes_max_turns: int = 60
+    hermes_headless_auto_approve: bool = True
     discord_webhook_url: str = ""
     dry_run: bool = False
 
@@ -57,6 +58,7 @@ class ThinRunController:
             timeout=config.hermes_timeout,
             cwd=config.openmontage_root,
             max_turns=config.hermes_max_turns,
+            headless_auto_approve=config.hermes_headless_auto_approve,
         )
         self.log = logging.getLogger("acd_worker.thin_controller")
 
@@ -195,7 +197,7 @@ class ThinRunController:
 
     def _classify_hermes_failure(self, state: RunState, execution) -> RunState:
         error = (execution.error or "Hermes exited without a result").lower()
-        if any(token in error for token in ("api key", "credentials", "provider", "rate limit", "quota")):
+        if any(token in error for token in ("api key", "credentials", "provider", "rate limit", "quota", "resourceexhausted", "workers are busy", " 503")):
             return self._block(state, "HERMES_RUNTIME_UNAVAILABLE", execution.error or "Hermes runtime unavailable", "agent", {"returncode": execution.returncode})
         return self._fail(state, "HERMES_EXECUTION_FAILED", execution.error or "Hermes execution failed", "agent", {"returncode": execution.returncode})
 

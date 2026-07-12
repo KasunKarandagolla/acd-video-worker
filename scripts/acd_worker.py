@@ -30,6 +30,7 @@ class ACDConfig:
     state_dir: Path
     hermes_timeout: int
     hermes_max_turns: int
+    hermes_headless_auto_approve: bool
     discord_webhook_url: str
     dry_run: bool = False
 
@@ -46,6 +47,7 @@ class ACDConfig:
             state_dir=Path(os.environ.get("ACD_STATE_DIR", PROJECT_ROOT / "state" / "runs")).expanduser(),
             hermes_timeout=int(os.environ.get("ACD_HERMES_TIMEOUT", "3600")),
             hermes_max_turns=int(os.environ.get("ACD_HERMES_MAX_TURNS", "60")),
+            hermes_headless_auto_approve=os.environ.get("ACD_HERMES_YOLO", "true").lower() == "true",
             discord_webhook_url=os.environ.get("DISCORD_WEBHOOK_URL", ""),
             dry_run=os.environ.get("ACD_DRY_RUN", "false").lower() == "true",
         )
@@ -61,6 +63,7 @@ class ACDConfig:
             state_dir=self.state_dir,
             hermes_timeout=self.hermes_timeout,
             hermes_max_turns=self.hermes_max_turns,
+            hermes_headless_auto_approve=self.hermes_headless_auto_approve,
             discord_webhook_url=self.discord_webhook_url,
             dry_run=self.dry_run,
         )

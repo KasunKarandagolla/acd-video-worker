@@ -132,8 +132,44 @@ class HermesRunnerTests(unittest.TestCase):
             self.assertEqual(command[:4], [str(cli), "-p", "football-emotion", "chat"])
             self.assertIn("--resume", command)
             self.assertIn("--skills", command)
+            self.assertIn("--yolo", command)
             self.assertEqual(mocked.call_args.kwargs["env"]["HERMES_HOME"], str(root / "home"))
             self.assertEqual(result.session_id, "20260712_abc12345")
+
+    def test_session_log_diagnostic_surfaces_provider_capacity_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli = root / "hermes"
+            cli.write_text("#!/bin/sh\n", encoding="utf-8")
+            cli.chmod(0o755)
+            logs = root / "home" / "profiles" / "football-emotion" / "logs"
+            logs.mkdir(parents=True)
+            (logs / "errors.log").write_text(
+                "ERROR [session_12345678] API call failed: ResourceExhausted: All workers are busy HTTP 503\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.CompletedProcess([], 1, stdout="", stderr="session_id: session_12345678\n")
+            runner = HermesRunner(str(root / "home"), hermes_cli=str(cli), cwd=root)
+            with patch("acd_worker.hermes_runner.subprocess.run", return_value=completed):
+                result = runner.run_session("prompt")
+            self.assertIn("ResourceExhausted", result.error)
+
+    def test_provider_capacity_failure_is_structured_blocker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+            runner = FakeRunner(
+                root,
+                lambda _: HermesSessionResult(
+                    success=False,
+                    session_id="session_12345678",
+                    returncode=1,
+                    error="HTTP 503: ResourceExhausted: All workers are busy",
+                ),
+            )
+            state = ThinRunController(cfg, runner=runner).start("test")
+            self.assertEqual(state.status, RunStatus.BLOCKED)
+            self.assertEqual(state.blocker.code, "HERMES_RUNTIME_UNAVAILABLE")
 
     def test_secret_redaction(self):
         token = "ghp" + "_abcdefghijk"

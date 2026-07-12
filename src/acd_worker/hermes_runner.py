@@ -45,6 +45,7 @@ class HermesRunner:
         hermes_cli: Optional[str] = None,
         cwd: Optional[Path] = None,
         max_turns: int = 60,
+        headless_auto_approve: bool = True,
     ):
         self.hermes_home = Path(hermes_home).expanduser().resolve()
         self.profile = profile
@@ -52,6 +53,7 @@ class HermesRunner:
         self.timeout = timeout
         self.cwd = Path(cwd).expanduser().resolve() if cwd else None
         self.max_turns = max_turns
+        self.headless_auto_approve = headless_auto_approve
         self.profile_dir = self.hermes_home / "profiles" / profile
 
         # Resolve hermes CLI - use provided path, or find in PATH, or use bundled
@@ -134,6 +136,14 @@ class HermesRunner:
             "--max-turns", str(self.max_turns),
         ]
 
+        # This runner is fully non-interactive. Without Hermes's supported
+        # headless approval flag, dangerous-command prompts wait for a TTY that
+        # cannot exist and are denied after 60 seconds. This affects terminal
+        # execution only; creative/native checkpoint decisions remain governed
+        # by the job contract and must still be returned as structured blockers.
+        if self.headless_auto_approve:
+            cmd.append("--yolo")
+
         if session_id:
             cmd.extend(["--resume", session_id])
         for skill in expected_skills or []:
@@ -156,15 +166,22 @@ class HermesRunner:
                 check=False,
             )
 
+            session_id = self._extract_session_id(result.stderr) or self._extract_session_id(result.stdout)
+            error = self._redact(result.stderr) if result.returncode != 0 else None
+            if result.returncode != 0 and session_id:
+                diagnostic = self._session_failure_diagnostic(session_id)
+                if diagnostic:
+                    error = self._redact(f"{error or ''}\n{diagnostic}").strip()
+
             session_result = HermesSessionResult(
                 success=result.returncode == 0,
                 output=result.stdout,
-                error=self._redact(result.stderr) if result.returncode != 0 else None,
+                error=error,
                 returncode=result.returncode
             )
 
             # Try to extract session ID from output
-            session_result.session_id = self._extract_session_id(result.stderr) or self._extract_session_id(result.stdout)
+            session_result.session_id = session_id
 
             # Parse artifacts from output
             session_result.artifacts = self._extract_artifacts(result.stdout)
@@ -219,6 +236,26 @@ class HermesRunner:
             if match:
                 return match.group(1)
         return None
+
+    def _session_failure_diagnostic(self, session_id: str) -> str:
+        """Return the final session-specific backend error from Hermes logs."""
+        candidates = (
+            self.profile_dir / "logs" / "errors.log",
+            self.profile_dir / "logs" / "agent.log",
+        )
+        interesting = []
+        for path in candidates:
+            if not path.is_file():
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-2000:]
+            except OSError:
+                continue
+            for line in lines:
+                lowered = line.lower()
+                if session_id in line and any(token in lowered for token in (" error ", "failed", "resourceexhausted", "rate limit", "quota", " 503")):
+                    interesting.append(line)
+        return interesting[-1] if interesting else ""
 
     def _extract_artifacts(self, output: str) -> Dict:
         """Native artifacts stay in OpenMontage; stdout is not an artifact bus."""
