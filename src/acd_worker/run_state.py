@@ -64,6 +64,8 @@ class RunState:
     hermes_profile: str = "football-emotion"
     hermes_session_id: Optional[str] = None
     output_candidates: list[dict[str, Any]] = field(default_factory=list)
+    openmontage_artifacts: list[dict[str, Any]] = field(default_factory=list)
+    artifact_validation: dict[str, Any] = field(default_factory=dict)
     validation: list[dict[str, Any]] = field(default_factory=list)
     blocker: Optional[RunProblem] = None
     error: Optional[RunProblem] = None

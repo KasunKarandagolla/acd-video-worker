@@ -19,7 +19,7 @@ Hermes + Football Emotion skills
         ↓
 OpenMontage native agent pipeline + render review
         ↓
-worker ffprobe validation
+worker native-artifact + ffprobe + visual-content validation
         ↓
 DELIVERED / BLOCKED / FAILED
 ```
@@ -97,4 +97,4 @@ python3 -m compileall -q src scripts tests
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-A run becomes `DELIVERED` only after a real output inside its OpenMontage project directory passes independent `ffprobe` validation. Exit code zero, JSON plans, fixtures, fake MP4 bytes and compose-only artifacts are insufficient.
+A run becomes `DELIVERED` only after schema-valid native OpenMontage artifacts and final-review evidence exist separately under the project `artifacts/` directory, the output under `renders/` passes independent `ffprobe`, and sampled frames contain meaningful visual detail. Exit code zero, self-declared result JSON, fixtures, blank/solid-colour MP4s and ad-hoc fallback renders are insufficient.

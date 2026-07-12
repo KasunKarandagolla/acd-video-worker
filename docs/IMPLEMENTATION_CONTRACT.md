@@ -61,10 +61,13 @@ Every blocker/error has a stable code, actionable message, phase and optional ev
 - at least one candidate path is inside the run’s OpenMontage project workspace;
 - the file exists and is non-empty;
 - real ffprobe succeeds;
+- schema-valid `brief`, `scene_plan`, `asset_manifest`, `edit_decisions`, `render_report`, and `final_review` exist separately under native `artifacts/`;
+- `render_report`, `final_review`, renderer family and runtime agree on the delivered file;
+- sampled frames contain meaningful visual detail rather than a blank/solid-colour technical canary;
 - a video stream and positive duration exist;
 - validation evidence is persisted.
 
-Dry runs, fixture bytes, mocked outputs, plan JSON, native artifact presence, registry discovery and process exit zero cannot satisfy delivery.
+Dry runs, fixture bytes, mocked outputs, plan JSON, self-referential or schema-invalid artifact claims, blank renders, registry discovery and process exit zero cannot satisfy delivery.
 
 ## Persistence and notification
 

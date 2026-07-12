@@ -54,7 +54,7 @@ Hermes runs in the pinned OpenMontage checkout and follows `AGENT_GUIDE.md`, `PR
 - provides sequential source acquisition/replacement;
 - enforces free-only and access/rights policy boundaries;
 - stores only small run-level state;
-- independently validates final output with ffprobe;
+- independently validates native artifact identity/schema/review evidence, final output with ffprobe, and sampled-frame visual content;
 - hydrates/exports Kaggle state;
 - sends optional non-fatal notifications;
 - packages delivered output.
@@ -69,7 +69,7 @@ User request and mixed inputs
   → source manifest / acquisition boundary
   → one Hermes production job with Football Emotion skills
   → OpenMontage native agent pipeline and native review
-  → independent worker media validation
+  → independent worker native-artifact, media and visual-content validation
   → persistence + optional notification
 ```
 
@@ -80,7 +80,7 @@ INTAKE → SOURCE_READY → AGENT_RUNNING → VALIDATING → DELIVERED
                     ↘ BLOCKED / FAILED ↙
 ```
 
-`BLOCKED` is correct for an unavailable free model endpoint, missing native render runtime, protected/unavailable sources, an unresolved native approval gate or Kaggle restriction. `FAILED` is reserved for protocol/code/unexpected execution faults. No fixture, dry run, plan JSON, compose-only artifact or exit code can produce `DELIVERED`.
+`BLOCKED` is correct for an unavailable free model endpoint, missing native render runtime, protected/unavailable sources, an unresolved native approval gate or Kaggle restriction. `FAILED` is reserved for protocol/code/unexpected execution faults. No fixture, dry run, plan JSON, self-referential artifact claim, blank render, ad-hoc fallback MP4, compose-only artifact or exit code can produce `DELIVERED`.
 
 ## Native integration facts
 

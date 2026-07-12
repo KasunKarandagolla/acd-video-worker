@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from acd_worker.hermes_runner import HermesRunner, HermesSessionResult
 from acd_worker.job_prompt import PRELOADED_SKILLS, build_job_prompt
-from acd_worker.media_validation import FinalMediaValidator
+from acd_worker.media_validation import FinalMediaValidator, OpenMontageArtifactValidator, REQUIRED_OPENMONTAGE_ARTIFACTS
 from acd_worker.notifications import DiscordNotifier
 from acd_worker.run_state import RunState, RunStateStore, RunStatus, utc_now
 from acd_worker.source_service import SourceService, sanitize_reference
@@ -87,6 +87,7 @@ class PromptAndBoundaryTests(unittest.TestCase):
         for skill in ("Football Emotion Skill System", "hermes-football-memory-learning", "video_compose"):
             self.assertIn(skill, prompt)
         self.assertIn("Never invent a command or rebuild OpenMontage stages", prompt)
+        self.assertIn("A technically valid fallback MP4 is not delivery", prompt)
 
     def test_production_entrypoint_has_no_legacy_orchestrator_import(self):
         tree = ast.parse((ROOT / "scripts" / "acd_worker.py").read_text(encoding="utf-8"))
@@ -257,6 +258,7 @@ class ControllerTests(unittest.TestCase):
                 output.parent.mkdir(parents=True, exist_ok=True)
                 subprocess.run([
                     "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=0.5",
+                    "-vf", "drawbox=x=20:y=20:w=120:h=80:color=white:t=fill",
                     "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(output),
                 ], capture_output=True, check=True)
                 run_id = next(line.split(":", 1)[1].strip() for line in call["prompt"].splitlines() if line.startswith("RUN ID:"))
@@ -269,7 +271,8 @@ class ControllerTests(unittest.TestCase):
                 return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
 
             runner = FakeRunner(root, behavior)
-            state = ThinRunController(cfg, runner=runner).start("test")
+            with patch("acd_worker.thin_controller.OpenMontageArtifactValidator.validate", return_value={"valid": True}):
+                state = ThinRunController(cfg, runner=runner).start("test")
             self.assertEqual(state.status, RunStatus.DELIVERED)
             self.assertTrue(state.validation[0]["valid"])
 
@@ -282,6 +285,95 @@ class ControllerTests(unittest.TestCase):
             fake.write_bytes(b"fake mp4 fixture")
             evidence = FinalMediaValidator(project).validate({"path": str(fake)})
             self.assertFalse(evidence["valid"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe required")
+    def test_solid_colour_video_is_not_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            output = project / "blank.mp4"
+            subprocess.run([
+                "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=darkblue:s=320x180:d=1",
+                "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(output),
+            ], capture_output=True, check=True)
+            evidence = FinalMediaValidator(project).validate({"path": str(output)})
+            self.assertFalse(evidence["valid"])
+            self.assertTrue(evidence["visually_blank"])
+
+
+class NativeArtifactValidationTests(unittest.TestCase):
+    def test_agent_result_cannot_impersonate_as_render_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            result = project / "agent_result.json"
+            result.write_text("{}", encoding="utf-8")
+            evidence = OpenMontageArtifactValidator(project, root / "OpenMontage", result).validate(
+                [{"kind": "render_report", "path": str(result)}],
+                [{"path": str(project / "renders" / "final.mp4")}],
+            )
+            self.assertFalse(evidence["valid"])
+            self.assertIn("worker agent result", evidence["artifacts"][0]["error"])
+
+    def test_schema_valid_native_artifact_chain_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            artifacts_dir = project / "artifacts"
+            renders = project / "renders"
+            schemas = root / "OpenMontage" / "schemas" / "artifacts"
+            artifacts_dir.mkdir(parents=True)
+            renders.mkdir(parents=True)
+            schemas.mkdir(parents=True)
+            output = renders / "final.mp4"
+            output.write_bytes(b"media is validated separately")
+            result_path = project / "football_emotion" / "agent_result.json"
+
+            payloads = {kind: {"version": "1.0"} for kind in REQUIRED_OPENMONTAGE_ARTIFACTS}
+            payloads["brief"] = {"version": "1.0"}
+            payloads["render_report"] = {
+                "version": "1.0",
+                "outputs": [{"path": str(output)}],
+                "final_review_ref": str(artifacts_dir / "final_review.json"),
+                "render_grammar": "documentary-montage",
+            }
+            payloads["edit_decisions"] = {
+                "version": "1.0",
+                "render_runtime": "remotion",
+                "renderer_family": "documentary-montage",
+            }
+            payloads["final_review"] = {
+                "version": "1.0",
+                "output_path": str(output),
+                "status": "pass",
+                "recommended_action": "present_to_user",
+                "checks": {
+                    "visual_spotcheck": {
+                        "frames_sampled": 4,
+                        "black_frames_detected": False,
+                        "broken_overlays": False,
+                        "missing_assets": False,
+                        "unreadable_text": False,
+                    },
+                    "promise_preservation": {
+                        "delivery_promise_honored": True,
+                        "render_runtime_used": "remotion",
+                        "runtime_swap_detected": False,
+                        "silent_downgrade_detected": False,
+                    },
+                },
+            }
+            declared = []
+            for kind, payload in payloads.items():
+                path = artifacts_dir / f"{kind}.json"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                (schemas / f"{kind}.schema.json").write_text(json.dumps({"type": "object"}), encoding="utf-8")
+                declared.append({"kind": kind, "path": str(path)})
+
+            validator = OpenMontageArtifactValidator(project, root / "OpenMontage", result_path)
+            with patch.object(validator, "_schema_error", return_value=""):
+                evidence = validator.validate(declared, [{"path": str(output)}])
+            self.assertTrue(evidence["valid"], evidence)
 
 
 if __name__ == "__main__":

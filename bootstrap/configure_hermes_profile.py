@@ -31,6 +31,11 @@ def main() -> int:
 
     # The key remains only in the process/Kaggle secret environment. Config
     # stores its variable name, never the credential value.
+    extra_body = ""
+    if model == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning":
+        budget = int(os.environ.get("ACD_NEMOTRON_REASONING_BUDGET", "4096"))
+        extra_body = f"    extra_body:\n      reasoning_budget: {budget}\n"
+
     config = f"""# Generated free-endpoint profile; no credential value is stored here.
 model:
   default: {q(model)}
@@ -43,7 +48,7 @@ providers:
     key_env: LLM_API_KEY
     default_model: {q(model)}
     transport: chat_completions
-    discover_models: false
+{extra_body}    discover_models: false
     models:
       {q(model)}: {{}}
 

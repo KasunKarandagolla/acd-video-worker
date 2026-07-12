@@ -12,7 +12,7 @@ from typing import Iterable, Optional
 from .agent_contract import AgentEnvelope, load_agent_envelope
 from .hermes_runner import HermesRunner
 from .job_prompt import PRELOADED_SKILLS, build_job_prompt
-from .media_validation import FinalMediaValidator
+from .media_validation import FinalMediaValidator, OpenMontageArtifactValidator
 from .notifications import DiscordNotifier
 from .run_state import RunProblem, RunState, RunStateStore, RunStatus, TERMINAL_STATUSES, utc_now
 from .source_service import SourceService, sanitize_reference
@@ -156,6 +156,7 @@ class ThinRunController:
                         return self._classify_hermes_failure(state, execution)
                 envelope = load_agent_envelope(Path(state.agent_result_path), state.run_id)
                 state.output_candidates = envelope.output_media
+                state.openmontage_artifacts = envelope.openmontage_artifacts
                 if envelope.status == "blocked":
                     return self._problem_from_envelope(state, envelope, blocked=True)
                 if envelope.status == "failed":
@@ -164,6 +165,24 @@ class ThinRunController:
                 self.store.save(state)
 
             if state.status == RunStatus.VALIDATING:
+                artifact_validator = OpenMontageArtifactValidator(
+                    Path(state.project_dir),
+                    self.config.openmontage_root,
+                    Path(state.agent_result_path),
+                )
+                state.artifact_validation = artifact_validator.validate(
+                    state.openmontage_artifacts,
+                    state.output_candidates,
+                )
+                self.store.save(state)
+                if not state.artifact_validation.get("valid"):
+                    return self._fail(
+                        state,
+                        "OPENMONTAGE_ARTIFACT_VALIDATION_FAILED",
+                        "Hermes claimed delivery without schema-valid native OpenMontage artifacts and review evidence.",
+                        "validation",
+                        state.artifact_validation,
+                    )
                 validator = FinalMediaValidator(Path(state.project_dir))
                 state.validation = [validator.validate(candidate) for candidate in state.output_candidates]
                 self.store.save(state)
