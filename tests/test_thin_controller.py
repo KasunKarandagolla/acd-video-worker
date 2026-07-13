@@ -186,6 +186,11 @@ class OptionalInfrastructureTests(unittest.TestCase):
         with patch("acd_worker.notifications.urllib.request.urlopen", side_effect=OSError("offline")):
             notifier._send("title", "description", 0)
 
+    def test_fresh_hermes_install_tolerates_only_completed_postinstall_failure(self):
+        installer = (ROOT / "bootstrap" / "install_hermes.sh").read_text(encoding="utf-8")
+        self.assertIn('elif [[ -x "$HOME/.local/bin/hermes" ]]', installer)
+        self.assertIn('exit 1', installer)
+
     def test_persistence_excludes_env_and_symlinks(self):
         sys.path.insert(0, str(ROOT / "scripts"))
         from kaggle_persistence import copy_tree

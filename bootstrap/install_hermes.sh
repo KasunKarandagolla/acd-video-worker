@@ -36,8 +36,18 @@ if command -v hermes &>/dev/null; then
     ok "Hermes CLI already in PATH"
 else
     log "Running setup-hermes.sh..."
-    bash setup-hermes.sh
-    ok "Hermes installed"
+    if bash setup-hermes.sh; then
+        ok "Hermes installed"
+    elif [[ -x "$HOME/.local/bin/hermes" ]]; then
+        # The pinned upstream installer can finish successfully (venv and CLI
+        # symlink created) but return non-zero in a fresh non-interactive
+        # Kaggle shell while attempting shell-profile follow-up work.
+        ok "Hermes installed; ignoring post-install shell-profile status"
+    else
+        err "Hermes setup failed before creating the CLI"
+        exit 1
+    fi
+    hash -r
 fi
 
 # Verify
