@@ -90,21 +90,23 @@ blocked retry. The runner passes Hermes' supported global `-m` selector before
 `chat`; `--resume` still restores the existing conversation, memory and native
 OpenMontage work. This setting never creates a new session or fallback router.
 
-Hermes gets one bounded same-session continuation when it exits cleanly before
-writing the mandatory result contract (for example, after reaching its
-tool-iteration ceiling). Configure the initial and recovery budgets with
-`ACD_HERMES_MAX_TURNS` (default `60`) and
-`ACD_HERMES_RECOVERY_MAX_TURNS` (default `30`). The continuation reuses Hermes
-history and existing OpenMontage work; it may finish the native pipeline or
-write an honest blocker, but it cannot weaken delivery validation.
+OpenMontage pipelines can span more than one Hermes CLI tool-turn slice. When
+Hermes exits cleanly without a terminal result, the controller may run bounded
+same-session checkpoint continuations: two by default, each 60 turns. Configure
+the slice budgets with `ACD_HERMES_MAX_TURNS`,
+`ACD_HERMES_RECOVERY_MAX_TURNS`, and `ACD_HERMES_MAX_CONTINUATIONS`. Every slice
+uses the same Hermes session and resumes the next incomplete native OpenMontage
+checkpoint without repeating research or capability discovery. This is session
+budgeting, not a worker creative stage machine, and it cannot weaken delivery
+validation.
 
 The production prompt binds Hermes to the pinned OpenMontage execution surface:
 `tools.tool_registry.registry.get(name).execute(inputs)`. It also records the
 actual Football Emotion package root for `shared/...` references, forbids
 invented source media, bounds one-time research/discovery and reserves turns
-for compose/review/result writing. Protocol recovery is not a second full
-pipeline run: unless all compose prerequisites already exist, it must write an
-honest `NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED` blocker immediately.
+for compose/review/result writing. A non-final continuation must keep advancing
+the native checkpoint chain; the final continuation writes an exact result
+envelope if the native pipeline still cannot complete.
 
 Prepare intake and the Hermes job prompt without executing production:
 

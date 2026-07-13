@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from acd_worker.hermes_runner import HermesRunner, HermesSessionResult
+from acd_worker.agent_contract import AgentEnvelope
 from acd_worker.job_prompt import PRELOADED_SKILLS, build_job_prompt
 from acd_worker.media_validation import FinalMediaValidator, OpenMontageArtifactValidator, REQUIRED_OPENMONTAGE_ARTIFACTS
 from acd_worker.notifications import DiscordNotifier
@@ -242,6 +243,8 @@ class HermesRunnerTests(unittest.TestCase):
             self.assertEqual(retried.status, RunStatus.BLOCKED)
             self.assertEqual(len(runner.calls), 2)
             self.assertEqual(runner.calls[1]["session_id"], "session_12345678")
+            self.assertIn("existing OpenMontage checkpoints", runner.calls[1]["prompt"])
+            self.assertNotIn("USER REQUEST:", runner.calls[1]["prompt"])
             self.assertIn(
                 {"from": "BLOCKED", "to": "AGENT_RUNNING"},
                 [{"from": item["from"], "to": item["to"]} for item in retried.history],
@@ -358,11 +361,13 @@ class ControllerTests(unittest.TestCase):
             state = ThinRunController(cfg, runner=runner).start("test")
             self.assertEqual(state.status, RunStatus.FAILED)
             self.assertEqual(state.error.code, "HERMES_RESULT_MISSING")
-            self.assertEqual(len(runner.calls), 2)
+            self.assertEqual(len(runner.calls), 3)
             self.assertEqual(runner.calls[1]["session_id"], "session_12345678")
-            self.assertEqual(runner.calls[1]["max_turns"], 30)
+            self.assertEqual(runner.calls[1]["max_turns"], 60)
+            self.assertIn("CONTINUATION SLICE: 1 of 2", runner.calls[1]["prompt"])
+            self.assertIn("CONTINUATION SLICE: 2 of 2", runner.calls[2]["prompt"])
 
-    def test_missing_result_gets_one_same_session_contract_recovery(self):
+    def test_missing_result_gets_bounded_checkpoint_continuations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cfg = config_for(root)
@@ -372,9 +377,14 @@ class ControllerTests(unittest.TestCase):
                     return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
                 prompt = call["prompt"]
                 self.assertIn("Do not repeat repository", prompt)
-                self.assertIn("within the first three tool calls", prompt)
-                self.assertIn("NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED", prompt)
                 self.assertIn('registry.get("video_compose").execute(inputs)', prompt)
+                if len(runner.calls) == 2:
+                    self.assertIn("CONTINUATION SLICE: 1 of 2", prompt)
+                    self.assertIn("not the final continuation slice", prompt)
+                    self.assertIn("Do not emit NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED", prompt)
+                    return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
+                self.assertIn("CONTINUATION SLICE: 2 of 2", prompt)
+                self.assertIn("final continuation slice", prompt)
                 result_path = Path(next(
                     line.split(":", 1)[1].strip()
                     for line in prompt.splitlines()
@@ -402,7 +412,33 @@ class ControllerTests(unittest.TestCase):
             state = ThinRunController(cfg, runner=runner).start("test")
             self.assertEqual(state.status, RunStatus.BLOCKED)
             self.assertEqual(state.blocker.code, "NATIVE_PIPELINE_INCOMPLETE")
-            self.assertEqual(len(runner.calls), 2)
+            self.assertEqual(len(runner.calls), 3)
+
+    def test_legacy_flat_blocker_is_safely_normalized(self):
+        envelope = AgentEnvelope.from_dict({
+            "run_id": "run-1",
+            "status": "blocked",
+            "blocker_code": "NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED",
+            "last_valid_artifact": "proposal_packet",
+            "last_valid_stage": "proposal",
+            "missing_native_stages": ["scene_plan", "assets", "edit"],
+            "note": "Native pipeline remains incomplete.",
+        }, "run-1")
+        self.assertEqual(envelope.schema_version, "1.0")
+        self.assertEqual(envelope.output_media, [])
+        self.assertEqual(envelope.blocker["code"], "NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED")
+        self.assertEqual(envelope.blocker["phase"], "proposal")
+        self.assertEqual(
+            envelope.blocker["evidence"]["missing_native_stages"],
+            ["scene_plan", "assets", "edit"],
+        )
+
+    def test_delivered_envelope_remains_strict(self):
+        with self.assertRaisesRegex(ValueError, "Delivered agent result missing fields"):
+            AgentEnvelope.from_dict({
+                "run_id": "run-1",
+                "status": "delivered",
+            }, "run-1")
 
     def test_artifact_failure_still_records_independent_media_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -33,7 +33,8 @@ class ThinControllerConfig:
     state_dir: Path
     hermes_timeout: int = 3600
     hermes_max_turns: int = 60
-    hermes_recovery_max_turns: int = 30
+    hermes_recovery_max_turns: int = 60
+    hermes_max_continuations: int = 2
     hermes_headless_auto_approve: bool = True
     hermes_model_override: Optional[str] = None
     discord_webhook_url: str = ""
@@ -154,10 +155,16 @@ class ThinRunController:
                     prompt_path = Path(state.prompt_path)
                     if not prompt_path.is_file():
                         return self._fail(state, "PROMPT_MISSING", "Cannot resume because the persisted Hermes job prompt is missing.", "agent")
+                    resuming_session = bool(state.hermes_session_id)
                     execution = self.runner.run_session(
-                        prompt=prompt_path.read_text(encoding="utf-8"),
+                        prompt=(
+                            self._checkpoint_continuation_prompt(state, continuation=1, final=False)
+                            if resuming_session
+                            else prompt_path.read_text(encoding="utf-8")
+                        ),
                         session_id=state.hermes_session_id,
-                        expected_skills=list(PRELOADED_SKILLS),
+                        expected_skills=[] if resuming_session else list(PRELOADED_SKILLS),
+                        max_turns=(self.config.hermes_recovery_max_turns if resuming_session else None),
                     )
                     agent_invoked = True
                     if execution.session_id:
@@ -166,16 +173,20 @@ class ThinRunController:
                     if not execution.success:
                         return self._classify_hermes_failure(state, execution)
 
-                # Pinned Hermes exits zero after its iteration-limit summary,
-                # but that final summary call has tools disabled. If the agent
-                # reached that boundary before writing the required envelope,
-                # give the same session one bounded continuation. This is a
-                # control-plane protocol recovery, not another creative stage
-                # machine: Hermes retains its history and decides how to finish
-                # the native OpenMontage work (or report a blocker) itself.
-                if not result_path.is_file():
+                # OpenMontage deliberately makes the agent its control plane and
+                # persists progress as native checkpoints. A production pipeline
+                # can legitimately exceed one Hermes CLI turn slice, so continue
+                # the same session from those checkpoints without introducing a
+                # worker-side stage machine or repeating research/discovery.
+                continuations = 0
+                while not result_path.is_file() and continuations < self.config.hermes_max_continuations:
+                    continuations += 1
                     recovery = self.runner.run_session(
-                        prompt=self._result_recovery_prompt(state),
+                        prompt=self._checkpoint_continuation_prompt(
+                            state,
+                            continuation=continuations,
+                            final=continuations == self.config.hermes_max_continuations,
+                        ),
                         session_id=state.hermes_session_id,
                         expected_skills=[],
                         max_turns=self.config.hermes_recovery_max_turns,
@@ -185,18 +196,18 @@ class ThinRunController:
                         self.store.save(state)
                     if not recovery.success:
                         return self._classify_hermes_failure(state, recovery)
-                    if not result_path.is_file():
-                        return self._fail(
-                            state,
-                            "HERMES_RESULT_MISSING",
-                            "Hermes exited successfully twice without writing the mandatory result contract.",
-                            "agent",
-                            {
-                                "session_id": state.hermes_session_id,
-                                "continuation_attempted": True,
-                                "recovery_max_turns": self.config.hermes_recovery_max_turns,
-                            },
-                        )
+                if not result_path.is_file():
+                    return self._fail(
+                        state,
+                        "HERMES_RESULT_MISSING",
+                        "Hermes exhausted all bounded same-session checkpoint continuations without writing the mandatory result contract.",
+                        "agent",
+                        {
+                            "session_id": state.hermes_session_id,
+                            "continuations_attempted": continuations,
+                            "continuation_max_turns": self.config.hermes_recovery_max_turns,
+                        },
+                    )
                 envelope = load_agent_envelope(Path(state.agent_result_path), state.run_id)
                 state.output_candidates = envelope.output_media
                 state.openmontage_artifacts = envelope.openmontage_artifacts
@@ -259,20 +270,42 @@ class ThinRunController:
         if missing:
             raise EnvironmentBlocker(f"Required Football Emotion skills are not installed: {', '.join(missing)}")
 
-    def _result_recovery_prompt(self, state: RunState) -> str:
-        return f"""Continue the same ACD production run {state.run_id} from the existing workspace.
+    def _checkpoint_continuation_prompt(self, state: RunState, *, continuation: int, final: bool) -> str:
+        final_instruction = (
+            "This is the final continuation slice. Reserve the last five tool calls for native review, "
+            "candidate validation and the exact result envelope. If genuine delivery remains impossible, "
+            "write a canonical blocked or failed envelope before the slice ends."
+            if final else
+            "This is not the final continuation slice. Continue native production from the next incomplete "
+            "checkpoint. Do not emit NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED merely because this CLI slice ends; "
+            "the controller will resume this same Hermes session again."
+        )
+        return f"""Continue the same ACD production run {state.run_id} from the existing OpenMontage checkpoints.
 
 MANDATORY RESULT PATH: {state.agent_result_path}
+CONTINUATION SLICE: {continuation} of {self.config.hermes_max_continuations}
 
-Do not repeat repository, skill, pipeline, capability discovery or web research already completed in this session. In one terminal call, list the existing canonical artifacts and renders under {state.project_dir}. Do not re-read guides or large source files.
+Do not repeat repository, skill, pipeline, capability discovery, provider menus or web research already completed in this session. In one terminal call, list the existing checkpoints, canonical artifacts and renders under {state.project_dir}. Trust schema-valid completed artifacts and resume exactly the next incomplete native stage. Do not re-read unchanged guides or large source files.
 
-This is protocol recovery, not another full production attempt. If `proposal_packet`, `scene_plan`, `asset_manifest`, and `edit_decisions` are not all already present and schema-valid, write an honest blocked result contract within the first three tool calls. Use blocker code `NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED`, identify the last valid artifact and missing native stages, and stop. Do not try to rebuild the remaining pipeline in this continuation.
+{final_instruction}
 
-Only when all compose prerequisites already exist may you finish the native compose/review path. Invoke it through the pinned registry exactly: `from tools.tool_registry import registry; registry.discover(); result = registry.get("video_compose").execute(inputs)`. `ToolResult` has `.success`, `.data`, `.artifacts`, and `.error`; it has no `.to_json()` and there is no importable `video_compose()` function.
+Continue authoring each missing artifact with the already-selected native stage director, validate it through `schemas.artifacts.validate_artifact`, and checkpoint it through `lib.checkpoint.write_checkpoint`. Once compose prerequisites exist, invoke the pinned registry exactly: `from tools.tool_registry import registry; registry.discover(); result = registry.get("video_compose").execute(inputs)`. `ToolResult` has `.success`, `.data`, `.artifacts`, and `.error`; it has no `.to_json()` and there is no importable `video_compose()` function.
 
-You have a bounded continuation of {self.config.hermes_recovery_max_turns} tool-calling turns. Reserve enough turns to write the mandatory result contract at {state.agent_result_path}. If a genuine schema-valid native render and review cannot be completed, write the honest blocked or failed contract immediately. Never substitute a direct FFmpeg/helper render, invent artifacts, or claim delivery without native evidence.
+You have {self.config.hermes_recovery_max_turns} tool-calling turns in this slice. Never substitute a direct FFmpeg/helper render, invent artifacts, or claim delivery without native evidence. A genuine external blocker may be reported at any time, but use the complete canonical envelope below:
 
-Before ending, write the result JSON file. Printing JSON without writing that file is not completion.
+{{
+  "schema_version": "1.0",
+  "run_id": "{state.run_id}",
+  "status": "blocked",
+  "output_media": [],
+  "openmontage_artifacts": [],
+  "source_requests": [],
+  "blocker": {{"code": "STABLE_CODE", "message": "actionable message", "phase": "native stage", "evidence": {{}}}},
+  "error": null,
+  "summary": "short factual summary"
+}}
+
+Only create the mandatory result file for genuine delivered, blocked or failed completion. Printing JSON without writing that file is not completion.
 """
 
     def _classify_hermes_failure(self, state: RunState, execution) -> RunState:

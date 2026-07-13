@@ -13,9 +13,9 @@ The controller may perform only:
 1. intake and run-state persistence;
 2. source manifest preparation;
 3. environment/profile/skill preflight;
-4. one supported Hermes job invocation or supported session resume, plus at
-   most one bounded same-session protocol continuation when Hermes exits zero
-   without writing its mandatory result contract;
+4. one supported Hermes job invocation or supported session resume, plus a
+   small configured number of bounded same-session checkpoint continuations
+   when Hermes exits zero without writing its mandatory result contract;
 5. strict final result parsing;
 6. independent final media validation;
 7. terminal persistence and best-effort notification.
@@ -43,15 +43,19 @@ blocked or failed state may reopen.
 - Preload the bridge/router/story entry skills and instruct progressive use of every relevant Football Emotion skill.
 - Run from the pinned OpenMontage root so native agent guidance is in scope.
 - Capture stdout/stderr, redact secrets, enforce timeout and trust neither exit code nor prose as delivery evidence.
-- A strict JSON result file inside the project workspace is mandatory.
+- A JSON result file inside the project workspace is mandatory. Delivered
+  envelopes remain fully strict. For safety-only terminal reporting, the parser
+  may normalize missing `schema_version` and empty `output_media` only on an
+  otherwise identifiable blocked/failed envelope; this can never create or
+  validate a delivery claim.
 - Pinned Hermes may exhaust its per-turn tool budget and make a final
   tools-disabled summary call. In that exact missing-result condition, the
-  controller may resume the same session once with a smaller bounded budget.
-  The continuation must reuse existing work and may only complete compose and
-  review when schema-valid compose prerequisites already exist. Otherwise it
-  must promptly write an honest `NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED`
-  blocker; it must not retry discovery/research or reconstruct OpenMontage
-  stages in Python.
+  controller may resume the same session through bounded slices. Each slice
+  must trust schema-valid existing artifacts, resume the next incomplete
+  OpenMontage checkpoint, and avoid repeated discovery/research. The controller
+  chooses only whether another Hermes slice is available; Hermes and
+  OpenMontage still own every workflow/stage decision. The final slice must
+  write an honest terminal envelope if native delivery remains impossible.
 
 ## OpenMontage contract
 

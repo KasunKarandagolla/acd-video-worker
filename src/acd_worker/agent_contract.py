@@ -25,7 +25,7 @@ class AgentEnvelope:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], expected_run_id: str) -> "AgentEnvelope":
-        required = {"schema_version", "run_id", "status", "output_media"}
+        required = {"run_id", "status"}
         missing = sorted(required - data.keys())
         if missing:
             raise ValueError(f"Agent result missing fields: {', '.join(missing)}")
@@ -33,18 +33,46 @@ class AgentEnvelope:
             raise ValueError("Agent result run_id does not match this run")
         if data["status"] not in VALID_AGENT_STATUSES:
             raise ValueError(f"Unsupported agent result status: {data['status']!r}")
-        if not isinstance(data["output_media"], list):
+        status = str(data["status"])
+        if status == "delivered":
+            delivered_missing = sorted({"schema_version", "output_media"} - data.keys())
+            if delivered_missing:
+                raise ValueError(f"Delivered agent result missing fields: {', '.join(delivered_missing)}")
+        output_media = data.get("output_media", [])
+        if not isinstance(output_media, list):
             raise ValueError("Agent result output_media must be a list")
+
+        blocker = data.get("blocker")
+        if status == "blocked" and not blocker and data.get("blocker_code"):
+            evidence_keys = {
+                "last_valid_artifact", "last_valid_stage", "missing_native_stages",
+                "artifacts_present", "checkpoints_written",
+            }
+            blocker = {
+                "code": str(data["blocker_code"]),
+                "message": str(data.get("note") or data.get("summary") or "Hermes reported a native pipeline blocker."),
+                "phase": str(data.get("last_valid_stage") or "agent"),
+                "evidence": {key: data[key] for key in evidence_keys if key in data},
+            }
+
+        error = data.get("error")
+        if status == "failed" and not error and data.get("error_code"):
+            error = {
+                "code": str(data["error_code"]),
+                "message": str(data.get("note") or data.get("summary") or "Hermes reported a native pipeline failure."),
+                "phase": str(data.get("last_valid_stage") or "agent"),
+                "evidence": data.get("evidence") or {},
+            }
         envelope = cls(
-            schema_version=str(data["schema_version"]),
+            schema_version=str(data.get("schema_version") or "1.0"),
             run_id=str(data["run_id"]),
-            status=str(data["status"]),
-            output_media=data["output_media"],
+            status=status,
+            output_media=output_media,
             openmontage_artifacts=data.get("openmontage_artifacts") or [],
             source_requests=data.get("source_requests") or [],
-            blocker=data.get("blocker"),
-            error=data.get("error"),
-            summary=str(data.get("summary") or ""),
+            blocker=blocker,
+            error=error,
+            summary=str(data.get("summary") or data.get("note") or ""),
         )
         if envelope.status == "delivered" and not envelope.output_media:
             raise ValueError("Delivered agent result contains no output media")
