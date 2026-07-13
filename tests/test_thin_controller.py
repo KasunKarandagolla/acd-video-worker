@@ -67,6 +67,13 @@ class RunStateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             state.transition(RunStatus.INTAKE)
 
+    def test_blocked_can_only_reenter_agent_running_transition(self):
+        now = utc_now()
+        state = RunState("1.0", "r1", "p1", "request", RunStatus.BLOCKED, now, now, "/p", "/s", "/a", "/j")
+        state.transition(RunStatus.AGENT_RUNNING)
+        with self.assertRaises(ValueError):
+            state.transition(RunStatus.INTAKE)
+
     def test_store_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
             now = utc_now()
@@ -176,6 +183,38 @@ class HermesRunnerTests(unittest.TestCase):
             self.assertEqual(state.status, RunStatus.BLOCKED)
             self.assertEqual(state.blocker.code, "HERMES_RUNTIME_UNAVAILABLE")
 
+    def test_transient_provider_blocker_requires_explicit_same_session_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+
+            runner = FakeRunner(
+                root,
+                lambda _: HermesSessionResult(
+                    success=False,
+                    session_id="session_12345678",
+                    returncode=1,
+                    error="HTTP 429: Too Many Requests",
+                ),
+            )
+            controller = ThinRunController(cfg, runner=runner)
+            blocked = controller.start("test")
+            self.assertEqual(blocked.status, RunStatus.BLOCKED)
+            self.assertEqual(len(runner.calls), 1)
+
+            unchanged = controller.resume(blocked.run_id)
+            self.assertEqual(unchanged.status, RunStatus.BLOCKED)
+            self.assertEqual(len(runner.calls), 1)
+
+            retried = controller.resume(blocked.run_id, retry_blocked=True)
+            self.assertEqual(retried.status, RunStatus.BLOCKED)
+            self.assertEqual(len(runner.calls), 2)
+            self.assertEqual(runner.calls[1]["session_id"], "session_12345678")
+            self.assertIn(
+                {"from": "BLOCKED", "to": "AGENT_RUNNING"},
+                [{"from": item["from"], "to": item["to"]} for item in retried.history],
+            )
+
     def test_secret_redaction(self):
         token = "ghp" + "_abcdefghijk"
         redacted = HermesRunner._redact(f"api_key=supersecret authorization: Bearer tokenvalue {token}")
@@ -232,6 +271,7 @@ class OptionalInfrastructureTests(unittest.TestCase):
             config = (root / "hermes" / "profiles" / "football-emotion" / "config.yaml").read_text(encoding="utf-8")
             self.assertNotIn(secret, config)
             self.assertIn("key_env: LLM_API_KEY", config)
+            self.assertIn("context_length: 65536", config)
 
     def test_candidate_validator_rejects_missing_result(self):
         with tempfile.TemporaryDirectory() as tmp:

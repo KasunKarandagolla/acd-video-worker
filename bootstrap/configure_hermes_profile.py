@@ -31,6 +31,13 @@ def main() -> int:
 
     # The key remains only in the process/Kaggle secret environment. Config
     # stores its variable name, never the credential value.
+    # Free hosted endpoints commonly throttle very large repeated agent
+    # contexts before the model's advertised context window is reached. Cap
+    # Hermes' effective window so its native compressor runs earlier while
+    # preserving the same session, memory and workflow ownership.
+    context_length = int(os.environ.get("ACD_HERMES_CONTEXT_LENGTH", "65536"))
+    if context_length < 32768:
+        raise ValueError("ACD_HERMES_CONTEXT_LENGTH must be at least 32768")
     extra_body = ""
     if model == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning":
         budget = int(os.environ.get("ACD_NEMOTRON_REASONING_BUDGET", "4096"))
@@ -40,6 +47,7 @@ def main() -> int:
 model:
   default: {q(model)}
   provider: custom:acd-free
+  context_length: {context_length}
 
 providers:
   acd-free:

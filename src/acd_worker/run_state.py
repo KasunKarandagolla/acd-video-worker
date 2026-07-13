@@ -34,7 +34,10 @@ ALLOWED_TRANSITIONS = {
     RunStatus.AGENT_RUNNING: {RunStatus.VALIDATING, RunStatus.BLOCKED, RunStatus.FAILED},
     RunStatus.VALIDATING: {RunStatus.DELIVERED, RunStatus.BLOCKED, RunStatus.FAILED},
     RunStatus.DELIVERED: set(),
-    RunStatus.BLOCKED: set(),
+    # BLOCKED remains terminal during ordinary resume. The controller may use
+    # this single transition only for an explicit retry of a transient Hermes
+    # provider blocker, preserving the same project and Hermes session.
+    RunStatus.BLOCKED: {RunStatus.AGENT_RUNNING},
     RunStatus.FAILED: set(),
 }
 

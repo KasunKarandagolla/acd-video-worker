@@ -67,6 +67,22 @@ Resume a non-terminal run:
 PYTHONPATH=src python3 scripts/acd_worker.py --run-id <run-id>
 ```
 
+An ordinary resume never reopens a terminal state. A transient free-provider
+blocker can be retried explicitly without discarding the project or Hermes
+session:
+
+```bash
+PYTHONPATH=src python3 scripts/acd_worker.py \
+  --run-id <run-id> --retry-blocked --json
+```
+
+This is accepted only when the persisted blocker is
+`HERMES_RUNTIME_UNAVAILABLE`; delivery, validation, dry-run, approval and other
+blocked/failed states remain terminal. The generated Hermes profile caps the
+effective context at 65,536 tokens by default (`ACD_HERMES_CONTEXT_LENGTH`) so
+Hermes' native compression runs before large free-endpoint requests are
+typically throttled.
+
 Hermes gets one bounded same-session continuation when it exits cleanly before
 writing the mandatory result contract (for example, after reaching its
 tool-iteration ceiling). Configure the initial and recovery budgets with

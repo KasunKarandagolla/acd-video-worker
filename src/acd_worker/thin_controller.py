@@ -89,8 +89,15 @@ class ThinRunController:
         self.notifier.started(state)
         return self._continue(state)
 
-    def resume(self, run_id: str) -> RunState:
+    def resume(self, run_id: str, *, retry_blocked: bool = False) -> RunState:
         state = self.store.load(run_id)
+        if state.status == RunStatus.BLOCKED and retry_blocked:
+            if not state.blocker or state.blocker.code != "HERMES_RUNTIME_UNAVAILABLE":
+                return state
+            state.blocker = None
+            state.transition(RunStatus.AGENT_RUNNING)
+            self.store.save(state)
+            return self._continue(state)
         if state.status in TERMINAL_STATUSES:
             return state
         return self._continue(state)
@@ -263,7 +270,11 @@ Before ending, write the result JSON file. Printing JSON without writing that fi
 
     def _classify_hermes_failure(self, state: RunState, execution) -> RunState:
         error = (execution.error or "Hermes exited without a result").lower()
-        if any(token in error for token in ("api key", "credentials", "provider", "rate limit", "quota", "resourceexhausted", "workers are busy", " 503")):
+        if any(token in error for token in (
+            "api key", "credentials", "provider unavailable", "unknown provider",
+            "provider not configured", "rate limit", "too many requests", "quota",
+            "resourceexhausted", "workers are busy", " 429", " 503",
+        )):
             return self._block(state, "HERMES_RUNTIME_UNAVAILABLE", execution.error or "Hermes runtime unavailable", "agent", {"returncode": execution.returncode})
         return self._fail(state, "HERMES_EXECUTION_FAILED", execution.error or "Hermes execution failed", "agent", {"returncode": execution.returncode})
 

@@ -77,9 +77,16 @@ def main() -> int:
     parser.add_argument("request", nargs="?", help="Creative video request")
     parser.add_argument("--input", action="append", default=[], help="Local file or URL; repeat for mixed inputs")
     parser.add_argument("--run-id", help="Resume an existing non-terminal run")
+    parser.add_argument(
+        "--retry-blocked",
+        action="store_true",
+        help="Explicitly retry a HERMES_RUNTIME_UNAVAILABLE blocked run using its existing Hermes session",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Prepare intake and Hermes prompt, then report BLOCKED without executing")
     parser.add_argument("--json", action="store_true", help="Print only the final run-state JSON")
     args = parser.parse_args()
+    if args.retry_blocked and not args.run_id:
+        parser.error("--retry-blocked requires --run-id")
 
     logging.basicConfig(
         level=getattr(logging, os.environ.get("ACD_LOG_LEVEL", "INFO").upper(), logging.INFO),
@@ -91,7 +98,7 @@ def main() -> int:
     controller = ThinRunController(config.controller_config())
 
     if args.run_id:
-        state = controller.resume(args.run_id)
+        state = controller.resume(args.run_id, retry_blocked=args.retry_blocked)
     else:
         if not args.request:
             parser.error("request is required unless --run-id is used")

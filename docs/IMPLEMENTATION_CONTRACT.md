@@ -26,6 +26,12 @@ Allowed states are exactly `INTAKE`, `SOURCE_READY`, `AGENT_RUNNING`, `VALIDATIN
 
 Every blocker/error has a stable code, actionable message, phase and optional evidence. Expected missing external prerequisites map to `BLOCKED`; malformed results and unexpected execution faults map to `FAILED`.
 
+Terminal states are immutable during ordinary resume. One explicit exception
+is permitted: `BLOCKED -> AGENT_RUNNING` when the persisted blocker is exactly
+`HERMES_RUNTIME_UNAVAILABLE` and the caller requests a blocked retry. It must
+reuse the same project and supported Hermes `--resume` session. No other
+blocked or failed state may reopen.
+
 ## Hermes contract
 
 - Use the pinned supported `-p ... chat -q ... -Q` interface.
