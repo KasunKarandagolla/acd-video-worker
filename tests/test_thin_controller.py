@@ -148,6 +148,32 @@ class HermesRunnerTests(unittest.TestCase):
             self.assertEqual(mocked.call_args.kwargs["env"]["HERMES_HOME"], str(root / "home"))
             self.assertEqual(result.session_id, "20260712_abc12345")
 
+    def test_explicit_model_override_precedes_chat_on_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli = root / "hermes"
+            cli.write_text("#!/bin/sh\n", encoding="utf-8")
+            cli.chmod(0o755)
+            (root / "home" / "profiles" / "football-emotion").mkdir(parents=True)
+            completed = subprocess.CompletedProcess([], 0, stdout="", stderr="session_id: session_12345678\n")
+            runner = HermesRunner(
+                str(root / "home"),
+                hermes_cli=str(cli),
+                cwd=root,
+                model_override="nvidia/nemotron-3-ultra-550b-a55b",
+            )
+            with patch("acd_worker.hermes_runner.subprocess.run", return_value=completed) as mocked:
+                runner.run_session("continue", session_id="session_12345678")
+            command = mocked.call_args.args[0]
+            self.assertEqual(
+                command[:6],
+                [
+                    str(cli), "-p", "football-emotion", "-m",
+                    "nvidia/nemotron-3-ultra-550b-a55b", "chat",
+                ],
+            )
+            self.assertEqual(command[command.index("--resume") + 1], "session_12345678")
+
     def test_session_log_diagnostic_surfaces_provider_capacity_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -272,6 +298,26 @@ class OptionalInfrastructureTests(unittest.TestCase):
             self.assertNotIn(secret, config)
             self.assertIn("key_env: LLM_API_KEY", config)
             self.assertIn("context_length: 65536", config)
+
+    def test_ultra_profile_enables_native_thinking_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            environment = {
+                **__import__("os").environ,
+                "HERMES_HOME": str(root / "hermes"),
+                "HERMES_PROFILE": "football-emotion",
+                "LLM_BASE_URL": "https://integrate.api.nvidia.com/v1",
+                "LLM_MODEL": "nvidia/nemotron-3-ultra-550b-a55b",
+                "LLM_API_KEY": "test-secret-value",
+            }
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "bootstrap" / "configure_hermes_profile.py")],
+                env=environment, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0)
+            config = (root / "hermes" / "profiles" / "football-emotion" / "config.yaml").read_text(encoding="utf-8")
+            self.assertIn("enable_thinking: true", config)
+            self.assertIn("reasoning_budget: 16384", config)
 
     def test_candidate_validator_rejects_missing_result(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -42,6 +42,14 @@ def main() -> int:
     if model == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning":
         budget = int(os.environ.get("ACD_NEMOTRON_REASONING_BUDGET", "4096"))
         extra_body = f"    extra_body:\n      reasoning_budget: {budget}\n"
+    elif model == "nvidia/nemotron-3-ultra-550b-a55b":
+        budget = int(os.environ.get("ACD_NEMOTRON_REASONING_BUDGET", "16384"))
+        extra_body = (
+            "    extra_body:\n"
+            "      chat_template_kwargs:\n"
+            "        enable_thinking: true\n"
+            f"      reasoning_budget: {budget}\n"
+        )
 
     config = f"""# Generated free-endpoint profile; no credential value is stored here.
 model:

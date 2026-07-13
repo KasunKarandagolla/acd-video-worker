@@ -35,6 +35,9 @@ blocked or failed state may reopen.
 ## Hermes contract
 
 - Use the pinned supported `-p ... chat -q ... -Q` interface.
+- An operator may use Hermes' supported global `-m` selector before `chat` to
+  hand a resumed transient-provider blocker to a different configured model;
+  the project, session, history and validation contract remain unchanged.
 - Use `--resume`, not invented session flags.
 - Pass the Hermes root as `HERMES_HOME`; let `-p` resolve the named profile.
 - Preload the bridge/router/story entry skills and instruct progressive use of every relevant Football Emotion skill.

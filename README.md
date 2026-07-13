@@ -83,6 +83,13 @@ effective context at 65,536 tokens by default (`ACD_HERMES_CONTEXT_LENGTH`) so
 Hermes' native compression runs before large free-endpoint requests are
 typically throttled.
 
+If that provider remains unavailable, the same Hermes session can be handed to
+another model already configured in the named profile. Set
+`ACD_HERMES_MODEL_OVERRIDE` to the exact configured model ID before the explicit
+blocked retry. The runner passes Hermes' supported global `-m` selector before
+`chat`; `--resume` still restores the existing conversation, memory and native
+OpenMontage work. This setting never creates a new session or fallback router.
+
 Hermes gets one bounded same-session continuation when it exits cleanly before
 writing the mandatory result contract (for example, after reaching its
 tool-iteration ceiling). Configure the initial and recovery budgets with

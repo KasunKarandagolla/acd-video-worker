@@ -46,6 +46,7 @@ class HermesRunner:
         cwd: Optional[Path] = None,
         max_turns: int = 60,
         headless_auto_approve: bool = True,
+        model_override: Optional[str] = None,
     ):
         self.hermes_home = Path(hermes_home).expanduser().resolve()
         self.profile = profile
@@ -54,6 +55,7 @@ class HermesRunner:
         self.cwd = Path(cwd).expanduser().resolve() if cwd else None
         self.max_turns = max_turns
         self.headless_auto_approve = headless_auto_approve
+        self.model_override = model_override.strip() if model_override else None
         self.profile_dir = self.hermes_home / "profiles" / profile
 
         # Resolve hermes CLI - use provided path, or find in PATH, or use bundled
@@ -130,12 +132,19 @@ class HermesRunner:
         cmd = [
             str(self.hermes_cli),
             "-p", self.profile,
+        ]
+        # Pinned Hermes accepts the global model selector before the chat
+        # subcommand. On resume this changes only the inference model; Hermes
+        # keeps the same session history, memory and workflow state.
+        if self.model_override:
+            cmd.extend(["-m", self.model_override])
+        cmd.extend([
             "chat",
             "-q", prompt,
             "-Q",  # Quiet mode for programmatic use
             "--source", "tool",
             "--max-turns", str(max_turns if max_turns is not None else self.max_turns),
-        ]
+        ])
 
         # This runner is fully non-interactive. Without Hermes's supported
         # headless approval flag, dangerous-command prompts wait for a TTY that
@@ -153,6 +162,8 @@ class HermesRunner:
         # Parent/child relationships tracked in worker metadata instead
         logger = logging.getLogger("acd_worker.hermes_runner")
         logger.info("Running Hermes session with profile %s (prompt chars: %d)", self.profile, len(prompt))
+        if self.model_override:
+            logger.info("Using explicit Hermes model override: %s", self.model_override)
         if expected_skills:
             logger.info("Preloading skills: %s", ", ".join(expected_skills))
 

@@ -35,6 +35,7 @@ class ThinControllerConfig:
     hermes_max_turns: int = 60
     hermes_recovery_max_turns: int = 30
     hermes_headless_auto_approve: bool = True
+    hermes_model_override: Optional[str] = None
     discord_webhook_url: str = ""
     dry_run: bool = False
 
@@ -60,6 +61,7 @@ class ThinRunController:
             cwd=config.openmontage_root,
             max_turns=config.hermes_max_turns,
             headless_auto_approve=config.hermes_headless_auto_approve,
+            model_override=config.hermes_model_override,
         )
         self.log = logging.getLogger("acd_worker.thin_controller")
 

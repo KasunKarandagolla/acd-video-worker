@@ -32,6 +32,7 @@ class ACDConfig:
     hermes_max_turns: int
     hermes_recovery_max_turns: int
     hermes_headless_auto_approve: bool
+    hermes_model_override: Optional[str]
     discord_webhook_url: str
     dry_run: bool = False
 
@@ -50,6 +51,7 @@ class ACDConfig:
             hermes_max_turns=int(os.environ.get("ACD_HERMES_MAX_TURNS", "60")),
             hermes_recovery_max_turns=int(os.environ.get("ACD_HERMES_RECOVERY_MAX_TURNS", "30")),
             hermes_headless_auto_approve=os.environ.get("ACD_HERMES_YOLO", "true").lower() == "true",
+            hermes_model_override=os.environ.get("ACD_HERMES_MODEL_OVERRIDE", "").strip() or None,
             discord_webhook_url=os.environ.get("DISCORD_WEBHOOK_URL", ""),
             dry_run=os.environ.get("ACD_DRY_RUN", "false").lower() == "true",
         )
@@ -67,6 +69,7 @@ class ACDConfig:
             hermes_max_turns=self.hermes_max_turns,
             hermes_recovery_max_turns=self.hermes_recovery_max_turns,
             hermes_headless_auto_approve=self.hermes_headless_auto_approve,
+            hermes_model_override=self.hermes_model_override,
             discord_webhook_url=self.discord_webhook_url,
             dry_run=self.dry_run,
         )
