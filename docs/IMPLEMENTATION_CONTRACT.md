@@ -13,7 +13,9 @@ The controller may perform only:
 1. intake and run-state persistence;
 2. source manifest preparation;
 3. environment/profile/skill preflight;
-4. one supported Hermes job invocation or supported session resume;
+4. one supported Hermes job invocation or supported session resume, plus at
+   most one bounded same-session protocol continuation when Hermes exits zero
+   without writing its mandatory result contract;
 5. strict final result parsing;
 6. independent final media validation;
 7. terminal persistence and best-effort notification.
@@ -33,6 +35,12 @@ Every blocker/error has a stable code, actionable message, phase and optional ev
 - Run from the pinned OpenMontage root so native agent guidance is in scope.
 - Capture stdout/stderr, redact secrets, enforce timeout and trust neither exit code nor prose as delivery evidence.
 - A strict JSON result file inside the project workspace is mandatory.
+- Pinned Hermes may exhaust its per-turn tool budget and make a final
+  tools-disabled summary call. In that exact missing-result condition, the
+  controller may resume the same session once with a smaller bounded budget.
+  The continuation must reuse existing work and may only complete Hermes-owned
+  native work or write an honest blocker/failure; it must not reconstruct
+  OpenMontage stages in Python.
 
 ## OpenMontage contract
 

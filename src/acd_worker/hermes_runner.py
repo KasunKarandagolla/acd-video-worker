@@ -96,7 +96,8 @@ class HermesRunner:
         context: Dict = None,
         session_id: Optional[str] = None,
         parent_session_id: Optional[str] = None,
-        expected_skills: List[str] = None
+        expected_skills: List[str] = None,
+        max_turns: Optional[int] = None,
     ) -> HermesSessionResult:
         """
         Execute a Hermes chat session with the given prompt.
@@ -133,7 +134,7 @@ class HermesRunner:
             "-q", prompt,
             "-Q",  # Quiet mode for programmatic use
             "--source", "tool",
-            "--max-turns", str(self.max_turns),
+            "--max-turns", str(max_turns if max_turns is not None else self.max_turns),
         ]
 
         # This runner is fully non-interactive. Without Hermes's supported

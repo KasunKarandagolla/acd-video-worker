@@ -33,6 +33,7 @@ class ThinControllerConfig:
     state_dir: Path
     hermes_timeout: int = 3600
     hermes_max_turns: int = 60
+    hermes_recovery_max_turns: int = 30
     hermes_headless_auto_approve: bool = True
     discord_webhook_url: str = ""
     dry_run: bool = False
@@ -154,6 +155,38 @@ class ThinRunController:
                         self.store.save(state)
                     if not execution.success:
                         return self._classify_hermes_failure(state, execution)
+
+                # Pinned Hermes exits zero after its iteration-limit summary,
+                # but that final summary call has tools disabled. If the agent
+                # reached that boundary before writing the required envelope,
+                # give the same session one bounded continuation. This is a
+                # control-plane protocol recovery, not another creative stage
+                # machine: Hermes retains its history and decides how to finish
+                # the native OpenMontage work (or report a blocker) itself.
+                if not result_path.is_file():
+                    recovery = self.runner.run_session(
+                        prompt=self._result_recovery_prompt(state),
+                        session_id=state.hermes_session_id,
+                        expected_skills=[],
+                        max_turns=self.config.hermes_recovery_max_turns,
+                    )
+                    if recovery.session_id:
+                        state.hermes_session_id = recovery.session_id
+                        self.store.save(state)
+                    if not recovery.success:
+                        return self._classify_hermes_failure(state, recovery)
+                    if not result_path.is_file():
+                        return self._fail(
+                            state,
+                            "HERMES_RESULT_MISSING",
+                            "Hermes exited successfully twice without writing the mandatory result contract.",
+                            "agent",
+                            {
+                                "session_id": state.hermes_session_id,
+                                "continuation_attempted": True,
+                                "recovery_max_turns": self.config.hermes_recovery_max_turns,
+                            },
+                        )
                 envelope = load_agent_envelope(Path(state.agent_result_path), state.run_id)
                 state.output_candidates = envelope.output_media
                 state.openmontage_artifacts = envelope.openmontage_artifacts
@@ -213,6 +246,18 @@ class ThinRunController:
         missing = [skill for skill in PRELOADED_SKILLS if not self.runner.find_skill(skill)]
         if missing:
             raise EnvironmentBlocker(f"Required Football Emotion skills are not installed: {', '.join(missing)}")
+
+    def _result_recovery_prompt(self, state: RunState) -> str:
+        return f"""Continue the same ACD production run {state.run_id} from the existing workspace.
+
+MANDATORY RESULT PATH: {state.agent_result_path}
+
+Do not repeat repository, skill, pipeline, or capability discovery already completed in this session. Inspect the work and canonical artifacts already present under {state.project_dir}, then complete only the remaining native OpenMontage steps.
+
+You have a bounded continuation of {self.config.hermes_recovery_max_turns} tool-calling turns. Reserve enough turns to write the mandatory result contract at {state.agent_result_path}. If a genuine schema-valid native render and review cannot be completed within this continuation, stop production work and write an honest `blocked` or `failed` result contract with actionable evidence. Never substitute a direct FFmpeg/helper render, never invent artifacts, and never claim delivery without the required native evidence.
+
+Before ending, write the result JSON file. Printing JSON without writing that file is not completion.
+"""
 
     def _classify_hermes_failure(self, state: RunState, execution) -> RunState:
         error = (execution.error or "Hermes exited without a result").lower()

@@ -128,12 +128,13 @@ class HermesRunnerTests(unittest.TestCase):
             completed = subprocess.CompletedProcess([], 0, stdout='{"status":"blocked"}\n', stderr="\nsession_id: 20260712_abc12345\n")
             runner = HermesRunner(str(root / "home"), hermes_cli=str(cli), cwd=root, max_turns=17)
             with patch("acd_worker.hermes_runner.subprocess.run", return_value=completed) as mocked:
-                result = runner.run_session("prompt", session_id="old_session", expected_skills=["skill-a"])
+                result = runner.run_session("prompt", session_id="old_session", expected_skills=["skill-a"], max_turns=9)
             command = mocked.call_args.args[0]
             self.assertEqual(command[:4], [str(cli), "-p", "football-emotion", "chat"])
             self.assertIn("--resume", command)
             self.assertIn("--skills", command)
             self.assertIn("--yolo", command)
+            self.assertEqual(command[command.index("--max-turns") + 1], "9")
             self.assertEqual(mocked.call_args.kwargs["env"]["HERMES_HOME"], str(root / "home"))
             self.assertEqual(result.session_id, "20260712_abc12345")
 
@@ -247,7 +248,49 @@ class ControllerTests(unittest.TestCase):
             runner = FakeRunner(root, lambda _: HermesSessionResult(success=True, session_id="session_12345678", returncode=0))
             state = ThinRunController(cfg, runner=runner).start("test")
             self.assertEqual(state.status, RunStatus.FAILED)
-            self.assertEqual(state.error.code, "PROTOCOL_ERROR")
+            self.assertEqual(state.error.code, "HERMES_RESULT_MISSING")
+            self.assertEqual(len(runner.calls), 2)
+            self.assertEqual(runner.calls[1]["session_id"], "session_12345678")
+            self.assertEqual(runner.calls[1]["max_turns"], 30)
+
+    def test_missing_result_gets_one_same_session_contract_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+
+            def behavior(call):
+                if len(runner.calls) == 1:
+                    return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
+                prompt = call["prompt"]
+                self.assertIn("Do not repeat repository", prompt)
+                result_path = Path(next(
+                    line.split(":", 1)[1].strip()
+                    for line in prompt.splitlines()
+                    if line.startswith("MANDATORY RESULT PATH:")
+                ))
+                result_path.write_text(json.dumps({
+                    "schema_version": "1.0",
+                    "run_id": next(line.split()[6] for line in prompt.splitlines() if line.startswith("Continue the same ACD production run")),
+                    "status": "blocked",
+                    "output_media": [],
+                    "openmontage_artifacts": [],
+                    "source_requests": [],
+                    "blocker": {
+                        "code": "NATIVE_PIPELINE_INCOMPLETE",
+                        "message": "Bounded continuation could not finish the native render.",
+                        "phase": "render",
+                        "evidence": {},
+                    },
+                    "error": None,
+                    "summary": "Honest bounded stop.",
+                }), encoding="utf-8")
+                return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
+
+            runner = FakeRunner(root, behavior)
+            state = ThinRunController(cfg, runner=runner).start("test")
+            self.assertEqual(state.status, RunStatus.BLOCKED)
+            self.assertEqual(state.blocker.code, "NATIVE_PIPELINE_INCOMPLETE")
+            self.assertEqual(len(runner.calls), 2)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe required")
     def test_only_real_ffprobe_media_delivers(self):

@@ -67,6 +67,14 @@ Resume a non-terminal run:
 PYTHONPATH=src python3 scripts/acd_worker.py --run-id <run-id>
 ```
 
+Hermes gets one bounded same-session continuation when it exits cleanly before
+writing the mandatory result contract (for example, after reaching its
+tool-iteration ceiling). Configure the initial and recovery budgets with
+`ACD_HERMES_MAX_TURNS` (default `60`) and
+`ACD_HERMES_RECOVERY_MAX_TURNS` (default `30`). The continuation reuses Hermes
+history and existing OpenMontage work; it may finish the native pipeline or
+write an honest blocker, but it cannot weaken delivery validation.
+
 Prepare intake and the Hermes job prompt without executing production:
 
 ```bash
