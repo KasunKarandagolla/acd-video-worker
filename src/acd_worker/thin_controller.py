@@ -311,7 +311,8 @@ Only create the mandatory result file for genuine delivered, blocked or failed c
     def _classify_hermes_failure(self, state: RunState, execution) -> RunState:
         error = (execution.error or "Hermes exited without a result").lower()
         if any(token in error for token in (
-            "api key", "credentials", "provider unavailable", "unknown provider",
+            "api key", "credentials", "unauthorized", "authentication failed", " 401",
+            "provider unavailable", "unknown provider",
             "provider not configured", "rate limit", "too many requests", "quota",
             "resourceexhausted", "workers are busy", " 429", " 503",
         )):

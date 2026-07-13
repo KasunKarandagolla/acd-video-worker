@@ -216,6 +216,27 @@ class HermesRunnerTests(unittest.TestCase):
             self.assertEqual(state.status, RunStatus.BLOCKED)
             self.assertEqual(state.blocker.code, "HERMES_RUNTIME_UNAVAILABLE")
 
+    def test_provider_authentication_failure_is_structured_blocker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+            runner = FakeRunner(
+                root,
+                lambda _: HermesSessionResult(
+                    success=False,
+                    session_id="session_12345678",
+                    returncode=1,
+                    error=(
+                        "Error code: 401 - {'status': 401, 'title': 'Unauthorized', "
+                        "'detail': 'Authentication failed'}"
+                    ),
+                ),
+            )
+            state = ThinRunController(cfg, runner=runner).start("test")
+            self.assertEqual(state.status, RunStatus.BLOCKED)
+            self.assertEqual(state.blocker.code, "HERMES_RUNTIME_UNAVAILABLE")
+            self.assertIsNone(state.error)
+
     def test_transient_provider_blocker_requires_explicit_same_session_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

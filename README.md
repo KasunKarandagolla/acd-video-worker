@@ -78,7 +78,9 @@ PYTHONPATH=src python3 scripts/acd_worker.py \
 
 This is accepted only when the persisted blocker is
 `HERMES_RUNTIME_UNAVAILABLE`; delivery, validation, dry-run, approval and other
-blocked/failed states remain terminal. The generated Hermes profile caps the
+blocked/failed states remain terminal. Missing/expired provider credentials,
+provider authentication failures, throttling and provider capacity errors are
+classified as this retryable blocker. The generated Hermes profile caps the
 effective context at 65,536 tokens by default (`ACD_HERMES_CONTEXT_LENGTH`) so
 Hermes' native compression runs before large free-endpoint requests are
 typically throttled.
