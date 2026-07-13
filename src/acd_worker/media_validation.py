@@ -96,6 +96,15 @@ class OpenMontageArtifactValidator:
             evidence["errors"].append("missing schema-valid native planning artifact: brief or proposal_packet")
             return evidence
 
+        # Native JSON-schema validation is intentionally artifact-local. It
+        # does not prove that edit_decisions references resolve through the
+        # asset_manifest or that the declared media exists. Delivery must fail
+        # closed on that cross-artifact handoff instead of allowing a renderer
+        # crash (or a visually incomplete render) to masquerade as valid state.
+        evidence["errors"].extend(self._cross_artifact_errors(by_kind))
+        if evidence["errors"]:
+            return evidence
+
         candidate_paths = {
             str(Path(item["path"]).expanduser().resolve())
             for item in output_candidates
@@ -152,6 +161,66 @@ class OpenMontageArtifactValidator:
 
         evidence["valid"] = not evidence["errors"]
         return evidence
+
+    def _cross_artifact_errors(self, by_kind: dict[str, Path]) -> list[str]:
+        manifest_path = by_kind["asset_manifest"]
+        edit_path = by_kind["edit_decisions"]
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        edit = json.loads(edit_path.read_text(encoding="utf-8"))
+        errors: list[str] = []
+        asset_paths: dict[str, Path] = {}
+
+        for asset in manifest.get("assets") or []:
+            asset_id = str(asset.get("id") or "")
+            if asset_id in asset_paths:
+                errors.append(f"asset_manifest contains duplicate asset ID: {asset_id}")
+                continue
+            resolved = self._resolve_artifact_reference(asset.get("path"), manifest_path)
+            asset_paths[asset_id] = resolved
+            try:
+                resolved.relative_to(self.project_root)
+            except ValueError:
+                errors.append(f"asset_manifest path is outside the project: {asset_id}")
+                continue
+            if not resolved.is_file() or resolved.stat().st_size <= 0:
+                errors.append(f"asset_manifest media is missing or empty: {asset_id}")
+
+        references: list[tuple[str, str]] = []
+        for cut in edit.get("cuts") or []:
+            references.append((f"cut {cut.get('id') or '<unknown>'}", str(cut.get("source") or "")))
+        for overlay in edit.get("overlays") or []:
+            references.append(("overlay", str(overlay.get("asset_id") or "")))
+        audio = edit.get("audio") or {}
+        for segment in (audio.get("narration") or {}).get("segments") or []:
+            references.append(("narration", str(segment.get("asset_id") or "")))
+        music = audio.get("music") or edit.get("music") or {}
+        if music.get("asset_id"):
+            references.append(("music", str(music["asset_id"])))
+        for sfx in audio.get("sfx") or []:
+            if sfx.get("asset_id"):
+                references.append(("sfx", str(sfx["asset_id"])))
+        subtitles = edit.get("subtitles") or {}
+        if subtitles.get("enabled") and subtitles.get("source"):
+            references.append(("subtitles", str(subtitles["source"])))
+
+        for label, reference in references:
+            if not reference:
+                errors.append(f"edit_decisions {label} has an empty asset reference")
+                continue
+            if reference in asset_paths:
+                if not asset_paths[reference].is_file():
+                    errors.append(f"edit_decisions {label} references missing manifest media: {reference}")
+                continue
+            resolved = self._resolve_artifact_reference(reference, edit_path)
+            try:
+                resolved.relative_to(self.project_root)
+            except ValueError:
+                errors.append(f"edit_decisions {label} references a path outside the project: {reference}")
+                continue
+            if not resolved.is_file() or resolved.stat().st_size <= 0:
+                errors.append(f"edit_decisions {label} references unknown asset ID or missing media: {reference}")
+
+        return list(dict.fromkeys(errors))
 
     def _schema_error(self, schema_path: Path, artifact_path: Path) -> str:
         python = self.openmontage_root / ".venv" / "bin" / "python"

@@ -682,6 +682,78 @@ class NativeArtifactValidationTests(unittest.TestCase):
                 evidence = validator.validate(declared, [{"path": str(output)}])
             self.assertTrue(evidence["valid"], evidence)
 
+    def test_cross_artifact_missing_asset_reference_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            artifacts = project / "artifacts"
+            assets = project / "assets"
+            artifacts.mkdir(parents=True)
+            assets.mkdir()
+            present = assets / "present.webm"
+            present.write_bytes(b"valid-media-placeholder")
+            manifest_path = artifacts / "asset_manifest.json"
+            manifest_path.write_text(json.dumps({
+                "version": "1.0",
+                "assets": [{"id": "present", "path": "assets/present.webm"}],
+            }), encoding="utf-8")
+            edit_path = artifacts / "edit_decisions.json"
+            edit_path.write_text(json.dumps({
+                "version": "1.0",
+                "render_runtime": "remotion",
+                "cuts": [
+                    {"id": "c1", "source": "present", "in_seconds": 0, "out_seconds": 1},
+                    {"id": "c2", "source": "deleted-background", "in_seconds": 1, "out_seconds": 2},
+                ],
+            }), encoding="utf-8")
+            validator = OpenMontageArtifactValidator(
+                project,
+                root / "OpenMontage",
+                project / "football_emotion" / "agent_result.json",
+            )
+
+            errors = validator._cross_artifact_errors({
+                "asset_manifest": manifest_path,
+                "edit_decisions": edit_path,
+            })
+
+            self.assertEqual(len(errors), 1)
+            self.assertIn("deleted-background", errors[0])
+
+    def test_cross_artifact_existing_manifest_reference_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            artifacts = project / "artifacts"
+            assets = project / "assets"
+            artifacts.mkdir(parents=True)
+            assets.mkdir()
+            present = assets / "present.webm"
+            present.write_bytes(b"valid-media-placeholder")
+            manifest_path = artifacts / "asset_manifest.json"
+            manifest_path.write_text(json.dumps({
+                "version": "1.0",
+                "assets": [{"id": "present", "path": "assets/present.webm"}],
+            }), encoding="utf-8")
+            edit_path = artifacts / "edit_decisions.json"
+            edit_path.write_text(json.dumps({
+                "version": "1.0",
+                "render_runtime": "remotion",
+                "cuts": [{"id": "c1", "source": "present", "in_seconds": 0, "out_seconds": 1}],
+            }), encoding="utf-8")
+            validator = OpenMontageArtifactValidator(
+                project,
+                root / "OpenMontage",
+                project / "football_emotion" / "agent_result.json",
+            )
+
+            errors = validator._cross_artifact_errors({
+                "asset_manifest": manifest_path,
+                "edit_decisions": edit_path,
+            })
+
+            self.assertEqual(errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()
