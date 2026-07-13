@@ -399,6 +399,9 @@ class ControllerTests(unittest.TestCase):
                 prompt = call["prompt"]
                 self.assertIn("Do not repeat repository", prompt)
                 self.assertIn('registry.get("video_compose").execute(inputs)', prompt)
+                self.assertIn("Never invoke `math_animate`", prompt)
+                self.assertIn("at most one corrected retry", prompt)
+                self.assertIn("the next production tool call must be `video_compose`", prompt)
                 if len(runner.calls) == 2:
                     self.assertIn("CONTINUATION SLICE: 1 of 2", prompt)
                     self.assertIn("not the final continuation slice", prompt)
@@ -434,6 +437,50 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(state.status, RunStatus.BLOCKED)
             self.assertEqual(state.blocker.code, "NATIVE_PIPELINE_INCOMPLETE")
             self.assertEqual(len(runner.calls), 3)
+
+    def test_resume_counts_only_bounded_continuation_slices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+            now = utc_now()
+            project = cfg.projects_dir / "football-resume"
+            football = project / "football_emotion"
+            football.mkdir(parents=True)
+            prompt_path = football / "hermes_job_prompt.md"
+            prompt_path.write_text("original prompt", encoding="utf-8")
+            state = RunState(
+                schema_version="1.0",
+                run_id="resume-count",
+                project_id="football-resume",
+                request="test",
+                status=RunStatus.AGENT_RUNNING,
+                created_at=now,
+                updated_at=now,
+                project_dir=str(project),
+                source_manifest_path=str(football / "source_manifest.json"),
+                agent_result_path=str(football / "acd_agent_result.json"),
+                prompt_path=str(prompt_path),
+                hermes_session_id="session_12345678",
+            )
+            runner = FakeRunner(
+                root,
+                lambda _: HermesSessionResult(
+                    success=True,
+                    session_id="session_12345678",
+                    returncode=0,
+                ),
+            )
+            controller = ThinRunController(cfg, runner=runner)
+            controller.store.save(state)
+
+            resumed = controller.resume(state.run_id)
+
+            self.assertEqual(resumed.status, RunStatus.FAILED)
+            self.assertEqual(resumed.error.code, "HERMES_RESULT_MISSING")
+            self.assertEqual(len(runner.calls), 2)
+            self.assertIn("CONTINUATION SLICE: 1 of 2", runner.calls[0]["prompt"])
+            self.assertIn("CONTINUATION SLICE: 2 of 2", runner.calls[1]["prompt"])
+            self.assertNotEqual(runner.calls[0]["prompt"], "original prompt")
 
     def test_legacy_flat_blocker_is_safely_normalized(self):
         envelope = AgentEnvelope.from_dict({

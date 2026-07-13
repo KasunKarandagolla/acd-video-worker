@@ -102,6 +102,12 @@ checkpoint without repeating research or capability discovery. This is session
 budgeting, not a worker creative stage machine, and it cannot weaken delivery
 validation.
 
+A resumed `AGENT_RUNNING` run counts its first checkpoint continuation as slice
+one; it does not receive an additional uncounted recovery call. Continuations
+also lock already-probed non-empty media against regeneration, permit only one
+corrected retry per missing asset, require immediate native asset checkpointing,
+and direct Hermes to compose as soon as the canonical prerequisites validate.
+
 The production prompt binds Hermes to the pinned OpenMontage execution surface:
 `tools.tool_registry.registry.get(name).execute(inputs)`. It also records the
 actual Football Emotion package root for `shared/...` references, forbids

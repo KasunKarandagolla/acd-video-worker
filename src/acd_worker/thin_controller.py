@@ -151,20 +151,18 @@ class ThinRunController:
 
             if state.status == RunStatus.AGENT_RUNNING:
                 result_path = Path(state.agent_result_path)
-                if not result_path.is_file() and not agent_invoked:
+                # A resumed session is continued by the bounded loop below. Do
+                # not run an extra uncounted recovery slice before that loop.
+                # A missing session ID is the only case that must replay the
+                # original job prompt to establish a supported Hermes session.
+                if not result_path.is_file() and not agent_invoked and not state.hermes_session_id:
                     prompt_path = Path(state.prompt_path)
                     if not prompt_path.is_file():
                         return self._fail(state, "PROMPT_MISSING", "Cannot resume because the persisted Hermes job prompt is missing.", "agent")
-                    resuming_session = bool(state.hermes_session_id)
                     execution = self.runner.run_session(
-                        prompt=(
-                            self._checkpoint_continuation_prompt(state, continuation=1, final=False)
-                            if resuming_session
-                            else prompt_path.read_text(encoding="utf-8")
-                        ),
+                        prompt=prompt_path.read_text(encoding="utf-8"),
                         session_id=state.hermes_session_id,
-                        expected_skills=[] if resuming_session else list(PRELOADED_SKILLS),
-                        max_turns=(self.config.hermes_recovery_max_turns if resuming_session else None),
+                        expected_skills=list(PRELOADED_SKILLS),
                     )
                     agent_invoked = True
                     if execution.session_id:
@@ -287,6 +285,10 @@ CONTINUATION SLICE: {continuation} of {self.config.hermes_max_continuations}
 
 Do not repeat repository, skill, pipeline, capability discovery, provider menus or web research already completed in this session. In one terminal call, list the existing checkpoints, canonical artifacts and renders under {state.project_dir}. Trust schema-valid completed artifacts and resume exactly the next incomplete native stage. Do not re-read unchanged guides or large source files.
 
+Treat every existing non-empty media file that ffprobe confirms has a valid video or audio stream as a completed asset. Never invoke `math_animate`, another generator or a downloader again for the same completed output path. A native asset tool gets at most one corrected retry for a genuinely missing or invalid output; after that, write an actionable blocker instead of looping. Immediately after successful asset generation, update and schema-validate `asset_manifest`, then write its native checkpoint before any other tool call. Raw asset files without the updated manifest/checkpoint are not stage completion.
+
+If `scene_plan`, `asset_manifest`, `edit_decisions` and every media path they reference are already schema-valid, the next production tool call must be `video_compose`; do not generate or redesign more assets. After compose, advance directly through native final review, worker candidate validation and the result envelope.
+
 {final_instruction}
 
 Continue authoring each missing artifact with the already-selected native stage director, validate it through `schemas.artifacts.validate_artifact`, and checkpoint it through `lib.checkpoint.write_checkpoint`. Once compose prerequisites exist, invoke the pinned registry exactly: `from tools.tool_registry import registry; registry.discover(); result = registry.get("video_compose").execute(inputs)`. `ToolResult` has `.success`, `.data`, `.artifacts`, and `.error`; it has no `.to_json()` and there is no importable `video_compose()` function.
@@ -314,7 +316,7 @@ Only create the mandatory result file for genuine delivered, blocked or failed c
             "api key", "credentials", "unauthorized", "authentication failed", " 401",
             "provider unavailable", "unknown provider",
             "provider not configured", "rate limit", "too many requests", "quota",
-            "resourceexhausted", "workers are busy", " 429", " 503",
+            "resourceexhausted", "workers are busy", "timed out", "timeout", " 429", " 503",
         )):
             return self._block(state, "HERMES_RUNTIME_UNAVAILABLE", execution.error or "Hermes runtime unavailable", "agent", {"returncode": execution.returncode})
         return self._fail(state, "HERMES_EXECUTION_FAILED", execution.error or "Hermes execution failed", "agent", {"returncode": execution.returncode})
