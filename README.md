@@ -106,3 +106,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
 A run becomes `DELIVERED` only after schema-valid native OpenMontage artifacts and final-review evidence exist separately under the project `artifacts/` directory, the output under `renders/` passes independent `ffprobe`, and sampled frames contain meaningful visual detail. Exit code zero, self-declared result JSON, fixtures, blank/solid-colour MP4s and ad-hoc fallback renders are insufficient.
+
+Hermes runs `scripts/validate_delivery_candidate.py` before ending a delivered
+claim. This exposes the same worker-owned artifact/media checks while the
+Hermes session can still correct its OpenMontage work. The production
+controller always repeats those checks independently and remains authoritative.

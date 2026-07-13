@@ -88,6 +88,9 @@ class PromptAndBoundaryTests(unittest.TestCase):
             self.assertIn(skill, prompt)
         self.assertIn("Never invent a command or rebuild OpenMontage stages", prompt)
         self.assertIn("A technically valid fallback MP4 is not delivery", prompt)
+        self.assertIn('"kind": "proposal_packet"', prompt)
+        self.assertNotIn('"kind": "brief or proposal_packet according to selected pipeline"', prompt)
+        self.assertIn("validate_delivery_candidate.py", prompt)
 
     def test_production_entrypoint_has_no_legacy_orchestrator_import(self):
         tree = ast.parse((ROOT / "scripts" / "acd_worker.py").read_text(encoding="utf-8"))
@@ -230,6 +233,20 @@ class OptionalInfrastructureTests(unittest.TestCase):
             self.assertNotIn(secret, config)
             self.assertIn("key_env: LLM_API_KEY", config)
 
+    def test_candidate_validator_rejects_missing_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = subprocess.run([
+                sys.executable,
+                str(ROOT / "scripts" / "validate_delivery_candidate.py"),
+                "--project-dir", str(root / "project"),
+                "--openmontage-root", str(root / "OpenMontage"),
+                "--result", str(root / "missing.json"),
+                "--run-id", "run-1",
+            ], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(json.loads(result.stdout)["valid"])
+
 
 class ControllerTests(unittest.TestCase):
     def test_dry_run_is_blocked_not_delivered(self):
@@ -291,6 +308,49 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(state.status, RunStatus.BLOCKED)
             self.assertEqual(state.blocker.code, "NATIVE_PIPELINE_INCOMPLETE")
             self.assertEqual(len(runner.calls), 2)
+
+    def test_artifact_failure_still_records_independent_media_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+
+            def behavior(call):
+                result_path = Path(next(
+                    line.split(":", 1)[1].strip()
+                    for line in call["prompt"].splitlines()
+                    if line.startswith("- mandatory final result file:")
+                ))
+                output = result_path.parent.parent / "renders" / "final.mp4"
+                output.parent.mkdir(parents=True)
+                output.write_bytes(b"candidate")
+                run_id = next(
+                    line.split(":", 1)[1].strip()
+                    for line in call["prompt"].splitlines()
+                    if line.startswith("RUN ID:")
+                )
+                result_path.write_text(json.dumps({
+                    "schema_version": "1.0",
+                    "run_id": run_id,
+                    "status": "delivered",
+                    "output_media": [{"path": str(output), "role": "primary"}],
+                    "openmontage_artifacts": [],
+                    "source_requests": [],
+                    "blocker": None,
+                    "error": None,
+                    "summary": "candidate",
+                }), encoding="utf-8")
+                return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
+
+            runner = FakeRunner(root, behavior)
+            with (
+                patch("acd_worker.thin_controller.OpenMontageArtifactValidator.validate", return_value={"valid": False, "errors": ["bad artifact"]}),
+                patch("acd_worker.thin_controller.FinalMediaValidator.validate", return_value={"valid": True, "path": "final.mp4"}),
+            ):
+                state = ThinRunController(cfg, runner=runner).start("test")
+            self.assertEqual(state.status, RunStatus.FAILED)
+            self.assertEqual(state.error.code, "OPENMONTAGE_ARTIFACT_VALIDATION_FAILED")
+            self.assertTrue(state.validation[0]["valid"])
+            self.assertIn("media_validation", state.error.evidence)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe required")
     def test_only_real_ffprobe_media_delivers(self):

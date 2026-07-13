@@ -24,6 +24,7 @@ def build_job_prompt(
     result_path: Path,
 ) -> str:
     acquisition_command = worker_root / "scripts" / "acquire_sources.py"
+    candidate_validation_command = worker_root / "scripts" / "validate_delivery_candidate.py"
     return f"""You are the AI Creative Director for one production run.
 
 RUN ID: {run_id}
@@ -70,6 +71,10 @@ DELIVERY CONTRACT
 - A delivered claim requires a real OpenMontage-rendered media file and successful native review. The ACD worker will independently ffprobe it; your claim is only a candidate until that validation passes.
 - A delivered claim must list separate, existing, schema-valid OpenMontage JSON artifacts under `{project_dir / 'artifacts'}`: the selected pipeline's planning artifact (`brief` or `proposal_packet`) plus `scene_plan`, `asset_manifest`, `edit_decisions`, `render_report`, and `final_review`. Include every other canonical artifact the selected pipeline produced. The `render_report` must reference the delivered file, and `final_review` must reference that same file, have `status: pass`, `recommended_action: present_to_user`, at least four sampled frames, and no promise/runtime downgrade. Never list this ACD result JSON as an OpenMontage artifact.
 - The worker independently samples output frames and rejects blank/solid-colour renders even when ffprobe succeeds.
+- Artifact `kind` values are exact OpenMontage schema filename stems, never explanatory text or alternatives. For the selected `cinematic` pipeline the planning artifact kind is exactly `proposal_packet`. Use `brief` only when the actually selected pipeline produces `brief`. Never write a value such as `brief or proposal_packet according to selected pipeline`.
+- Before ending with `status: delivered`, first write the candidate result JSON, then run this exact worker-owned final-candidate check:
+  python3 {candidate_validation_command} --project-dir {project_dir} --openmontage-root {openmontage_root} --result {result_path} --run-id {run_id}
+- A nonzero candidate-check exit means the delivery claim is not ready. Read its JSON evidence, return to the appropriate Hermes/OpenMontage work, validate every artifact with OpenMontage's native `schemas.artifacts.validate_artifact`, and rerun the candidate check. Do not hand-edit invented evidence merely to silence validation. If genuine correction cannot be completed within the bounded session, replace the candidate result with an honest blocked/failed envelope.
 - Before ending, write exactly one UTF-8 JSON object (no markdown) to {result_path}. Create its parent directory if necessary.
 - The object must follow this shape:
 {{
@@ -78,7 +83,7 @@ DELIVERY CONTRACT
   "status": "delivered|blocked|failed",
   "output_media": [{{"path": "absolute path inside {project_dir}", "role": "primary"}}],
   "openmontage_artifacts": [
-    {{"path": "absolute path under {project_dir / 'artifacts'}", "kind": "brief or proposal_packet according to selected pipeline"}},
+    {{"path": "{project_dir / 'artifacts' / 'proposal_packet.json'}", "kind": "proposal_packet"}},
     {{"path": "absolute path under {project_dir / 'artifacts'}", "kind": "scene_plan"}},
     {{"path": "absolute path under {project_dir / 'artifacts'}", "kind": "asset_manifest"}},
     {{"path": "absolute path under {project_dir / 'artifacts'}", "kind": "edit_decisions"}},

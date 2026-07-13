@@ -207,6 +207,8 @@ class ThinRunController:
                     state.openmontage_artifacts,
                     state.output_candidates,
                 )
+                validator = FinalMediaValidator(Path(state.project_dir))
+                state.validation = [validator.validate(candidate) for candidate in state.output_candidates]
                 self.store.save(state)
                 if not state.artifact_validation.get("valid"):
                     return self._fail(
@@ -214,11 +216,11 @@ class ThinRunController:
                         "OPENMONTAGE_ARTIFACT_VALIDATION_FAILED",
                         "Hermes claimed delivery without schema-valid native OpenMontage artifacts and review evidence.",
                         "validation",
-                        state.artifact_validation,
+                        {
+                            "artifact_validation": state.artifact_validation,
+                            "media_validation": state.validation,
+                        },
                     )
-                validator = FinalMediaValidator(Path(state.project_dir))
-                state.validation = [validator.validate(candidate) for candidate in state.output_candidates]
-                self.store.save(state)
                 valid = [evidence for evidence in state.validation if evidence.get("valid")]
                 if not valid:
                     if any(e.get("blocker_code") == "FFPROBE_UNAVAILABLE" for e in state.validation):
