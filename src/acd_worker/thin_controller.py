@@ -123,6 +123,7 @@ class ThinRunController:
                     project_dir=Path(state.project_dir).resolve(),
                     source_manifest_path=Path(state.source_manifest_path).resolve(),
                     result_path=Path(state.agent_result_path).resolve(),
+                    football_skill_root=(self.runner.profile_dir / "skills" / "football-emotion-video").resolve(),
                 )
                 Path(state.prompt_path).write_text(prompt, encoding="utf-8")
                 if self.config.dry_run:
@@ -263,9 +264,13 @@ class ThinRunController:
 
 MANDATORY RESULT PATH: {state.agent_result_path}
 
-Do not repeat repository, skill, pipeline, or capability discovery already completed in this session. Inspect the work and canonical artifacts already present under {state.project_dir}, then complete only the remaining native OpenMontage steps.
+Do not repeat repository, skill, pipeline, capability discovery or web research already completed in this session. In one terminal call, list the existing canonical artifacts and renders under {state.project_dir}. Do not re-read guides or large source files.
 
-You have a bounded continuation of {self.config.hermes_recovery_max_turns} tool-calling turns. Reserve enough turns to write the mandatory result contract at {state.agent_result_path}. If a genuine schema-valid native render and review cannot be completed within this continuation, stop production work and write an honest `blocked` or `failed` result contract with actionable evidence. Never substitute a direct FFmpeg/helper render, never invent artifacts, and never claim delivery without the required native evidence.
+This is protocol recovery, not another full production attempt. If `proposal_packet`, `scene_plan`, `asset_manifest`, and `edit_decisions` are not all already present and schema-valid, write an honest blocked result contract within the first three tool calls. Use blocker code `NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED`, identify the last valid artifact and missing native stages, and stop. Do not try to rebuild the remaining pipeline in this continuation.
+
+Only when all compose prerequisites already exist may you finish the native compose/review path. Invoke it through the pinned registry exactly: `from tools.tool_registry import registry; registry.discover(); result = registry.get("video_compose").execute(inputs)`. `ToolResult` has `.success`, `.data`, `.artifacts`, and `.error`; it has no `.to_json()` and there is no importable `video_compose()` function.
+
+You have a bounded continuation of {self.config.hermes_recovery_max_turns} tool-calling turns. Reserve enough turns to write the mandatory result contract at {state.agent_result_path}. If a genuine schema-valid native render and review cannot be completed, write the honest blocked or failed contract immediately. Never substitute a direct FFmpeg/helper render, invent artifacts, or claim delivery without native evidence.
 
 Before ending, write the result JSON file. Printing JSON without writing that file is not completion.
 """

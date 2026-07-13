@@ -47,15 +47,20 @@ blocked or failed state may reopen.
 - Pinned Hermes may exhaust its per-turn tool budget and make a final
   tools-disabled summary call. In that exact missing-result condition, the
   controller may resume the same session once with a smaller bounded budget.
-  The continuation must reuse existing work and may only complete Hermes-owned
-  native work or write an honest blocker/failure; it must not reconstruct
-  OpenMontage stages in Python.
+  The continuation must reuse existing work and may only complete compose and
+  review when schema-valid compose prerequisites already exist. Otherwise it
+  must promptly write an honest `NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED`
+  blocker; it must not retry discovery/research or reconstruct OpenMontage
+  stages in Python.
 
 ## OpenMontage contract
 
 - Never modify the pinned checkout.
 - Hermes must read the actual guide, context, selected manifest and director skills.
 - Capability discovery goes through the real ToolRegistry.
+- Native tool execution goes through the pinned singleton registry contract:
+  `registry.get(name).execute(inputs)`. Hermes must inspect `ToolResult`
+  attributes directly and must not guess module-level functions or serializers.
 - OpenMontage owns canonical artifacts, runtime choice/routing, rendering and native review.
 - If the pinned capability is unavailable, return an exact blocker; do not invent a CLI or implement the stages in the worker.
 - Respect native approval gates. A missing required approval maps to `APPROVAL_REQUIRED`.

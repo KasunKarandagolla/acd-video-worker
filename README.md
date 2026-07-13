@@ -98,6 +98,14 @@ tool-iteration ceiling). Configure the initial and recovery budgets with
 history and existing OpenMontage work; it may finish the native pipeline or
 write an honest blocker, but it cannot weaken delivery validation.
 
+The production prompt binds Hermes to the pinned OpenMontage execution surface:
+`tools.tool_registry.registry.get(name).execute(inputs)`. It also records the
+actual Football Emotion package root for `shared/...` references, forbids
+invented source media, bounds one-time research/discovery and reserves turns
+for compose/review/result writing. Protocol recovery is not a second full
+pipeline run: unless all compose prerequisites already exist, it must write an
+honest `NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED` blocker immediately.
+
 Prepare intake and the Hermes job prompt without executing production:
 
 ```bash

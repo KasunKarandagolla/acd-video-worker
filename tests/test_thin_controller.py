@@ -90,6 +90,7 @@ class PromptAndBoundaryTests(unittest.TestCase):
             worker_root=ROOT, openmontage_root=ROOT / "external" / "OpenMontage",
             project_dir=ROOT / "project", source_manifest_path=ROOT / "project" / "source.json",
             result_path=ROOT / "project" / "result.json",
+            football_skill_root=ROOT / "skills" / "football-emotion-video",
         )
         for skill in ("Football Emotion Skill System", "hermes-football-memory-learning", "video_compose"):
             self.assertIn(skill, prompt)
@@ -98,6 +99,11 @@ class PromptAndBoundaryTests(unittest.TestCase):
         self.assertIn('"kind": "proposal_packet"', prompt)
         self.assertNotIn('"kind": "brief or proposal_packet according to selected pipeline"', prompt)
         self.assertIn("validate_delivery_candidate.py", prompt)
+        self.assertIn('registry.get("video_compose")', prompt)
+        self.assertIn("ToolResult` exposes `.success`, `.data`, `.artifacts`, `.error`", prompt)
+        self.assertIn("do not invent, generate, analyze or probe `source.mp4`", prompt)
+        self.assertIn("shared/...` inside any Football Emotion skill resolve from", prompt)
+        self.assertNotIn("from tools.video.video_compose import video_compose", prompt)
 
     def test_production_entrypoint_has_no_legacy_orchestrator_import(self):
         tree = ast.parse((ROOT / "scripts" / "acd_worker.py").read_text(encoding="utf-8"))
@@ -366,6 +372,9 @@ class ControllerTests(unittest.TestCase):
                     return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
                 prompt = call["prompt"]
                 self.assertIn("Do not repeat repository", prompt)
+                self.assertIn("within the first three tool calls", prompt)
+                self.assertIn("NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED", prompt)
+                self.assertIn('registry.get("video_compose").execute(inputs)', prompt)
                 result_path = Path(next(
                     line.split(":", 1)[1].strip()
                     for line in prompt.splitlines()

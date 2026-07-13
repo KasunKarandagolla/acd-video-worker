@@ -22,6 +22,7 @@ def build_job_prompt(
     project_dir: Path,
     source_manifest_path: Path,
     result_path: Path,
+    football_skill_root: Path,
 ) -> str:
     acquisition_command = worker_root / "scripts" / "acquire_sources.py"
     candidate_validation_command = worker_root / "scripts" / "validate_delivery_candidate.py"
@@ -37,6 +38,7 @@ APPROVED PATHS:
 - pinned OpenMontage root: {openmontage_root}
 - OpenMontage project workspace: {project_dir}
 - worker-owned source manifest: {source_manifest_path}
+- complete Football Emotion Skill System root: {football_skill_root}
 - mandatory final result file: {result_path}
 - native artifact directory: {project_dir / 'artifacts'}
 - native render directory: {project_dir / 'renders'}
@@ -46,6 +48,24 @@ OWNERSHIP CONTRACT
 2. The complete installed Football Emotion Skill System is authoritative creative/editing doctrine. The preloaded bridge, social-edit-reasoning, and football-story-strategy skills are entry points, not the entire method. Discover and use every additional football skill relevant to this job, including visual/audio understanding, source discovery, timestamps, clip scoring, cutting/pacing, narration strategy, music/SFX/ducking, graphics, transitions, color, rights, retention, QA, and memory learning. Do not rewrite or reduce the skills.
 3. OpenMontage owns its native pipeline, manifests, director skills, ToolRegistry, artifact schemas, runtime routing, video_compose, rendering, checkpoints/Backlot artifacts, and native review. Read AGENT_GUIDE.md, PROJECT_CONTEXT.md, the selected pipeline manifest, and each native stage director skill before acting. Select by request: `documentary-montage` is the first candidate for retrieved/sourced football footage, while graphics-led, typography-led or trailer work should use the most appropriate production native pipeline such as `cinematic`. Use the real ToolRegistry and real native tools. Never invent a command or rebuild OpenMontage stages in the ACD worker.
 4. The ACD worker owns only sources, free-only/rights policy, run state, final validation and packaging. Do not add creative workflow code to it.
+
+EXECUTION DISCIPLINE
+- The three preloaded skill bodies are already active. Do not search for or re-read their `SKILL.md` files. Supporting paths written as `shared/...` inside any Football Emotion skill resolve from `{football_skill_root}`, not from the individual skill directory or OpenMontage cwd. Use the social-edit router to load only the references and additional skills relevant to this graphics-led request; do not inventory or read all 25 skills.
+- Read each OpenMontage guide, director skill, schema region or Football reference at most once. Use targeted search before a bounded read; never dump a whole large source file or repeat an unchanged read.
+- Run `registry.provider_menu_summary()` once. Do not print full capability/provider catalogs and do not repeatedly probe unavailable paid/video-generation providers.
+- The cinematic manifest requires research. Perform its minimum eight focused searches once, write and validate `research_brief` immediately, then stop web research. Do not repeat research during later stages or recovery.
+- Read the source manifest once. If `sources` is empty, no source video exists: do not invent, generate, analyze or probe `source.mp4`. Original geometry, typography and native Remotion scene components are the assets for this request.
+- Use the exact approved project workspace `{project_dir}`. Never substitute `{openmontage_root / 'projects' / project_id}` or create project outputs in the OpenMontage checkout.
+- Work execution-first: project/preflight plus research by tool turn 14; proposal/script/scene plan by turn 28; assets/edit by turn 40; invoke native compose by turn 48; reserve the remaining turns for native review, artifact validation, candidate validation and the mandatory result JSON. If a real delivery is no longer feasible, stop exploration and write an honest blocked envelope before the final five turns.
+
+PINNED OPENMONTAGE NATIVE CALL SURFACE
+- Initialize the external workspace with OpenMontage's own `lib.checkpoint.init_project(project_id, title=..., pipeline_type="cinematic", pipeline_dir=Path("{project_dir.parent}"))`. It is idempotent and creates the canonical directories/marker.
+- For every stage, author the artifact using the selected native director skill, validate it with `schemas.artifacts.validate_artifact(kind, artifact)`, save it under `{project_dir / 'artifacts'}`, and record the stage through `lib.checkpoint.write_checkpoint`. Pass `human_approved=True` only where the USER REQUEST explicitly pre-approves that checkpoint; otherwise write `awaiting_human` and return an approval blocker.
+- Discover and invoke tools through the singleton registry. The supported pattern is:
+  `from tools.tool_registry import registry; registry.discover(); tool = registry.get("video_compose"); info = tool.get_info(); result = tool.execute(inputs)`.
+- `video_compose` is the `VideoCompose` class registered under that name. There is no importable `video_compose()` or module-level `get_info()`. Do not guess imports. The same registry pattern applies to `video_analyzer`, `audio_mixer` and every other native tool.
+- A native `ToolResult` exposes `.success`, `.data`, `.artifacts`, `.error`, `.duration_seconds` and `.cost_usd`; it has no `.to_json()`. Inspect those attributes directly. For compose, use `operation: "render"` with the full schema-valid `edit_decisions`, `asset_manifest`, `proposal_packet`, `scene_plan`, approved output path and runtime. The returned `.data["final_review"]` is the native final-review artifact.
+- Inline Python that imports these native OpenMontage contracts is allowed. A worker-side stage runner, helper renderer or direct FFmpeg substitute is forbidden.
 
 SOURCE BOUNDARY
 - Read the source manifest. User-provided paths/URLs are leads, not automatic rights clearance.
