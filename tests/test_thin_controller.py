@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import shutil
 import subprocess
+import sqlite3
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,10 +17,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from acd_worker.hermes_runner import HermesRunner, HermesSessionResult
+from acd_worker.compatibility import (
+    CINEMATIC_PROPS_PATCH,
+    PINNED_OPENMONTAGE_COMMIT,
+    OpenMontageCompatibilityRegistry,
+    RuntimeTuple,
+)
 from acd_worker.agent_contract import AgentEnvelope
 from acd_worker.job_prompt import PRELOADED_SKILLS, build_job_prompt
 from acd_worker.media_validation import FinalMediaValidator, OpenMontageArtifactValidator, REQUIRED_OPENMONTAGE_ARTIFACTS
 from acd_worker.notifications import DiscordNotifier
+from acd_worker.native_bridge import NativeExecutionBridge, NativeExecutionError, NativeExecutionRequest
 from acd_worker.run_state import RunState, RunStateStore, RunStatus, utc_now
 from acd_worker.source_service import SourceService, sanitize_reference
 from acd_worker.thin_controller import ThinControllerConfig, ThinRunController
@@ -83,6 +93,36 @@ class RunStateTests(unittest.TestCase):
             store.save(state)
             self.assertEqual(store.load("resume_1").status, RunStatus.INTAKE)
 
+    def test_store_lease_prevents_concurrent_run_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RunStateStore(Path(tmp))
+            with store.lease("run-1"):
+                with self.assertRaisesRegex(RuntimeError, "already owned"):
+                    with store.lease("run-1"):
+                        self.fail("second lease must not be acquired")
+
+
+class CompatibilityTests(unittest.TestCase):
+    def test_cinematic_remotion_requires_audited_patch(self):
+        registry = OpenMontageCompatibilityRegistry(ROOT / "external" / "OpenMontage")
+        runtime = RuntimeTuple("cinematic", "templated", "cinematic-trailer", "remotion")
+        with (
+            patch.object(registry, "_commit", return_value=PINNED_OPENMONTAGE_COMMIT),
+            patch.object(registry, "_missing_runtime_capabilities", return_value=()),
+            patch.object(registry, "_patches", return_value=set()),
+        ):
+            rejected = registry.evaluate(runtime)
+        self.assertFalse(rejected.supported)
+        self.assertEqual(rejected.required_patch, CINEMATIC_PROPS_PATCH)
+
+        with (
+            patch.object(registry, "_commit", return_value=PINNED_OPENMONTAGE_COMMIT),
+            patch.object(registry, "_missing_runtime_capabilities", return_value=()),
+            patch.object(registry, "_patches", return_value={CINEMATIC_PROPS_PATCH}),
+        ):
+            accepted = registry.evaluate(runtime)
+        self.assertTrue(accepted.supported)
+
 
 class PromptAndBoundaryTests(unittest.TestCase):
     def test_prompt_delegates_creative_and_native_pipeline(self):
@@ -99,8 +139,9 @@ class PromptAndBoundaryTests(unittest.TestCase):
         self.assertIn("A technically valid fallback MP4 is not delivery", prompt)
         self.assertIn('"kind": "proposal_packet"', prompt)
         self.assertNotIn('"kind": "brief or proposal_packet according to selected pipeline"', prompt)
-        self.assertIn("validate_delivery_candidate.py", prompt)
-        self.assertIn('registry.get("video_compose")', prompt)
+        self.assertIn('"status": "ready_for_execution|blocked|failed"', prompt)
+        self.assertIn('"execution_request":', prompt)
+        self.assertIn("Do not call `video_compose` yourself", prompt)
         self.assertIn("ToolResult` exposes `.success`, `.data`, `.artifacts`, `.error`", prompt)
         self.assertIn("do not invent, generate, analyze or probe `source.mp4`", prompt)
         self.assertIn("shared/...` inside any Football Emotion skill resolve from", prompt)
@@ -307,6 +348,26 @@ class OptionalInfrastructureTests(unittest.TestCase):
             self.assertFalse((destination / ".env").exists())
             self.assertFalse((destination / "link").exists())
 
+    def test_persistence_uses_sqlite_backup_for_live_database(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from kaggle_persistence import copy_tree
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "destination"
+            source.mkdir()
+            database = source / "state.db"
+            connection = sqlite3.connect(database)
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("CREATE TABLE events(value TEXT)")
+            connection.execute("INSERT INTO events VALUES ('durable')")
+            connection.commit()
+            copy_tree(source, destination)
+            with sqlite3.connect(destination / "state.db") as snapshot:
+                self.assertEqual(snapshot.execute("SELECT value FROM events").fetchone()[0], "durable")
+            connection.close()
+
     def test_profile_configuration_never_writes_api_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -365,6 +426,58 @@ class OptionalInfrastructureTests(unittest.TestCase):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_ready_handoff_executes_bridge_before_delivery_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+
+            def behavior(call):
+                prompt = call["prompt"]
+                result_path = Path(next(
+                    line.split(":", 1)[1].strip()
+                    for line in prompt.splitlines()
+                    if line.startswith("- mandatory final result file:")
+                ))
+                run_id = next(line.split(":", 1)[1].strip() for line in prompt.splitlines() if line.startswith("RUN ID:"))
+                result_path.write_text(json.dumps({
+                    "schema_version": "1.0",
+                    "run_id": run_id,
+                    "status": "ready_for_execution",
+                    "output_media": [],
+                    "openmontage_artifacts": [],
+                    "execution_request": {"pipeline": "cinematic", "artifacts": {}, "output_path": "unused"},
+                    "source_requests": [],
+                    "blocker": None,
+                    "error": None,
+                    "summary": "creative artifacts ready",
+                }), encoding="utf-8")
+                return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
+
+            class FakeBridge:
+                def prepare(self, request):
+                    return request, {"runtime": {"renderer_family": "cinematic-trailer"}}, "fingerprint-1"
+
+                def execute(self, request, heartbeat=None):
+                    if heartbeat:
+                        heartbeat({"event": "native_test"})
+                    return SimpleNamespace(
+                        output_media=[{"path": str(root / "render.mp4"), "sha256": "hash", "approved_silence": True}],
+                        openmontage_artifacts=[{"kind": "render_report", "path": str(root / "render_report.json")}],
+                        compatibility={"supported": True},
+                        native_result={"status": "delivered"},
+                    )
+
+            controller = ThinRunController(cfg, runner=FakeRunner(root, behavior), native_bridge=FakeBridge())
+            with (
+                patch("acd_worker.thin_controller.OpenMontageArtifactValidator.validate", return_value={"valid": True}),
+                patch("acd_worker.thin_controller.FinalMediaValidator.validate", return_value={"valid": True, "path": str(root / "render.mp4")}),
+            ):
+                state = controller.start("test")
+            self.assertEqual(state.status, RunStatus.DELIVERED)
+            self.assertEqual(state.native_execution["status"], "published")
+            self.assertEqual(state.native_execution["fingerprint"], "fingerprint-1")
+            self.assertEqual(state.heartbeat["event"], "native_test")
+
     def test_dry_run_is_blocked_not_delivered(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -374,19 +487,18 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(state.status, RunStatus.BLOCKED)
             self.assertEqual(state.blocker.code, "DRY_RUN_ONLY")
 
-    def test_zero_exit_without_result_file_fails_protocol(self):
+    def test_zero_exit_without_result_file_reports_incomplete_native_handoff(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cfg = config_for(root)
             runner = FakeRunner(root, lambda _: HermesSessionResult(success=True, session_id="session_12345678", returncode=0))
             state = ThinRunController(cfg, runner=runner).start("test")
-            self.assertEqual(state.status, RunStatus.FAILED)
-            self.assertEqual(state.error.code, "HERMES_RESULT_MISSING")
-            self.assertEqual(len(runner.calls), 3)
+            self.assertEqual(state.status, RunStatus.BLOCKED)
+            self.assertEqual(state.blocker.code, "CREATIVE_HANDOFF_INCOMPLETE")
+            self.assertEqual(len(runner.calls), 2)
             self.assertEqual(runner.calls[1]["session_id"], "session_12345678")
             self.assertEqual(runner.calls[1]["max_turns"], 60)
-            self.assertIn("CONTINUATION SLICE: 1 of 2", runner.calls[1]["prompt"])
-            self.assertIn("CONTINUATION SLICE: 2 of 2", runner.calls[2]["prompt"])
+            self.assertIn("CONTINUATION SLICE: 1 of 1", runner.calls[1]["prompt"])
 
     def test_missing_result_gets_bounded_checkpoint_continuations(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -398,16 +510,11 @@ class ControllerTests(unittest.TestCase):
                     return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
                 prompt = call["prompt"]
                 self.assertIn("Do not repeat repository", prompt)
-                self.assertIn('registry.get("video_compose").execute(inputs)', prompt)
+                self.assertIn("status: ready_for_execution", prompt)
                 self.assertIn("Never invoke `math_animate`", prompt)
                 self.assertIn("at most one corrected retry", prompt)
-                self.assertIn("the next production tool call must be `video_compose`", prompt)
-                if len(runner.calls) == 2:
-                    self.assertIn("CONTINUATION SLICE: 1 of 2", prompt)
-                    self.assertIn("not the final continuation slice", prompt)
-                    self.assertIn("Do not emit NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED", prompt)
-                    return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
-                self.assertIn("CONTINUATION SLICE: 2 of 2", prompt)
+                self.assertIn("do not generate, redesign or compose anything", prompt)
+                self.assertIn("CONTINUATION SLICE: 1 of 1", prompt)
                 self.assertIn("final continuation slice", prompt)
                 result_path = Path(next(
                     line.split(":", 1)[1].strip()
@@ -436,7 +543,7 @@ class ControllerTests(unittest.TestCase):
             state = ThinRunController(cfg, runner=runner).start("test")
             self.assertEqual(state.status, RunStatus.BLOCKED)
             self.assertEqual(state.blocker.code, "NATIVE_PIPELINE_INCOMPLETE")
-            self.assertEqual(len(runner.calls), 3)
+            self.assertEqual(len(runner.calls), 2)
 
     def test_resume_counts_only_bounded_continuation_slices(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -475,12 +582,202 @@ class ControllerTests(unittest.TestCase):
 
             resumed = controller.resume(state.run_id)
 
-            self.assertEqual(resumed.status, RunStatus.FAILED)
-            self.assertEqual(resumed.error.code, "HERMES_RESULT_MISSING")
-            self.assertEqual(len(runner.calls), 2)
-            self.assertIn("CONTINUATION SLICE: 1 of 2", runner.calls[0]["prompt"])
-            self.assertIn("CONTINUATION SLICE: 2 of 2", runner.calls[1]["prompt"])
+            self.assertEqual(resumed.status, RunStatus.BLOCKED)
+            self.assertEqual(resumed.blocker.code, "CREATIVE_HANDOFF_INCOMPLETE")
+            self.assertEqual(len(runner.calls), 1)
+            self.assertIn("CONTINUATION SLICE: 1 of 1", runner.calls[0]["prompt"])
             self.assertNotEqual(runner.calls[0]["prompt"], "original prompt")
+
+    def test_controller_reconciles_complete_native_artifacts_without_agent_envelope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+
+            def behavior(call):
+                if "PROJECT ID:" in call["prompt"]:
+                    project = cfg.projects_dir / next(
+                        line.split(":", 1)[1].strip()
+                        for line in call["prompt"].splitlines()
+                        if line.startswith("PROJECT ID:")
+                    )
+                    artifacts = project / "artifacts"
+                    artifacts.mkdir(parents=True, exist_ok=True)
+                    (project / "project.json").write_text(json.dumps({"pipeline_type": "cinematic"}), encoding="utf-8")
+                    for kind in ("proposal_packet", "scene_plan", "asset_manifest", "edit_decisions"):
+                        payload = {"version": "1.0"}
+                        if kind == "edit_decisions":
+                            payload["metadata"] = {"output_profile": "generic_720p"}
+                        (artifacts / f"{kind}.json").write_text(json.dumps(payload), encoding="utf-8")
+                return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
+
+            class FakeBridge:
+                def prepare(self, request):
+                    self.request = request
+                    return SimpleNamespace(approved_silence=False), {"runtime": {}}, "fingerprint-reconciled"
+
+                def execute(self, request, heartbeat=None):
+                    return SimpleNamespace(
+                        output_media=[{"path": str(root / "render.mp4"), "sha256": "hash", "approved_silence": False}],
+                        openmontage_artifacts=[{"kind": "render_report", "path": str(root / "render_report.json")}],
+                        compatibility={"supported": True},
+                        native_result={"status": "delivered"},
+                    )
+
+            bridge = FakeBridge()
+            controller = ThinRunController(cfg, runner=FakeRunner(root, behavior), native_bridge=bridge)
+            with (
+                patch("acd_worker.thin_controller.OpenMontageArtifactValidator.validate", return_value={"valid": True}),
+                patch("acd_worker.thin_controller.FinalMediaValidator.validate", return_value={"valid": True}),
+            ):
+                state = controller.start("test")
+            self.assertEqual(state.status, RunStatus.DELIVERED)
+            self.assertEqual(bridge.request["pipeline"], "cinematic")
+            self.assertEqual(bridge.request["output_profile"], "generic_720p")
+            self.assertEqual(set(bridge.request["artifacts"]), {"proposal_packet", "scene_plan", "asset_manifest", "edit_decisions"})
+
+    def test_ready_handoff_rejects_artifact_declaration_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+
+            def behavior(call):
+                prompt = call["prompt"]
+                result_path = Path(next(line.split(":", 1)[1].strip() for line in prompt.splitlines() if line.startswith("- mandatory final result file:")))
+                run_id = next(line.split(":", 1)[1].strip() for line in prompt.splitlines() if line.startswith("RUN ID:"))
+                result_path.write_text(json.dumps({
+                    "schema_version": "1.0", "run_id": run_id, "status": "ready_for_execution",
+                    "output_media": [], "openmontage_artifacts": [],
+                    "execution_request": {
+                        "pipeline": "cinematic",
+                        "artifacts": {"scene_plan": str(root / "scene_plan.json")},
+                        "output_path": str(root / "renders" / "final.mp4"),
+                    },
+                }), encoding="utf-8")
+                return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
+
+            state = ThinRunController(cfg, runner=FakeRunner(root, behavior)).start("test")
+            self.assertEqual(state.status, RunStatus.FAILED)
+            self.assertEqual(state.error.code, "HANDOFF_ARTIFACT_MISMATCH")
+
+
+class NativeBridgeContractTests(unittest.TestCase):
+    def test_native_fingerprint_binds_media_bytes_not_only_manifest_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            artifacts = project / "artifacts"
+            media = project / "assets" / "clip.mp4"
+            artifacts.mkdir(parents=True)
+            media.parent.mkdir(parents=True)
+            media.write_bytes(b"first-media-version")
+            manifest = artifacts / "asset_manifest.json"
+            edit = artifacts / "edit_decisions.json"
+            manifest.write_text(json.dumps({"assets": [{"id": "clip", "path": str(media)}]}), encoding="utf-8")
+            edit.write_text(json.dumps({"cuts": [{"id": "c1", "source": "clip"}]}), encoding="utf-8")
+            planning = artifacts / "proposal_packet.json"
+            scene_plan = artifacts / "scene_plan.json"
+            planning.write_text("{}", encoding="utf-8")
+            scene_plan.write_text("{}", encoding="utf-8")
+            request = NativeExecutionRequest.from_dict({
+                "pipeline": "cinematic",
+                "artifacts": {
+                    "proposal_packet": str(planning),
+                    "scene_plan": str(scene_plan),
+                    "asset_manifest": str(manifest),
+                    "edit_decisions": str(edit),
+                },
+                "output_path": str(project / "renders" / "final.mp4"),
+            })
+            paths = {
+                "proposal_packet": planning,
+                "scene_plan": scene_plan,
+                "asset_manifest": manifest,
+                "edit_decisions": edit,
+            }
+            bridge = NativeExecutionBridge(ROOT, ROOT / "external" / "OpenMontage", project)
+            first = bridge._fingerprint(request, paths)
+            media.write_bytes(b"second-media-version")
+            second = bridge._fingerprint(request, paths)
+            self.assertNotEqual(first, second)
+
+    def test_checkpoint_approval_cannot_be_claimed_by_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bridge = NativeExecutionBridge(ROOT, ROOT / "external" / "OpenMontage", root / "project")
+            request = NativeExecutionRequest.from_dict({
+                "pipeline": "cinematic",
+                "artifacts": {
+                    "proposal_packet": str(root / "project/artifacts/proposal_packet.json"),
+                    "scene_plan": str(root / "project/artifacts/scene_plan.json"),
+                    "asset_manifest": str(root / "project/artifacts/asset_manifest.json"),
+                    "edit_decisions": str(root / "project/artifacts/edit_decisions.json"),
+                },
+                "output_path": str(root / "project/renders/final.mp4"),
+                "approved_checkpoints": [],
+            })
+            evidence = [{
+                "stage": "proposal",
+                "path": str(root / "project/checkpoint_proposal.json"),
+                "status": "completed",
+                "manifest_requires_approval": True,
+                "human_approval_required": True,
+                "human_approved": True,
+            }]
+            completed = SimpleNamespace(returncode=0, stdout=json.dumps(evidence), stderr="")
+            with patch("acd_worker.native_bridge.subprocess.run", return_value=completed):
+                with self.assertRaises(NativeExecutionError) as raised:
+                    bridge._validate_checkpoint_contract(request, {
+                        "proposal_packet": root / "project/artifacts/proposal_packet.json",
+                    })
+            self.assertEqual(raised.exception.code, "UNAPPROVED_CHECKPOINT")
+
+    def test_checkpoint_manifest_gate_cannot_be_suppressed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bridge = NativeExecutionBridge(ROOT, ROOT / "external" / "OpenMontage", root / "project")
+            request = NativeExecutionRequest.from_dict({
+                "pipeline": "cinematic",
+                "artifacts": {
+                    "proposal_packet": "proposal_packet.json",
+                    "scene_plan": "scene_plan.json",
+                    "asset_manifest": "asset_manifest.json",
+                    "edit_decisions": "edit_decisions.json",
+                },
+                "output_path": str(root / "project/renders/final.mp4"),
+                "approved_checkpoints": ["proposal"],
+            })
+            evidence = [{
+                "stage": "proposal", "status": "completed",
+                "manifest_requires_approval": True,
+                "human_approval_required": False,
+                "human_approved": True,
+            }]
+            completed = SimpleNamespace(returncode=0, stdout=json.dumps(evidence), stderr="")
+            with patch("acd_worker.native_bridge.subprocess.run", return_value=completed):
+                with self.assertRaises(NativeExecutionError) as raised:
+                    bridge._validate_checkpoint_contract(request, {"proposal_packet": Path("proposal_packet.json")})
+            self.assertEqual(raised.exception.code, "NATIVE_CHECKPOINT_INVALID")
+
+    def test_silent_edit_requires_typed_plan_before_runtime_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            artifacts = project / "artifacts"
+            artifacts.mkdir(parents=True)
+            for kind in ("proposal_packet", "scene_plan", "asset_manifest"):
+                (artifacts / f"{kind}.json").write_text(json.dumps({"version": "1.0"}), encoding="utf-8")
+            edit = artifacts / "edit_decisions.json"
+            edit.write_text(json.dumps({"version": "1.0", "cuts": [], "render_runtime": "remotion"}), encoding="utf-8")
+            request = {
+                "pipeline": "cinematic",
+                "artifacts": {kind: str(artifacts / f"{kind}.json") for kind in ("proposal_packet", "scene_plan", "asset_manifest", "edit_decisions")},
+                "output_path": str(project / "renders" / "final.mp4"),
+                "approved_silence": False,
+            }
+            bridge = NativeExecutionBridge(ROOT, ROOT / "external" / "OpenMontage", project)
+            with self.assertRaises(NativeExecutionError) as raised:
+                bridge.prepare(request)
+            self.assertEqual(raised.exception.code, "UNAPPROVED_SILENCE_PLAN")
 
     def test_legacy_flat_blocker_is_safely_normalized(self):
         envelope = AgentEnvelope.from_dict({
@@ -508,7 +805,7 @@ class ControllerTests(unittest.TestCase):
                 "status": "delivered",
             }, "run-1")
 
-    def test_artifact_failure_still_records_independent_media_diagnostics(self):
+    def test_legacy_agent_delivery_cannot_bypass_native_bridge(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cfg = config_for(root)
@@ -541,47 +838,27 @@ class ControllerTests(unittest.TestCase):
                 return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
 
             runner = FakeRunner(root, behavior)
-            with (
-                patch("acd_worker.thin_controller.OpenMontageArtifactValidator.validate", return_value={"valid": False, "errors": ["bad artifact"]}),
-                patch("acd_worker.thin_controller.FinalMediaValidator.validate", return_value={"valid": True, "path": "final.mp4"}),
-            ):
-                state = ThinRunController(cfg, runner=runner).start("test")
+            state = ThinRunController(cfg, runner=runner).start("test")
             self.assertEqual(state.status, RunStatus.FAILED)
-            self.assertEqual(state.error.code, "OPENMONTAGE_ARTIFACT_VALIDATION_FAILED")
-            self.assertTrue(state.validation[0]["valid"])
-            self.assertIn("media_validation", state.error.evidence)
+            self.assertEqual(state.error.code, "LEGACY_DELIVERY_UNSUPPORTED")
+            self.assertEqual(state.validation, [])
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe required")
-    def test_only_real_ffprobe_media_delivers(self):
+    def test_real_ffprobe_media_passes_independent_validator(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            cfg = config_for(root)
-
-            def behavior(call):
-                match = next(line for line in call["prompt"].splitlines() if line.startswith("- mandatory final result file:"))
-                result_path = Path(match.split(":", 1)[1].strip())
-                project_dir = result_path.parent.parent
-                output = project_dir / "renders" / "final.mp4"
-                output.parent.mkdir(parents=True, exist_ok=True)
-                subprocess.run([
-                    "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=0.5",
-                    "-vf", "drawbox=x=20:y=20:w=120:h=80:color=white:t=fill",
-                    "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(output),
-                ], capture_output=True, check=True)
-                run_id = next(line.split(":", 1)[1].strip() for line in call["prompt"].splitlines() if line.startswith("RUN ID:"))
-                result_path.write_text(json.dumps({
-                    "schema_version": "1.0", "run_id": run_id, "status": "delivered",
-                    "output_media": [{"path": str(output), "role": "primary"}],
-                    "openmontage_artifacts": [], "source_requests": [], "blocker": None,
-                    "error": None, "summary": "real technical canary",
-                }), encoding="utf-8")
-                return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
-
-            runner = FakeRunner(root, behavior)
-            with patch("acd_worker.thin_controller.OpenMontageArtifactValidator.validate", return_value={"valid": True}):
-                state = ThinRunController(cfg, runner=runner).start("test")
-            self.assertEqual(state.status, RunStatus.DELIVERED)
-            self.assertTrue(state.validation[0]["valid"])
+            output = root / "renders" / "final.mp4"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run([
+                "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=1",
+                "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(output),
+            ], capture_output=True, check=True)
+            evidence = FinalMediaValidator(root).validate({
+                "path": str(output),
+                "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+                "approved_silence": True,
+            })
+            self.assertTrue(evidence["valid"])
 
     def test_fake_mp4_bytes_cannot_deliver(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -602,7 +879,11 @@ class ControllerTests(unittest.TestCase):
                 "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=darkblue:s=320x180:d=1",
                 "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(output),
             ], capture_output=True, check=True)
-            evidence = FinalMediaValidator(project).validate({"path": str(output)})
+            evidence = FinalMediaValidator(project).validate({
+                "path": str(output),
+                "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+                "approved_silence": True,
+            })
             self.assertFalse(evidence["valid"])
             self.assertTrue(evidence["visually_blank"])
 
@@ -634,6 +915,7 @@ class NativeArtifactValidationTests(unittest.TestCase):
             schemas.mkdir(parents=True)
             output = renders / "final.mp4"
             output.write_bytes(b"media is validated separately")
+            output_hash = hashlib.sha256(output.read_bytes()).hexdigest()
             result_path = project / "football_emotion" / "agent_result.json"
 
             payloads = {kind: {"version": "1.0"} for kind in REQUIRED_OPENMONTAGE_ARTIFACTS}
@@ -643,6 +925,7 @@ class NativeArtifactValidationTests(unittest.TestCase):
                 "outputs": [{"path": str(output)}],
                 "final_review_ref": str(artifacts_dir / "final_review.json"),
                 "render_grammar": "documentary-montage",
+                "metadata": {"output_sha256": output_hash},
             }
             payloads["edit_decisions"] = {
                 "version": "1.0",
@@ -669,6 +952,7 @@ class NativeArtifactValidationTests(unittest.TestCase):
                         "silent_downgrade_detected": False,
                     },
                 },
+                "metadata": {"output_sha256": output_hash},
             }
             declared = []
             for kind, payload in payloads.items():
@@ -679,7 +963,7 @@ class NativeArtifactValidationTests(unittest.TestCase):
 
             validator = OpenMontageArtifactValidator(project, root / "OpenMontage", result_path)
             with patch.object(validator, "_schema_error", return_value=""):
-                evidence = validator.validate(declared, [{"path": str(output)}])
+                evidence = validator.validate(declared, [{"path": str(output), "sha256": output_hash}])
             self.assertTrue(evidence["valid"], evidence)
 
     def test_cross_artifact_missing_asset_reference_is_rejected(self):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -73,6 +74,11 @@ class RunState:
     blocker: Optional[RunProblem] = None
     error: Optional[RunProblem] = None
     history: list[dict[str, str]] = field(default_factory=list)
+    continuations_used: int = 0
+    heartbeat_at: Optional[str] = None
+    heartbeat: dict[str, Any] = field(default_factory=dict)
+    native_execution: dict[str, Any] = field(default_factory=dict)
+    approval_policy: dict[str, Any] = field(default_factory=dict)
 
     def transition(self, target: RunStatus) -> None:
         if target == self.status:
@@ -129,3 +135,34 @@ class RunStateStore:
 
     def load(self, run_id: str) -> RunState:
         return RunState.from_dict(json.loads(self.path_for(run_id).read_text(encoding="utf-8")))
+
+    @contextmanager
+    def lease(self, run_id: str):
+        """Hold a process-scoped exclusive lease without stale lock files.
+
+        Kaggle/Linux releases ``flock`` automatically when a worker dies, so
+        restart safety does not depend on guessing whether a timestamp is stale.
+        """
+        import fcntl
+
+        lease_dir = self.root / ".leases"
+        lease_dir.mkdir(parents=True, exist_ok=True)
+        path = lease_dir / f"{self.path_for(run_id).stem}.lock"
+        handle = path.open("a+", encoding="utf-8")
+        try:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError(f"Run {run_id} is already owned by another worker") from exc
+            handle.seek(0)
+            handle.truncate()
+            json.dump({"run_id": run_id, "pid": os.getpid(), "acquired_at": utc_now()}, handle)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            yield
+        finally:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()

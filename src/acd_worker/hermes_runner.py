@@ -10,6 +10,9 @@ import re
 import shutil
 import subprocess
 import logging
+import json
+import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +50,7 @@ class HermesRunner:
         max_turns: int = 60,
         headless_auto_approve: bool = True,
         model_override: Optional[str] = None,
+        event_adapter: Optional[Path] = None,
     ):
         self.hermes_home = Path(hermes_home).expanduser().resolve()
         self.profile = profile
@@ -57,6 +61,7 @@ class HermesRunner:
         self.headless_auto_approve = headless_auto_approve
         self.model_override = model_override.strip() if model_override else None
         self.profile_dir = self.hermes_home / "profiles" / profile
+        self.event_adapter = Path(event_adapter).resolve() if event_adapter else Path(__file__).resolve().parents[2] / "scripts" / "hermes_event_adapter.py"
 
         # Resolve hermes CLI - use provided path, or find in PATH, or use bundled
         if hermes_cli:
@@ -100,6 +105,7 @@ class HermesRunner:
         parent_session_id: Optional[str] = None,
         expected_skills: List[str] = None,
         max_turns: Optional[int] = None,
+        progress_callback=None,
     ) -> HermesSessionResult:
         """
         Execute a Hermes chat session with the given prompt.
@@ -168,15 +174,25 @@ class HermesRunner:
             logger.info("Preloading skills: %s", ", ".join(expected_skills))
 
         try:
-            result = subprocess.run(
-                cmd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                cwd=str(self.cwd) if self.cwd else None,
-                check=False,
-            )
+            adapter_python = self._adapter_python()
+            if adapter_python and self.event_adapter.is_file():
+                result, event_file = self._run_with_events(
+                    cmd,
+                    adapter_python,
+                    env=env,
+                    progress_callback=progress_callback,
+                )
+            else:
+                result = subprocess.run(
+                    cmd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    cwd=str(self.cwd) if self.cwd else None,
+                    check=False,
+                )
+                event_file = None
 
             session_id = self._extract_session_id(result.stderr) or self._extract_session_id(result.stdout)
             error = self._redact(result.stderr) if result.returncode != 0 else None
@@ -194,6 +210,8 @@ class HermesRunner:
 
             # Try to extract session ID from output
             session_result.session_id = session_id
+            if event_file:
+                session_result.metadata["event_file"] = str(event_file)
 
             # Parse artifacts from output
             session_result.artifacts = self._extract_artifacts(result.stdout)
@@ -221,6 +239,68 @@ class HermesRunner:
                 error=f"Hermes execution failed: {e}",
                 returncode=1,
             )
+
+    def _adapter_python(self) -> Optional[Path]:
+        """Return the Python from the installed Hermes venv, never worker Python."""
+        try:
+            resolved = Path(os.path.realpath(self.hermes_cli))
+        except (OSError, TypeError):
+            return None
+        candidate = resolved.parent / "python"
+        return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
+
+    def _run_with_events(self, command: list[str], python: Path, *, env: dict[str, str], progress_callback=None):
+        event_dir = self.profile_dir / "logs" / "acd-events"
+        event_dir.mkdir(parents=True, exist_ok=True)
+        token = uuid.uuid4().hex
+        event_file = event_dir / f"{token}.jsonl"
+        stdout_path = event_dir / f"{token}.stdout"
+        stderr_path = event_dir / f"{token}.stderr"
+        adapter_command = [str(python), str(self.event_adapter), "--event-file", str(event_file), *command[1:]]
+        started = time.monotonic()
+        offset = 0
+        last_alive = 0.0
+        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+            process = subprocess.Popen(
+                adapter_command,
+                env=env,
+                cwd=str(self.cwd) if self.cwd else None,
+                stdout=stdout,
+                stderr=stderr,
+            )
+            while process.poll() is None:
+                elapsed = time.monotonic() - started
+                if elapsed > self.timeout:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    raise subprocess.TimeoutExpired(adapter_command, self.timeout)
+                offset = self._emit_new_events(event_file, offset, progress_callback)
+                if progress_callback and elapsed - last_alive >= 15:
+                    progress_callback({"event": "hermes_process_alive", "elapsed_seconds": round(elapsed, 1)})
+                    last_alive = elapsed
+                time.sleep(1.0)
+        self._emit_new_events(event_file, offset, progress_callback)
+        stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
+        stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+        return subprocess.CompletedProcess(adapter_command, process.returncode, stdout_text, stderr_text), event_file
+
+    @staticmethod
+    def _emit_new_events(path: Path, offset: int, callback) -> int:
+        if not path.is_file():
+            return offset
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(offset)
+            for line in handle:
+                if not callback:
+                    continue
+                try:
+                    callback(json.loads(line))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+            return handle.tell()
 
     @staticmethod
     def _redact(value: str) -> str:

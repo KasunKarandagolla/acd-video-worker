@@ -31,7 +31,13 @@ else
     ok "Hermes profile created"
 fi
 
-python3 "$SCRIPT_DIR/configure_hermes_profile.py" || true
+set +e
+python3 "$SCRIPT_DIR/configure_hermes_profile.py"
+PROFILE_STATUS=$?
+set -e
+if [[ "$PROFILE_STATUS" -ne 0 && "$PROFILE_STATUS" -ne 2 ]]; then
+    exit "$PROFILE_STATUS"
+fi
 
 log "Installing pinned OpenMontage with native local render runtimes"
 if [[ ! -d "$OPENMONTAGE_ROOT/.git" ]]; then
@@ -39,6 +45,9 @@ if [[ ! -d "$OPENMONTAGE_ROOT/.git" ]]; then
 fi
 git -C "$OPENMONTAGE_ROOT" fetch origin
 git -C "$OPENMONTAGE_ROOT" checkout f633b5f428b9be9a2afecba851dfddd101619756
+python3 "$PROJECT_ROOT/bootstrap/apply_openmontage_compatibility.py" \
+    --worker-root "$PROJECT_ROOT" \
+    --openmontage-root "$OPENMONTAGE_ROOT"
 
 # Kaggle's system Python 3.10 lacks ensurepip. Create a complete isolated
 # environment without modifying the pinned OpenMontage repository.
@@ -47,9 +56,12 @@ if [[ ! -x "$OPENMONTAGE_ROOT/.venv/bin/python" ]] || \
     uv venv --clear --seed --python "$OPENMONTAGE_PYTHON_VERSION" "$OPENMONTAGE_ROOT/.venv"
 fi
 
-if [[ ! -x "$OPENMONTAGE_ROOT/.venv/bin/python" || ! -d "$OPENMONTAGE_ROOT/remotion-composer/node_modules" ]]; then
-    make -C "$OPENMONTAGE_ROOT" setup PYTHON_VERSION="$OPENMONTAGE_PYTHON_VERSION"
+"$OPENMONTAGE_ROOT/.venv/bin/python" -m pip install -r "$OPENMONTAGE_ROOT/requirements.txt"
+if [[ ! -x "$OPENMONTAGE_ROOT/remotion-composer/node_modules/.bin/remotion" ]]; then
+    npm ci --prefix "$OPENMONTAGE_ROOT/remotion-composer" --no-audit --no-fund
 fi
+log "Pre-installing the Remotion browser during bootstrap"
+(cd "$OPENMONTAGE_ROOT/remotion-composer" && npx --no-install remotion browser ensure)
 "$OPENMONTAGE_ROOT/.venv/bin/python" -m pip install -r "$PROJECT_ROOT/requirements.txt"
 
 log "Installing complete Football Emotion Skill System"

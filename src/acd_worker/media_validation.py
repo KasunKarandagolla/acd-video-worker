@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -101,7 +103,7 @@ class OpenMontageArtifactValidator:
         # asset_manifest or that the declared media exists. Delivery must fail
         # closed on that cross-artifact handoff instead of allowing a renderer
         # crash (or a visually incomplete render) to masquerade as valid state.
-        evidence["errors"].extend(self._cross_artifact_errors(by_kind))
+        evidence["errors"].extend(self.cross_artifact_errors(by_kind))
         if evidence["errors"]:
             return evidence
 
@@ -133,7 +135,22 @@ class OpenMontageArtifactValidator:
             evidence["errors"].append("render_report does not reference every delivered output")
             return evidence
 
+        report_hash = str((render_report.get("metadata") or {}).get("output_sha256") or "")
+        if not report_hash:
+            evidence["errors"].append("render_report lacks exact output SHA-256 lineage")
+        for candidate in candidate_paths:
+            actual_hash = self._sha256(Path(candidate)) if Path(candidate).is_file() else ""
+            declared = next(
+                (str(item.get("sha256") or "") for item in output_candidates if isinstance(item, dict) and str(Path(str(item.get("path") or "")).expanduser().resolve()) == candidate),
+                "",
+            )
+            if not declared or declared != actual_hash or report_hash != actual_hash:
+                evidence["errors"].append("candidate, render_report and rendered bytes do not share one SHA-256")
+
         final_review = json.loads(by_kind["final_review"].read_text(encoding="utf-8"))
+        review_hash = str((final_review.get("metadata") or {}).get("output_sha256") or "")
+        if not report_hash or review_hash != report_hash:
+            evidence["errors"].append("final_review does not preserve the rendered output SHA-256")
         review_ref = render_report.get("final_review_ref")
         if not review_ref or self._resolve_artifact_reference(review_ref, by_kind["render_report"]) != by_kind["final_review"]:
             evidence["errors"].append("render_report does not link the declared final_review")
@@ -162,7 +179,15 @@ class OpenMontageArtifactValidator:
         evidence["valid"] = not evidence["errors"]
         return evidence
 
-    def _cross_artifact_errors(self, by_kind: dict[str, Path]) -> list[str]:
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def cross_artifact_errors(self, by_kind: dict[str, Path]) -> list[str]:
         manifest_path = by_kind["asset_manifest"]
         edit_path = by_kind["edit_decisions"]
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -222,8 +247,13 @@ class OpenMontageArtifactValidator:
 
         return list(dict.fromkeys(errors))
 
+    # Backward-compatible private alias for callers from the pre-bridge path.
+    _cross_artifact_errors = cross_artifact_errors
+
     def _schema_error(self, schema_path: Path, artifact_path: Path) -> str:
-        python = self.openmontage_root / ".venv" / "bin" / "python"
+        # Preserve the venv launcher path: resolving its symlink selects the
+        # base interpreter and silently drops the environment's packages.
+        python = Path(os.environ.get("OPENMONTAGE_PYTHON", self.openmontage_root / ".venv" / "bin" / "python")).expanduser().absolute()
         if not python.is_file():
             return "pinned OpenMontage Python environment is unavailable"
         script = (
@@ -272,6 +302,14 @@ class FinalMediaValidator:
         self.ffmpeg = ffmpeg
         self.timeout = timeout
 
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     def validate(self, candidate: dict[str, Any]) -> dict[str, Any]:
         raw_path = candidate.get("path")
         evidence: dict[str, Any] = {"path": str(raw_path or ""), "valid": False}
@@ -292,6 +330,12 @@ class FinalMediaValidator:
         evidence["size_bytes"] = path.stat().st_size
         if evidence["size_bytes"] <= 0:
             evidence["error"] = "Output file is empty"
+            return evidence
+        actual_hash = self._sha256(path)
+        evidence["sha256"] = actual_hash
+        declared_hash = str(candidate.get("sha256") or "")
+        if not declared_hash or declared_hash != actual_hash:
+            evidence["error"] = "Output SHA-256 is missing or does not match the rendered bytes"
             return evidence
 
         try:
@@ -340,6 +384,14 @@ class FinalMediaValidator:
         if visual.get("visually_blank"):
             evidence["error"] = "Sampled frames contain no meaningful visual detail"
             return evidence
+        if visual.get("visually_frozen"):
+            evidence["error"] = "Sampled frames show no temporal change"
+            return evidence
+
+        has_audio = any(stream.get("codec_type") == "audio" for stream in streams)
+        if not has_audio and candidate.get("approved_silence") is not True:
+            evidence["error"] = "Output has no audio and no explicit approved silence plan"
+            return evidence
 
         evidence.update({
             "valid": True,
@@ -347,7 +399,8 @@ class FinalMediaValidator:
             "width": int(video.get("width") or 0),
             "height": int(video.get("height") or 0),
             "video_codec": video.get("codec_name"),
-            "has_audio": any(stream.get("codec_type") == "audio" for stream in streams),
+            "has_audio": has_audio,
+            "approved_silence": candidate.get("approved_silence") is True,
         })
         return evidence
 
@@ -384,9 +437,15 @@ class FinalMediaValidator:
             deviations.append(math.sqrt(sum((pixel - mean) ** 2 for pixel in frame) / len(frame)))
             ranges.append(max(frame) - min(frame))
         detail = max(deviations)
+        changes = []
+        for previous, current in zip(frames, frames[1:]):
+            changes.append(sum(abs(a - b) for a, b in zip(previous, current)) / frame_size)
+        temporal = max(changes) if changes else 0.0
         return {
             "sampled_frames": len(frames),
             "visual_detail_score": round(detail, 3),
             "visual_luma_range": max(ranges),
+            "temporal_change_score": round(temporal, 3),
             "visually_blank": detail < 2.0 or max(ranges) < 12,
+            "visually_frozen": len(frames) > 1 and temporal < 0.5,
         }

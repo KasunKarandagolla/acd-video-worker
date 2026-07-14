@@ -16,9 +16,12 @@ The controller may perform only:
 4. one supported Hermes job invocation or supported session resume, plus a
    small configured number of bounded same-session checkpoint continuations
    when Hermes exits zero without writing its mandatory result contract;
-5. strict final result parsing;
-6. independent final media validation;
-7. terminal persistence and best-effort notification.
+5. strict creative-handoff parsing and deterministic reconciliation of an
+   already-complete native edit checkpoint;
+6. compatibility, approval, schema and cross-artifact validation followed by
+   one isolated OpenMontage native compose/review transaction;
+7. independent final artifact/media/visual validation;
+8. terminal persistence and best-effort notification.
 
 ## State contract
 
@@ -57,17 +60,28 @@ blocked or failed state may reopen.
   OpenMontage still own every workflow/stage decision. The final slice must
   write an honest terminal envelope if native delivery remains impossible.
 
-## OpenMontage contract
+## Deterministic native bridge contract
 
-- Never modify the pinned checkout.
+- Keep the exact pinned OpenMontage commit. Apply only the tracked, hashed
+  compatibility patch/overlay; bootstrap and execution must reject any other
+  tracked delta or hash mismatch.
 - Hermes must read the actual guide, context, selected manifest and director skills.
 - Capability discovery goes through the real ToolRegistry.
 - Native tool execution goes through the pinned singleton registry contract:
   `registry.get(name).execute(inputs)`. Hermes must inspect `ToolResult`
   attributes directly and must not guess module-level functions or serializers.
-- OpenMontage owns canonical artifacts, runtime choice/routing, rendering and native review.
+- Hermes authors canonical creative artifacts only through the native edit
+  checkpoint, then writes `ready_for_execution`.
+- The worker overwrites any model-supplied approval fields with run-state policy,
+  validates native checkpoint gates through pinned OpenMontage, and invokes the
+  isolated native adapter exactly once per input fingerprint.
+- OpenMontage owns runtime choice/routing, `video_compose`, rendering and native review.
 - If the pinned capability is unavailable, return an exact blocker; do not invent a CLI or implement the stages in the worker.
-- Respect native approval gates. A missing required approval maps to `APPROVAL_REQUIRED`.
+- Respect native approval gates. `human_approved` is accepted only when the
+  same stage appears in the typed user policy. Missing approval is a structured
+  retryable blocker; a suppressed manifest gate is a failure.
+- Legacy Hermes `delivered` envelopes are parsed only to return
+  `LEGACY_DELIVERY_UNSUPPORTED`; they cannot enter validation or delivery.
 
 ## Source contract
 
@@ -83,11 +97,14 @@ blocked or failed state may reopen.
 
 `DELIVERED` requires all of the following:
 
-- Hermes result status is `delivered`;
+- Hermes produced or the controller deterministically reconciled a typed
+  `ready_for_execution` handoff from already-authored native artifacts;
 - at least one candidate path is inside the run’s OpenMontage project workspace;
 - the file exists and is non-empty;
 - real ffprobe succeeds;
-- schema-valid `brief`, `scene_plan`, `asset_manifest`, `edit_decisions`, `render_report`, and `final_review` exist separately under native `artifacts/`;
+- exactly one schema-valid planning artifact (`proposal_packet` or `brief`),
+  plus `scene_plan`, `asset_manifest`, `edit_decisions`, `render_report`, and
+  `final_review` exist separately under native `artifacts/`;
 - `render_report`, `final_review`, renderer family and runtime agree on the delivered file;
 - sampled frames contain meaningful visual detail rather than a blank/solid-colour technical canary;
 - a video stream and positive duration exist;
@@ -108,6 +125,6 @@ Kaggle hydration/export copies only project state, outputs and the named Hermes 
 - Production-import AST boundary test.
 - Hermes argv/profile/resume/skill contract test.
 - Skill-system validator with zero errors/warnings.
-- Exact upstream pins and no tracked upstream modifications.
+- Exact upstream pins and exactly the audited hashed OpenMontage compatibility delta.
 - Secret scan.
 - Honest live blockers when endpoint/runtime/network requirements are unavailable.

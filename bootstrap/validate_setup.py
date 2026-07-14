@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import importlib.util
 import json
 import os
@@ -20,6 +21,19 @@ ROOT = Path(__file__).resolve().parent.parent
 HERMES_PIN = "5ecc07986f46463ca3096679b03a46402eb19cee"
 OPENMONTAGE_PIN = "f633b5f428b9be9a2afecba851dfddd101619756"
 ENTRY_SKILLS = ("hermes-openmontage-repo-bridge", "social-edit-reasoning", "football-story-strategy")
+OPENMONTAGE_PATCH_ID = "cinematic-cut-props-v1"
+OPENMONTAGE_PATCH_PATH = ROOT / "patches" / "openmontage" / "f633b5f-cinematic-cut-props-v1.patch"
+OPENMONTAGE_OVERLAY_ROOT = ROOT / "patches" / "openmontage" / "overlay"
+OPENMONTAGE_PATCHED_PATHS = {
+    "lib/media_profiles.py",
+    "remotion-composer/src/CinematicRenderer.tsx",
+    "remotion-composer/src/CollageBurst.tsx",
+    "remotion-composer/src/Explainer.tsx",
+    "remotion-composer/src/LyricOverlay.tsx",
+    "remotion-composer/src/TitledVideo.tsx",
+    "scripts/scaffold_atelier_project.py",
+    "tools/video/video_compose.py",
+}
 
 
 @dataclass
@@ -50,6 +64,93 @@ def git_pin(name: str, path: Path, expected: str) -> Gate:
     return Gate(name, "passed", expected + binary_note)
 
 
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def openmontage_compatibility_gate(openmontage: Path) -> Gate:
+    """Accept only the audited compatibility delta on the exact upstream pin."""
+    if not (openmontage / ".git").is_dir():
+        return Gate("openmontage_compatibility", "blocked", f"checkout missing: {openmontage}")
+    head = run(["git", "rev-parse", "HEAD"], cwd=openmontage)
+    actual = head.stdout.strip()
+    if head.returncode or actual != OPENMONTAGE_PIN:
+        return Gate("openmontage_compatibility", "failed", f"expected {OPENMONTAGE_PIN}, found {actual or head.stderr.strip()}")
+
+    marker_path = openmontage / ".acd-compatibility-patches.json"
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return Gate("openmontage_compatibility", "failed", f"compatibility marker unavailable: {exc}")
+    if marker.get("openmontage_commit") != OPENMONTAGE_PIN:
+        return Gate("openmontage_compatibility", "failed", "compatibility marker is for a different OpenMontage commit")
+    if marker.get("patches") != [OPENMONTAGE_PATCH_ID]:
+        return Gate("openmontage_compatibility", "failed", f"unexpected compatibility patch set: {marker.get('patches')!r}")
+    if not OPENMONTAGE_PATCH_PATH.is_file() or marker.get("patch_sha256") != sha256(OPENMONTAGE_PATCH_PATH):
+        return Gate("openmontage_compatibility", "failed", "installed marker does not match the tracked compatibility patch")
+
+    reverse = run(["git", "apply", "--reverse", "--check", str(OPENMONTAGE_PATCH_PATH)], cwd=openmontage)
+    if reverse.returncode:
+        return Gate("openmontage_compatibility", "failed", "audited patch is not applied cleanly: " + reverse.stderr.strip()[-500:])
+    modified = {
+        line.strip()
+        for line in run(["git", "diff", "--name-only"], cwd=openmontage).stdout.splitlines()
+        if line.strip()
+    }
+    if modified != OPENMONTAGE_PATCHED_PATHS:
+        return Gate(
+            "openmontage_compatibility",
+            "failed",
+            f"tracked OpenMontage delta differs from audited paths; expected {sorted(OPENMONTAGE_PATCHED_PATHS)}, found {sorted(modified)}",
+        )
+
+    expected_overlay = marker.get("overlay_sha256")
+    if not isinstance(expected_overlay, dict) or not expected_overlay:
+        return Gate("openmontage_compatibility", "failed", "compatibility marker has no overlay hashes")
+    tracked_overlay: dict[str, str] = {}
+    for source in sorted(OPENMONTAGE_OVERLAY_ROOT.rglob("*")):
+        if source.is_file() and source.suffix != ".pyc" and "__pycache__" not in source.parts:
+            relative = str(source.relative_to(OPENMONTAGE_OVERLAY_ROOT))
+            tracked_overlay[relative] = sha256(source)
+    if expected_overlay != tracked_overlay:
+        return Gate("openmontage_compatibility", "failed", "marker overlay hashes differ from the tracked overlay")
+    for relative, expected in tracked_overlay.items():
+        installed = openmontage / relative
+        if not installed.is_file() or sha256(installed) != expected:
+            return Gate("openmontage_compatibility", "failed", f"installed overlay differs from tracked source: {relative}")
+    return Gate(
+        "openmontage_compatibility",
+        "passed",
+        f"{OPENMONTAGE_PIN} + {OPENMONTAGE_PATCH_ID} ({marker['patch_sha256'][:12]})",
+    )
+
+
+def remotion_runtime_gate(openmontage: Path) -> Gate:
+    composer = openmontage / "remotion-composer"
+    cli = composer / "node_modules" / ".bin" / "remotion"
+    browser_root = composer / "node_modules" / ".remotion"
+    browsers = [
+        path for path in browser_root.rglob("chrome-headless-shell*")
+        if path.is_file() and os.access(path, os.X_OK)
+    ] if browser_root.is_dir() else []
+    missing = []
+    if not shutil.which("node"):
+        missing.append("node")
+    if not shutil.which("npx"):
+        missing.append("npx")
+    if not cli.is_file():
+        missing.append("locked Remotion CLI")
+    if not browsers:
+        missing.append("preinstalled Remotion browser")
+    if missing:
+        return Gate("remotion_runtime", "blocked", "missing: " + ", ".join(missing))
+    return Gate("remotion_runtime", "passed", f"locked CLI + browser: {browsers[0]}")
+
+
 def production_boundary() -> Gate:
     path = ROOT / "scripts" / "acd_worker.py"
     try:
@@ -78,7 +179,7 @@ def skill_gate(profile_home: Path) -> Gate:
 
 
 def registry_gate(openmontage: Path) -> Gate:
-    python = openmontage / ".venv" / "bin" / "python"
+    python = Path(os.environ.get("OPENMONTAGE_PYTHON", openmontage / ".venv" / "bin" / "python")).expanduser().absolute()
     if not python.is_file():
         return Gate("openmontage_registry", "blocked", "OpenMontage virtual environment is not installed")
     command = [str(python), "-c", "from tools.tool_registry import registry; registry.discover(); print(len(registry._tools))"]
@@ -131,7 +232,7 @@ def main() -> int:
 
     gates = [
         git_pin("hermes_pin", hermes_repo, HERMES_PIN),
-        git_pin("openmontage_pin", openmontage, OPENMONTAGE_PIN),
+        openmontage_compatibility_gate(openmontage),
         production_boundary(),
     ]
 
@@ -151,25 +252,46 @@ def main() -> int:
     manifest = openmontage / "pipeline_defs" / "documentary-montage.yaml"
     gates.append(Gate("openmontage_manifest", "passed" if manifest.is_file() else "failed", str(manifest)))
     gates.append(registry_gate(openmontage))
-    remotion = openmontage / "remotion-composer" / "node_modules"
-    gates.append(Gate("remotion_runtime", "passed" if remotion.is_dir() and shutil.which("node") and shutil.which("npx") else "blocked", "node+npx+remotion node_modules"))
+    gates.append(remotion_runtime_gate(openmontage))
     gates.append(Gate("ffmpeg_ffprobe", "passed" if shutil.which("ffmpeg") and shutil.which("ffprobe") else "blocked", "required for render/validation"))
     gates.append(Gate("source_acquisition", "passed" if importlib.util.find_spec("yt_dlp") else "blocked", "yt-dlp Python package"))
     gates.append(Gate("discord", "passed" if os.environ.get("DISCORD_WEBHOOK_URL") else "blocked", "optional; run is unaffected when absent"))
 
     summary = {status: sum(g.status == status for g in gates) for status in ("passed", "failed", "blocked")}
+    required_blockers = [gate.name for gate in gates if gate.status == "blocked" and gate.name != "discord"]
+    worker_head = run(["git", "rev-parse", "HEAD"], cwd=ROOT).stdout.strip()
+    worker_dirty = run(["git", "status", "--porcelain"], cwd=ROOT).stdout.strip() != ""
+    marker_path = openmontage / ".acd-compatibility-patches.json"
+    try:
+        compatibility_marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        compatibility_marker = None
     report = {
         "schema_version": "1.0",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "gates": [asdict(g) for g in gates],
         "summary": summary,
-        "production_path_complete": summary["failed"] == 0,
-        "live_certification": "blocked" if summary["blocked"] else "ready_for_live_smoke",
+        "production_path_complete": summary["failed"] == 0 and not required_blockers,
+        "live_certification": "blocked" if summary["failed"] or required_blockers else "ready_for_live_smoke",
+        "required_blockers": required_blockers,
+        "runtime_identity": {
+            "worker_commit": worker_head or None,
+            "worker_dirty": worker_dirty,
+            "hermes_commit": HERMES_PIN,
+            "openmontage_commit": OPENMONTAGE_PIN,
+            "openmontage_compatibility": compatibility_marker,
+            "python": sys.version.split()[0],
+            "node": run(["node", "--version"]).stdout.strip() if shutil.which("node") else None,
+            "npm": run(["npm", "--version"]).stdout.strip() if shutil.which("npm") else None,
+            "requirements_sha256": sha256(ROOT / "requirements.txt"),
+            "remotion_lock_sha256": sha256(openmontage / "remotion-composer" / "package-lock.json") if (openmontage / "remotion-composer" / "package-lock.json").is_file() else None,
+        },
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
     json_path = args.output_dir / "thin-validation.json"
     md_path = args.output_dir / "thin-validation.md"
     json_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    (args.output_dir / "runtime-validation-certificate.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     rows = "\n".join(f"| {g.name} | {g.status} | {g.evidence.replace('|', '/')} |" for g in gates)
     md_path.write_text(
         "# Thin Runtime Validation\n\n| Gate | Status | Evidence |\n|---|---|---|\n" + rows +
@@ -180,7 +302,7 @@ def main() -> int:
         marker = {"passed": "✓", "failed": "✗", "blocked": "!"}[gate.status]
         print(f"{marker} {gate.name}: {gate.status} — {gate.evidence}")
     print(f"Summary: {summary}; reports: {json_path}, {md_path}")
-    return 1 if summary["failed"] else 0
+    return 1 if summary["failed"] or required_blockers else 0
 
 
 if __name__ == "__main__":

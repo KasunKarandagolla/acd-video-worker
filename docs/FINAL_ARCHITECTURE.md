@@ -68,7 +68,9 @@ User request and mixed inputs
   → thin ACD controller
   → source manifest / acquisition boundary
   → one Hermes production job with Football Emotion skills
-  → OpenMontage native agent pipeline and native review
+  → Hermes authors native artifacts through edit
+  → deterministic typed handoff
+  → OpenMontage native compose + native review
   → independent worker native-artifact, media and visual-content validation
   → persistence + optional notification
 ```
@@ -88,12 +90,16 @@ INTAKE → SOURCE_READY → AGENT_RUNNING → VALIDATING → DELIVERED
 - Resume uses `--resume <session-id>`.
 - Relevant skills are explicitly preloaded with repeatable `--skills`; the full nested package remains discoverable below the active profile `skills/` directory.
 - Quiet Hermes stdout is the final response; stderr provides a parseable `session_id:` line.
-- OpenMontage is deliberately agent-driven. It has no supported single all-stage pipeline CLI to wrap. Hermes follows the repo contracts and calls the actual registry/tools.
+- OpenMontage is deliberately agent-driven for creative authoring. It has no
+  supported single all-stage pipeline CLI to wrap. Hermes follows its native
+  contracts through edit; the deterministic bridge then calls the actual
+  registry `video_compose` tool for compose/review.
 - A result JSON file inside the OpenMontage project workspace is the worker/Hermes terminal contract. Native OpenMontage artifacts remain native.
 
 ## Permanent constraints
 
-- No upstream modifications.
+- No upstream forks or ad-hoc edits. The exact OpenMontage pin is augmented only
+  by a tracked, hashed, fail-closed compatibility patch/overlay.
 - No paid APIs/subscriptions.
 - No local LLM/VLM requirement.
 - FFmpeg/ffprobe remain permanent technical infrastructure.

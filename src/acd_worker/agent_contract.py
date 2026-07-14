@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-VALID_AGENT_STATUSES = {"delivered", "blocked", "failed"}
+VALID_AGENT_STATUSES = {"ready_for_execution", "delivered", "blocked", "failed"}
 
 
 @dataclass
@@ -19,6 +19,7 @@ class AgentEnvelope:
     output_media: list[dict[str, Any]] = field(default_factory=list)
     openmontage_artifacts: list[dict[str, Any]] = field(default_factory=list)
     source_requests: list[dict[str, Any]] = field(default_factory=list)
+    execution_request: Optional[dict[str, Any]] = None
     blocker: Optional[dict[str, Any]] = None
     error: Optional[dict[str, Any]] = None
     summary: str = ""
@@ -34,10 +35,11 @@ class AgentEnvelope:
         if data["status"] not in VALID_AGENT_STATUSES:
             raise ValueError(f"Unsupported agent result status: {data['status']!r}")
         status = str(data["status"])
-        if status == "delivered":
+        if status in {"ready_for_execution", "delivered"}:
             delivered_missing = sorted({"schema_version", "output_media"} - data.keys())
             if delivered_missing:
-                raise ValueError(f"Delivered agent result missing fields: {', '.join(delivered_missing)}")
+                label = "Delivered agent result" if status == "delivered" else "Ready agent result"
+                raise ValueError(f"{label} missing fields: {', '.join(delivered_missing)}")
         output_media = data.get("output_media", [])
         if not isinstance(output_media, list):
             raise ValueError("Agent result output_media must be a list")
@@ -70,12 +72,18 @@ class AgentEnvelope:
             output_media=output_media,
             openmontage_artifacts=data.get("openmontage_artifacts") or [],
             source_requests=data.get("source_requests") or [],
+            execution_request=data.get("execution_request"),
             blocker=blocker,
             error=error,
             summary=str(data.get("summary") or data.get("note") or ""),
         )
         if envelope.status == "delivered" and not envelope.output_media:
             raise ValueError("Delivered agent result contains no output media")
+        if envelope.status == "ready_for_execution":
+            if envelope.output_media:
+                raise ValueError("Ready-for-execution result must not claim output media")
+            if not isinstance(envelope.execution_request, dict):
+                raise ValueError("Ready-for-execution result contains no typed execution_request")
         if envelope.status == "blocked" and not envelope.blocker:
             raise ValueError("Blocked agent result contains no blocker")
         if envelope.status == "failed" and not envelope.error:

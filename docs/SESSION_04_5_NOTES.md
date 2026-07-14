@@ -1,3 +1,6 @@
+> **Historical record of the retired orchestration repair. It is not the
+> current production contract. See `DETERMINISTIC_NATIVE_BRIDGE.md`.**
+
 # Session 4.5 Implementation Notes
 
 **Date:** 2026-07-12  

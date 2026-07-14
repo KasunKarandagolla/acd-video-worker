@@ -34,6 +34,7 @@ class ACDConfig:
     hermes_max_continuations: int
     hermes_headless_auto_approve: bool
     hermes_model_override: Optional[str]
+    native_execution_timeout: int
     discord_webhook_url: str
     dry_run: bool = False
 
@@ -51,9 +52,10 @@ class ACDConfig:
             hermes_timeout=int(os.environ.get("ACD_HERMES_TIMEOUT", "3600")),
             hermes_max_turns=int(os.environ.get("ACD_HERMES_MAX_TURNS", "60")),
             hermes_recovery_max_turns=int(os.environ.get("ACD_HERMES_RECOVERY_MAX_TURNS", "60")),
-            hermes_max_continuations=int(os.environ.get("ACD_HERMES_MAX_CONTINUATIONS", "2")),
+            hermes_max_continuations=int(os.environ.get("ACD_HERMES_MAX_CONTINUATIONS", "1")),
             hermes_headless_auto_approve=os.environ.get("ACD_HERMES_YOLO", "true").lower() == "true",
             hermes_model_override=os.environ.get("ACD_HERMES_MODEL_OVERRIDE", "").strip() or None,
+            native_execution_timeout=int(os.environ.get("ACD_NATIVE_EXECUTION_TIMEOUT", "1800")),
             discord_webhook_url=os.environ.get("DISCORD_WEBHOOK_URL", ""),
             dry_run=os.environ.get("ACD_DRY_RUN", "false").lower() == "true",
         )
@@ -73,6 +75,7 @@ class ACDConfig:
             hermes_max_continuations=self.hermes_max_continuations,
             hermes_headless_auto_approve=self.hermes_headless_auto_approve,
             hermes_model_override=self.hermes_model_override,
+            native_execution_timeout=self.native_execution_timeout,
             discord_webhook_url=self.discord_webhook_url,
             dry_run=self.dry_run,
         )
@@ -82,11 +85,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Thin AI Creative Director control plane")
     parser.add_argument("request", nargs="?", help="Creative video request")
     parser.add_argument("--input", action="append", default=[], help="Local file or URL; repeat for mixed inputs")
+    parser.add_argument("--approve-checkpoint", action="append", default=[], choices=["research", "proposal", "idea", "script", "scene_plan", "assets", "edit", "compose", "publish"], help="Typed approval for one native checkpoint; repeat as needed")
+    parser.add_argument("--approve-all-checkpoints", action="store_true", help="Typed approval for all native checkpoints in this run")
+    parser.add_argument("--approve-runtime-tuple", metavar="PIPELINE,MODE,FAMILY,RUNTIME", help="Lock one approved native runtime tuple")
+    parser.add_argument("--approve-silence", action="store_true", help="Explicitly authorize an intentional no-audio delivery plan")
     parser.add_argument("--run-id", help="Resume an existing non-terminal run")
     parser.add_argument(
         "--retry-blocked",
         action="store_true",
-        help="Explicitly retry a HERMES_RUNTIME_UNAVAILABLE blocked run using its existing Hermes session",
+        help="Explicitly retry a transient Hermes/OpenMontage runtime blocker in the existing project",
     )
     parser.add_argument("--dry-run", action="store_true", help="Prepare intake and Hermes prompt, then report BLOCKED without executing")
     parser.add_argument("--json", action="store_true", help="Print only the final run-state JSON")
@@ -103,12 +110,35 @@ def main() -> int:
         config.dry_run = True
     controller = ThinRunController(config.controller_config())
 
+    policy_supplied = bool(
+        args.approve_checkpoint
+        or args.approve_all_checkpoints
+        or args.approve_runtime_tuple
+        or args.approve_silence
+    )
+    checkpoints = ["research", "proposal", "idea", "script", "scene_plan", "assets", "edit", "compose", "publish"] if args.approve_all_checkpoints else args.approve_checkpoint
+    runtime_tuple = None
+    if args.approve_runtime_tuple:
+        parts = [part.strip() for part in args.approve_runtime_tuple.split(",")]
+        if len(parts) != 4 or not all(parts):
+            parser.error("--approve-runtime-tuple requires PIPELINE,MODE,FAMILY,RUNTIME")
+        runtime_tuple = dict(zip(("pipeline", "composition_mode", "renderer_family", "render_runtime"), parts))
+    approval_policy = {
+        "approved_checkpoints": sorted(set(checkpoints)),
+        "runtime_tuple": runtime_tuple,
+        "approved_silence": args.approve_silence,
+    }
+
     if args.run_id:
-        state = controller.resume(args.run_id, retry_blocked=args.retry_blocked)
+        state = controller.resume(
+            args.run_id,
+            retry_blocked=args.retry_blocked,
+            approval_policy=approval_policy if policy_supplied else None,
+        )
     else:
         if not args.request:
             parser.error("request is required unless --run-id is used")
-        state = controller.start(args.request, args.input)
+        state = controller.start(args.request, args.input, approval_policy)
 
     payload = json.dumps(state.to_dict(), indent=2, sort_keys=True)
     if args.json:

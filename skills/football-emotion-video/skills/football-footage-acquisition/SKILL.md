@@ -33,7 +33,7 @@ For each item in queue (max 3 attempts per slot):
 ```python
 # Pseudocode for each acquisition attempt
 1. Call OpenMontage video_downloader (yt-dlp) via Hermes terminal tool:
-   cd $OPENMONTAGE_PROJECTS_DIR/../OpenMontage
+   cd "$OPENMONTAGE_ROOT"
    source .venv/bin/activate
    python -m tools.analysis.video_downloader \
      --url "$SOURCE_URL" \

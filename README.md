@@ -15,9 +15,11 @@ request / mixed inputs
         ↓
 thin ACD controller (7 macro states)
         ↓
-Hermes + Football Emotion skills
+Hermes + Football Emotion skills (creative work through native edit checkpoint)
         ↓
-OpenMontage native agent pipeline + render review
+typed ready_for_execution handoff
+        ↓
+deterministic bridge → OpenMontage video_compose + native review
         ↓
 worker native-artifact + ffprobe + visual-content validation
         ↓
@@ -33,13 +35,18 @@ Pinned commits are recorded in `docs/upstream-lock.json`:
 - Hermes-Agent: `5ecc07986f46463ca3096679b03a46402eb19cee`
 - OpenMontage: `f633b5f428b9be9a2afecba851dfddd101619756`
 
-Install the pinned repositories and the unchanged skill system:
+Install the pinned repositories and the complete skill system:
 
 ```bash
 bash bootstrap/install_hermes.sh
 bash bootstrap/install_openmontage.sh
 HERMES_HOME="$HOME/.hermes" HERMES_PROFILE=football-emotion bash bootstrap/install_skills.sh
 ```
+
+The OpenMontage installer keeps the exact upstream commit and applies the
+tracked, hashed `cinematic-cut-props-v1` compatibility patch. Bootstrap and
+runtime fail closed if any other tracked delta exists, the patch no longer
+reverses cleanly, or an overlay hash differs.
 
 Configure a free Hermes model endpoint in the named profile. Do not commit credentials.
 
@@ -58,8 +65,15 @@ Set `ACD_PERSIST_SOURCE` to a mounted prior `acd-persist-export` directory to hy
 PYTHONPATH=src python3 scripts/acd_worker.py \
   "Create a professional football-emotion video about an underdog comeback" \
   --input /absolute/path/to/local-clip.mp4 \
-  --input https://example.com/reference
+  --input https://example.com/reference \
+  --approve-all-checkpoints \
+  --approve-runtime-tuple cinematic,templated,cinematic-trailer,remotion
 ```
+
+Use `--approve-silence` only for an intentional no-audio delivery. It is valid
+only when Hermes also writes `edit_decisions.metadata.acd_silence_plan` with
+`intentional: true` and a non-empty rationale. Request prose and model-authored
+approval-looking JSON are never authorization.
 
 Resume a non-terminal run:
 
@@ -76,9 +90,10 @@ PYTHONPATH=src python3 scripts/acd_worker.py \
   --run-id <run-id> --retry-blocked --json
 ```
 
-This is accepted only when the persisted blocker is
-`HERMES_RUNTIME_UNAVAILABLE`; delivery, validation, dry-run, approval and other
-blocked/failed states remain terminal. Missing/expired provider credentials,
+This is accepted only for the explicit retryable blocker allowlist, including
+provider/runtime unavailability and typed approval blockers. Delivery,
+validation failures, dry-run and other failed states remain terminal.
+Missing/expired provider credentials,
 provider authentication failures, throttling and provider capacity errors are
 classified as this retryable blocker. The generated Hermes profile caps the
 effective context at 65,536 tokens by default (`ACD_HERMES_CONTEXT_LENGTH`) so
@@ -93,8 +108,8 @@ blocked retry. The runner passes Hermes' supported global `-m` selector before
 OpenMontage work. This setting never creates a new session or fallback router.
 
 OpenMontage pipelines can span more than one Hermes CLI tool-turn slice. When
-Hermes exits cleanly without a terminal result, the controller may run bounded
-same-session checkpoint continuations: two by default, each 60 turns. Configure
+Hermes exits cleanly without a terminal result, the controller may run one
+bounded same-session checkpoint continuation by default (60 turns). Configure
 the slice budgets with `ACD_HERMES_MAX_TURNS`,
 `ACD_HERMES_RECOVERY_MAX_TURNS`, and `ACD_HERMES_MAX_CONTINUATIONS`. Every slice
 uses the same Hermes session and resumes the next incomplete native OpenMontage
@@ -106,15 +121,18 @@ A resumed `AGENT_RUNNING` run counts its first checkpoint continuation as slice
 one; it does not receive an additional uncounted recovery call. Continuations
 also lock already-probed non-empty media against regeneration, permit only one
 corrected retry per missing asset, require immediate native asset checkpointing,
-and direct Hermes to compose as soon as the canonical prerequisites validate.
+and direct Hermes to publish the typed handoff as soon as the canonical edit
+prerequisites validate.
 
-The production prompt binds Hermes to the pinned OpenMontage execution surface:
+The production prompt binds Hermes to the pinned OpenMontage authoring surface:
 `tools.tool_registry.registry.get(name).execute(inputs)`. It also records the
 actual Football Emotion package root for `shared/...` references, forbids
-invented source media, bounds one-time research/discovery and reserves turns
-for compose/review/result writing. A non-final continuation must keep advancing
-the native checkpoint chain; the final continuation writes an exact result
-envelope if the native pipeline still cannot complete.
+invented source media and bounds one-time research/discovery. Hermes stops after
+schema-valid planning, scene, asset and edit checkpoints and writes
+`ready_for_execution`. The worker then validates the runtime tuple, checkpoint
+approvals, native schemas and cross-artifact media references before invoking
+OpenMontage `video_compose` exactly once. Hermes cannot render, review or claim
+delivery on the production path.
 
 Prepare intake and the Hermes job prompt without executing production:
 
@@ -144,11 +162,35 @@ The adapter tries candidates sequentially, validates acquired media and records 
 ```bash
 python3 -m compileall -q src scripts tests
 PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONPATH=src python3 bootstrap/validate_setup.py
 ```
 
-A run becomes `DELIVERED` only after schema-valid native OpenMontage artifacts and final-review evidence exist separately under the project `artifacts/` directory, the output under `renders/` passes independent `ffprobe`, and sampled frames contain meaningful visual detail. Exit code zero, self-declared result JSON, fixtures, blank/solid-colour MP4s and ad-hoc fallback renders are insufficient.
+The setup doctor emits `thin-validation.json`, `thin-validation.md`, and
+`runtime-validation-certificate.json`. It returns non-zero for any required
+failed or blocked gate; missing optional Discord configuration is reported but
+does not block certification.
 
-Hermes runs `scripts/validate_delivery_candidate.py` before ending a delivered
-claim. This exposes the same worker-owned artifact/media checks while the
-Hermes session can still correct its OpenMontage work. The production
-controller always repeats those checks independently and remains authoritative.
+Run the exact native contract canary after bootstrap:
+
+```bash
+PYTHONPATH=src python3 scripts/run_native_contract_canary.py \
+  --project-dir /tmp/acd-native-contract-canary \
+  --openmontage-root "$OPENMONTAGE_ROOT"
+```
+
+This authors original local canary assets, validates native checkpoints and
+typed approvals, invokes the same bridge/ToolRegistry/`video_compose`/Remotion
+path as production, runs native final review, then repeats independent artifact,
+ffprobe and visual-change validation. It is a runtime contract certificate,
+not a substitute for Football Emotion creative review.
+
+A run becomes `DELIVERED` only after the deterministic bridge receives a typed
+creative handoff, OpenMontage publishes schema-valid native artifacts and a
+passing final review, the output under `renders/` passes independent `ffprobe`,
+hash lineage and sampled-frame visual-content checks. A legacy model-authored
+`delivered` envelope, exit code zero, fixtures, blank/solid-colour MP4s and
+ad-hoc fallback renders are insufficient.
+
+The bridge publishes a runtime certificate only after native and independent
+checks agree. The production controller remains authoritative even when Hermes
+prints confident prose or exits successfully.

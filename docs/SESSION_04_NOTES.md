@@ -1,3 +1,6 @@
+> **Historical record of the retired 19-stage worker. It is not the current
+> production contract. See `DETERMINISTIC_NATIVE_BRIDGE.md`.**
+
 # Session 4 Implementation Notes
 
 **Date:** 2026-07-11  

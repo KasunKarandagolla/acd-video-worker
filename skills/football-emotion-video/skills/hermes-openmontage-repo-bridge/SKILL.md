@@ -43,11 +43,12 @@ Read these in order:
 
 ### 1. Confirm local repo paths
 
-Expected (configurable via `HERMES_HOME` and `OPENMONTAGE_PROJECTS_DIR`):
+Expected (explicit runtime roots; never derive a checkout from the projects directory):
 
 ```text
-$HERMES_HOME/../Hermes-Agent          (or HERMES_AGENT_PATH env)
-$OPENMONTAGE_PROJECTS_DIR/../OpenMontage  (or OPENMONTAGE_PATH env)
+$HERMES_AGENT_PATH                    (optional when the installed Hermes CLI is healthy)
+$OPENMONTAGE_ROOT                     (OPENMONTAGE_PATH is a legacy alias)
+$OPENMONTAGE_PROJECTS_DIR             (project workspaces only, not the checkout)
 ```
 
 If either path is missing, stop and report the missing clone/setup step.
@@ -63,7 +64,7 @@ From OpenMontage root, run provider/capability discovery through `tools.tool_reg
 Minimum command:
 
 ```bash
-cd $OPENMONTAGE_PROJECTS_DIR/../OpenMontage
+cd "$OPENMONTAGE_ROOT"
 source .venv/bin/activate
 python -c "from tools.tool_registry import registry; import json; registry.discover(); print(json.dumps(registry.provider_menu_summary(), indent=2))"
 ```
