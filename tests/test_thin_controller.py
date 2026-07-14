@@ -321,6 +321,31 @@ class HermesRunnerTests(unittest.TestCase):
 
 
 class OptionalInfrastructureTests(unittest.TestCase):
+    def test_canary_font_supports_portable_environment_override(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from run_native_contract_canary import discover_canary_font
+
+        with tempfile.TemporaryDirectory() as tmp:
+            font = Path(tmp) / "Portable-Bold.ttf"
+            font.write_bytes(b"font-placeholder")
+            discover_canary_font.cache_clear()
+            with patch.dict(__import__("os").environ, {"ACD_CANARY_FONT": str(font)}):
+                self.assertEqual(discover_canary_font(), font.resolve())
+            discover_canary_font.cache_clear()
+
+            matched = Path(tmp) / "Kaggle-Installed-Bold.ttf"
+            matched.write_bytes(b"fontconfig-placeholder")
+            completed = SimpleNamespace(returncode=0, stdout=str(matched) + "\n", stderr="")
+            environment = __import__("os").environ
+            saved_override = environment.pop("ACD_CANARY_FONT", None)
+            try:
+                with patch("run_native_contract_canary.subprocess.run", return_value=completed):
+                    self.assertEqual(discover_canary_font(), matched.resolve())
+            finally:
+                if saved_override is not None:
+                    environment["ACD_CANARY_FONT"] = saved_override
+                discover_canary_font.cache_clear()
+
     def test_discord_failure_is_non_fatal(self):
         notifier = DiscordNotifier("https://example.invalid/webhook", timeout=1)
         with patch("acd_worker.notifications.urllib.request.urlopen", side_effect=OSError("offline")):

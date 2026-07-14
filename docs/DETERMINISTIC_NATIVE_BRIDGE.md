@@ -92,6 +92,10 @@ passing review, matching SHA-256 lineage, meaningful sampled-frame detail and
 temporal change. The canary certifies the runtime contract; it does not replace
 Football Emotion taste review for a user production.
 
+Canary typography discovers a local bold font through fontconfig and portable
+Linux font-directory fallbacks. `ACD_CANARY_FONT` may explicitly select a local
+TTF/OTF file; no particular distribution font package is assumed.
+
 The full native canary was verified on 2026-07-14 against the exact pinned
 commit and audited patch. In the ChatGPT build sandbox only, Node required a
 temporary `os.networkInterfaces()` loopback shim because that container's

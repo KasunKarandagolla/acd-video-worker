@@ -10,6 +10,7 @@ as production, and runs the worker's independent delivery validators.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import subprocess
@@ -30,17 +31,72 @@ def write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+@functools.lru_cache(maxsize=1)
+def discover_canary_font() -> Path:
+    """Find one local bold font without assuming an Ubuntu package layout."""
+    override = os.environ.get("ACD_CANARY_FONT", "").strip()
+    if override:
+        font = Path(override).expanduser()
+        if font.is_file():
+            return font.resolve()
+        raise RuntimeError(f"ACD_CANARY_FONT does not name an existing file: {font}")
+
+    try:
+        matched = subprocess.run(
+            ["fc-match", "-f", "%{file}\\n", "sans:style=Bold"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        matched = None
+    if matched and matched.returncode == 0:
+        for line in matched.stdout.splitlines():
+            font = Path(line.strip()).expanduser()
+            if font.is_file():
+                return font.resolve()
+
+    candidates = (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "/usr/local/share/fonts/DejaVuSans-Bold.ttf",
+    )
+    for raw in candidates:
+        font = Path(raw)
+        if font.is_file():
+            return font.resolve()
+
+    for root in (Path("/usr/share/fonts"), Path("/usr/local/share/fonts"), Path.home() / ".fonts"):
+        if not root.is_dir():
+            continue
+        fonts = sorted(
+            (path for pattern in ("*Bold*.ttf", "*Bold*.otf", "*.ttf", "*.otf") for path in root.rglob(pattern)),
+            key=lambda path: str(path),
+        )
+        if fonts:
+            return fonts[0].resolve()
+    raise RuntimeError(
+        "Canary needs one local TTF/OTF font, but fontconfig and standard font directories returned none. "
+        "Set ACD_CANARY_FONT to an installed font file."
+    )
+
+
+def _drawtext_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+
+
 def make_clip(path: Path, text: str, accent: str, motion: int, font_size: int) -> None:
-    font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
-    if not font.is_file():
-        raise RuntimeError(f"Canary font is unavailable: {font}")
+    font = discover_canary_font()
     path.parent.mkdir(parents=True, exist_ok=True)
     video_filter = ",".join((
         "color=c=0x041712:s=1280x720:r=30:d=4",
         "drawgrid=w=160:h=90:t=2:c=white@0.10",
         f"drawbox=x='mod(t*{motion}\\,1180)':y=80:w=100:h=560:color=0x{accent}@0.55:t=fill",
         "drawbox=x=80:y=70:w=1120:h=580:color=white@0.22:t=3",
-        f"drawtext=fontfile={font}:text='{text}':fontcolor=white:fontsize={font_size}:x=(w-text_w)/2:y=(h-text_h)/2",
+        f"drawtext=fontfile='{_drawtext_value(str(font))}':text='{_drawtext_value(text)}':fontcolor=white:fontsize={font_size}:x=(w-text_w)/2:y=(h-text_h)/2",
     ))
     result = subprocess.run(
         [
