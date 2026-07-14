@@ -28,6 +28,11 @@ The worker never authors a scene, cut, title, pacing decision or audio choice.
 Checkpoint reconciliation recognizes existing canonical files; it does not fill
 or transform their creative contents.
 
+Hermes progress events are observed in an isolated CLI adapter that wraps the
+pinned `AIAgent.__init__` callback injection point without replacing the class.
+This preserves Hermes' class constants/static helpers and supported profile,
+model, session and tool behavior.
+
 ## Transaction
 
 1. Hermes writes exactly one planning artifact (`proposal_packet` or `brief`),

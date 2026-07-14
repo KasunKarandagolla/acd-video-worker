@@ -321,6 +321,49 @@ class HermesRunnerTests(unittest.TestCase):
 
 
 class OptionalInfrastructureTests(unittest.TestCase):
+    def test_hermes_event_adapter_preserves_aiagent_class_contract(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from hermes_event_adapter import instrument_run_agent
+
+        received = {}
+
+        class FakeAgent:
+            _TOOL_CALL_ARGUMENTS_CORRUPTION_MARKER = "marker"
+
+            @staticmethod
+            def _get_tool_call_id_static(_tool_call):
+                return "call-1"
+
+            def __init__(self, **kwargs):
+                received.update(kwargs)
+
+        class Sink:
+            progress = object()
+            start = object()
+            complete = object()
+            step = object()
+            status = object()
+            event = object()
+
+            def emit(self, event, **_fields):
+                received["emitted"] = event
+
+        module = SimpleNamespace(AIAgent=FakeAgent)
+        original_class = module.AIAgent
+        installed = instrument_run_agent(module, Sink())
+
+        self.assertIs(installed, original_class)
+        self.assertIs(module.AIAgent, original_class)
+        self.assertEqual(module.AIAgent._TOOL_CALL_ARGUMENTS_CORRUPTION_MARKER, "marker")
+        self.assertEqual(module.AIAgent._get_tool_call_id_static({}), "call-1")
+        module.AIAgent()
+        self.assertEqual(received["emitted"], "agent_created")
+        for key in (
+            "tool_progress_callback", "tool_start_callback", "tool_complete_callback",
+            "step_callback", "status_callback", "event_callback",
+        ):
+            self.assertIn(key, received)
+
     def test_canary_font_supports_portable_environment_override(self):
         sys.path.insert(0, str(ROOT / "scripts"))
         from run_native_contract_canary import discover_canary_font

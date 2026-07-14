@@ -51,17 +51,19 @@ class EventSink:
         self.emit("agent_event", name=args[0] if args else None)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--event-file", type=Path, required=True)
-    args, hermes_args = parser.parse_known_args()
-    sink = EventSink(args.event_file)
+def instrument_run_agent(run_agent_module, sink: EventSink):
+    """Add callbacks without replacing Hermes' AIAgent class object.
 
-    import run_agent
+    Hermes runtime helpers lazily access class constants and static methods as
+    ``run_agent.AIAgent.<member>``. Replacing that class with a factory
+    function breaks the supported conversation loop before the first tool
+    call. Wrapping ``__init__`` keeps class identity and every class/static
+    member intact while remaining isolated to this adapter subprocess.
+    """
+    agent_class = run_agent_module.AIAgent
+    original_init = agent_class.__init__
 
-    original = run_agent.AIAgent
-
-    def instrumented_agent(*agent_args, **agent_kwargs):
+    def instrumented_init(agent_self, *agent_args, **agent_kwargs):
         agent_kwargs.update({
             "tool_progress_callback": sink.progress,
             "tool_start_callback": sink.start,
@@ -70,11 +72,21 @@ def main() -> int:
             "status_callback": sink.status,
             "event_callback": sink.event,
         })
-        agent = original(*agent_args, **agent_kwargs)
+        original_init(agent_self, *agent_args, **agent_kwargs)
         sink.emit("agent_created")
-        return agent
 
-    run_agent.AIAgent = instrumented_agent
+    agent_class.__init__ = instrumented_init
+    return agent_class
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--event-file", type=Path, required=True)
+    args, hermes_args = parser.parse_known_args()
+    sink = EventSink(args.event_file)
+
+    import run_agent
+    instrument_run_agent(run_agent, sink)
     sink.emit("adapter_started")
     sys.argv = ["hermes", *hermes_args]
     try:
