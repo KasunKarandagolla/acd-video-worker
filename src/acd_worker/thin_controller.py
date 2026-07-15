@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +21,17 @@ from .run_state import RunProblem, RunState, RunStateStore, RunStatus, TERMINAL_
 from .source_service import SourceService, sanitize_reference
 
 
+CANONICAL_CREATIVE_ARTIFACTS = {
+    "research": "research_brief",
+    "proposal": "proposal_packet",
+    "idea": "brief",
+    "script": "script",
+    "scene_plan": "scene_plan",
+    "assets": "asset_manifest",
+    "edit": "edit_decisions",
+}
+
+
 class EnvironmentBlocker(RuntimeError):
     pass
 
@@ -32,11 +45,11 @@ class ThinControllerConfig:
     openmontage_root: Path
     projects_dir: Path
     state_dir: Path
-    hermes_timeout: int = 3600
-    hermes_max_turns: int = 60
-    hermes_recovery_max_turns: int = 60
+    hermes_timeout: int = 1200
+    hermes_max_turns: int = 32
+    hermes_recovery_max_turns: int = 24
     hermes_max_continuations: int = 1
-    hermes_headless_auto_approve: bool = True
+    hermes_headless_auto_approve: bool = False
     hermes_model_override: Optional[str] = None
     discord_webhook_url: str = ""
     dry_run: bool = False
@@ -113,6 +126,10 @@ class ThinRunController:
                 "UNAPPROVED_SILENCE_PLAN",
                 "UNAPPROVED_CHECKPOINT",
                 "CHECKPOINT_APPROVAL_MISSING",
+                "APPROVAL_REQUIRED",
+                "HERMES_NO_NATIVE_PROGRESS",
+                "HERMES_NATIVE_PROGRESS_STALLED",
+                "CREATIVE_HANDOFF_INCOMPLETE",
             }
             if not state.blocker or state.blocker.code not in retryable:
                 return state
@@ -128,6 +145,7 @@ class ThinRunController:
 
     def _continue(self, state: RunState) -> RunState:
         agent_invoked = False
+        last_execution_metadata: dict = {}
         try:
             if state.status == RunStatus.INTAKE:
                 self.source_service.prepare_manifest(Path(state.source_manifest_path), state.input_references)
@@ -159,21 +177,52 @@ class ThinRunController:
                     )
                 state.transition(RunStatus.AGENT_RUNNING)
                 self.store.save(state)
+                progress_before = self._native_progress_signature(state)
                 execution = self.runner.run_session(
                     prompt=prompt,
                     session_id=state.hermes_session_id,
                     expected_skills=list(PRELOADED_SKILLS),
                     progress_callback=lambda event: self._heartbeat(state, event),
+                    environment=self._hermes_environment(state),
                 )
                 agent_invoked = True
+                last_execution_metadata = dict(execution.metadata or {})
                 if execution.session_id:
                     state.hermes_session_id = execution.session_id
                     self.store.save(state)
                 if not execution.success:
                     return self._classify_hermes_failure(state, execution)
+                self._capture_terminal_payload(state, execution)
+                last_execution_metadata = dict(execution.metadata or {})
+                if (
+                    not Path(state.agent_result_path).is_file()
+                    and self._reconcile_execution_handoff(state) is None
+                    and self._native_progress_signature(state) == progress_before
+                ):
+                    return self._block(
+                        state,
+                        "HERMES_NO_NATIVE_PROGRESS",
+                        "Hermes completed its bounded creative slice without publishing any native OpenMontage artifact or checkpoint.",
+                        "agent",
+                        {
+                            "session_id": state.hermes_session_id,
+                            "max_turns": self.config.hermes_max_turns,
+                            "execution": last_execution_metadata,
+                            **self._native_progress_evidence(state),
+                        },
+                    )
 
             if state.status == RunStatus.AGENT_RUNNING:
                 result_path = Path(state.agent_result_path)
+                approval = self._pending_native_approval(state)
+                if approval is not None:
+                    return self._block(
+                        state,
+                        "APPROVAL_REQUIRED",
+                        f"OpenMontage checkpoint {approval['stage']!r} requires typed user approval.",
+                        approval["stage"],
+                        approval,
+                    )
                 # A resumed session is continued by the bounded loop below. Do
                 # not run an extra uncounted recovery slice before that loop.
                 # A missing session ID is the only case that must replay the
@@ -187,13 +236,17 @@ class ThinRunController:
                         session_id=state.hermes_session_id,
                         expected_skills=list(PRELOADED_SKILLS),
                         progress_callback=lambda event: self._heartbeat(state, event),
+                        environment=self._hermes_environment(state),
                     )
                     agent_invoked = True
+                    last_execution_metadata = dict(execution.metadata or {})
                     if execution.session_id:
                         state.hermes_session_id = execution.session_id
                         self.store.save(state)
                     if not execution.success:
                         return self._classify_hermes_failure(state, execution)
+                    self._capture_terminal_payload(state, execution)
+                    last_execution_metadata = dict(execution.metadata or {})
 
                 # OpenMontage deliberately makes the agent its control plane and
                 # persists progress as native checkpoints. A production pipeline
@@ -207,6 +260,7 @@ class ThinRunController:
                 ):
                     state.continuations_used += 1
                     self.store.save(state)
+                    progress_before = self._native_progress_signature(state)
                     recovery = self.runner.run_session(
                         prompt=self._checkpoint_continuation_prompt(
                             state,
@@ -217,12 +271,43 @@ class ThinRunController:
                         expected_skills=[],
                         max_turns=self.config.hermes_recovery_max_turns,
                         progress_callback=lambda event: self._heartbeat(state, event),
+                        environment=self._hermes_environment(state),
                     )
+                    last_execution_metadata = dict(recovery.metadata or {})
                     if recovery.session_id:
                         state.hermes_session_id = recovery.session_id
                         self.store.save(state)
                     if not recovery.success:
                         return self._classify_hermes_failure(state, recovery)
+                    self._capture_terminal_payload(state, recovery)
+                    last_execution_metadata = dict(recovery.metadata or {})
+                    approval = self._pending_native_approval(state)
+                    if approval is not None:
+                        return self._block(
+                            state,
+                            "APPROVAL_REQUIRED",
+                            f"OpenMontage checkpoint {approval['stage']!r} requires typed user approval.",
+                            approval["stage"],
+                            approval,
+                        )
+                    if (
+                        not result_path.is_file()
+                        and self._reconcile_execution_handoff(state) is None
+                        and self._native_progress_signature(state) == progress_before
+                    ):
+                        return self._block(
+                            state,
+                            "HERMES_NATIVE_PROGRESS_STALLED",
+                            "Hermes used a continuation slice without advancing any native OpenMontage artifact or checkpoint.",
+                            "agent",
+                            {
+                                "session_id": state.hermes_session_id,
+                                "continuations_attempted": state.continuations_used,
+                                "continuation_max_turns": self.config.hermes_recovery_max_turns,
+                                "execution": last_execution_metadata,
+                                **self._native_progress_evidence(state),
+                            },
+                        )
                 envelope = None
                 protocol_error = None
                 if result_path.is_file():
@@ -243,6 +328,7 @@ class ThinRunController:
                                 "continuations_attempted": state.continuations_used,
                                 "continuation_max_turns": self.config.hermes_recovery_max_turns,
                                 "agent_protocol_error": protocol_error,
+                                "execution": last_execution_metadata,
                                 **self._native_progress_evidence(state),
                             },
                         )
@@ -367,12 +453,37 @@ class ThinRunController:
         missing = [skill for skill in PRELOADED_SKILLS if not self.runner.find_skill(skill)]
         if missing:
             raise EnvironmentBlocker(f"Required Football Emotion skills are not installed: {', '.join(missing)}")
+        plugin = self.runner.profile_dir / "plugins" / "acd-openmontage"
+        if not (plugin / "plugin.yaml").is_file() or not (plugin / "__init__.py").is_file():
+            raise EnvironmentBlocker(f"Required Hermes OpenMontage plugin is not installed: {plugin}")
+        if not (self.config.worker_root / "scripts" / "openmontage_creative_adapter.py").is_file():
+            raise EnvironmentBlocker("OpenMontage creative adapter is missing")
+
+    def _hermes_environment(self, state: RunState) -> dict[str, str]:
+        """Bind plugin tools to exactly this run and typed user policy."""
+        return {
+            "ACD_WORKER_ROOT": str(self.config.worker_root.resolve()),
+            "ACD_WORKER_PYTHON": sys.executable,
+            "ACD_PROJECT_DIR": str(Path(state.project_dir).resolve()),
+            "ACD_RUN_ID": state.run_id,
+            "ACD_SOURCE_MANIFEST": str(Path(state.source_manifest_path).resolve()),
+            "ACD_FOOTBALL_SKILL_ROOT": str(
+                (self.runner.profile_dir / "skills" / "football-emotion-video").resolve()
+            ),
+            "ACD_APPROVAL_POLICY_JSON": json.dumps(state.approval_policy, sort_keys=True),
+            "OPENMONTAGE_ROOT": str(self.config.openmontage_root.resolve()),
+            "OPENMONTAGE_PROJECTS_DIR": str(self.config.projects_dir.resolve()),
+            "OPENMONTAGE_PYTHON": os.environ.get(
+                "OPENMONTAGE_PYTHON",
+                str(self.config.openmontage_root.resolve() / ".venv" / "bin" / "python"),
+            ),
+        }
 
     def _checkpoint_continuation_prompt(self, state: RunState, *, continuation: int, final: bool) -> str:
         final_instruction = (
             "This is the final continuation slice. Reserve the last five tool calls for schema validation, "
-            "the typed execution handoff and the exact result envelope. If a valid handoff remains impossible, "
-            "write a canonical blocked or failed envelope before the slice ends."
+            "the typed execution handoff and the exact final JSON response. If a valid handoff remains impossible, "
+            "return a canonical blocked or failed object before the slice ends."
             if final else
             "This is not the final continuation slice. Continue native production from the next incomplete "
             "checkpoint. Do not emit NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED merely because this CLI slice ends; "
@@ -380,18 +491,18 @@ class ThinRunController:
         )
         return f"""Continue the same ACD production run {state.run_id} from the existing OpenMontage checkpoints.
 
-MANDATORY RESULT PATH: {state.agent_result_path}
+WORKER-OWNED RESULT PATH: {state.agent_result_path}
 CONTINUATION SLICE: {continuation} of {self.config.hermes_max_continuations}
 
-Do not repeat repository, skill, pipeline, capability discovery, provider menus or web research already completed in this session. In one terminal call, list the existing checkpoints, canonical artifacts and renders under {state.project_dir}. Trust schema-valid completed artifacts and resume exactly the next incomplete native stage. Do not re-read unchanged guides or large source files.
+Do not repeat repository, skill, pipeline, capability discovery, provider menus or web research already completed in this session. Call `openmontage_native(operation="status")` once to receive the bounded durable checkpoint/artifact status, then resume exactly the next incomplete native stage. Built-in terminal, file and code-execution tools are intentionally unavailable. Read only a necessary unchanged contract with `openmontage_native(operation="read_document", ...)`.
 
-Treat every existing non-empty media file that ffprobe confirms has a valid video or audio stream as a completed asset. Never invoke `math_animate`, another generator or a downloader again for the same completed output path. A native asset tool gets at most one corrected retry for a genuinely missing or invalid output; after that, write an actionable blocker instead of looping. Immediately after successful asset generation, update and schema-validate `asset_manifest`, then write its native checkpoint before any other tool call. Raw asset files without the updated manifest/checkpoint are not stage completion.
+Treat every successful tool output reported by status/the durable tool journal as completed. Never invoke `math_animate`, another generator or a downloader again for the same completed output path. `openmontage_native(operation="run_tool")` enforces one corrected retry for a genuinely missing or invalid output; after that, return an actionable blocker instead of looping. Immediately after successful asset generation, publish `asset_manifest` through `openmontage_native(operation="publish_artifact")` before any other tool call. Raw asset files without the updated manifest/checkpoint are not stage completion.
 
-If `scene_plan`, `asset_manifest`, `edit_decisions` and every media path they reference are already schema-valid, do not generate, redesign or compose anything. Write `status: ready_for_execution` with the typed `execution_request` from the original job contract. The deterministic bridge—not this conversation—will invoke `video_compose`, native final review and candidate validation exactly once.
+If `scene_plan`, `asset_manifest`, `edit_decisions` and every media path they reference are already schema-valid, do not generate, redesign or compose anything. Return `status: ready_for_execution` with the typed `execution_request` from the original job contract. The deterministic bridge—not this conversation—will invoke `video_compose`, native final review and candidate validation exactly once.
 
 {final_instruction}
 
-Continue authoring each missing artifact with the already-selected native stage director, validate it through `schemas.artifacts.validate_artifact`, and checkpoint it through `lib.checkpoint.write_checkpoint`. Stop after the schema-valid edit checkpoint and publish the typed ready-for-execution handoff.
+Continue authoring each missing artifact with the already-selected native stage director and publish it only through `openmontage_native(operation="publish_artifact")`. Stop after the schema-valid edit checkpoint and return the typed ready-for-execution handoff.
 
 You have {self.config.hermes_recovery_max_turns} tool-calling turns in this slice. Never substitute a direct FFmpeg/helper render, invent artifacts, or claim delivery without native evidence. A genuine external blocker may be reported at any time, but use the complete canonical envelope below:
 
@@ -407,7 +518,7 @@ You have {self.config.hermes_recovery_max_turns} tool-calling turns in this slic
   "summary": "short factual summary"
 }}
 
-Only create the mandatory result file for genuine ready-for-execution, blocked or failed completion. Printing JSON without writing that file is not completion.
+Return this JSON object as the final response. The worker—not Hermes—validates and writes the terminal envelope.
 """
 
     def _execute_native(self, state: RunState, request: dict) -> object:
@@ -529,6 +640,87 @@ Only create the mandatory result file for genuine ready-for-execution, blocked o
         present = [kind for kind in kinds if (artifacts_dir / f"{kind}.json").is_file()]
         checkpoints = sorted(path.stem for path in project.glob("checkpoint_*.json") if path.is_file())
         return {"native_artifacts_present": present, "native_checkpoints_present": checkpoints}
+
+    def _native_progress_signature(self, state: RunState) -> tuple:
+        """Track only coherent native checkpoint/artifact progress.
+
+        A loose JSON file is not durable pipeline progress. The typed bridge
+        publishes the canonical artifact and its checkpoint as one operation,
+        so a continuation is earned only by a checkpoint whose embedded
+        canonical payload matches the corresponding on-disk artifact.
+        """
+        project = Path(state.project_dir).resolve()
+        signature = []
+        for checkpoint in sorted(project.glob("checkpoint_*.json"), key=lambda item: item.name):
+            if not checkpoint.is_file():
+                continue
+            try:
+                payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+                stage = str(payload.get("stage") or "")
+                status = str(payload.get("status") or "")
+                kind = CANONICAL_CREATIVE_ARTIFACTS[stage]
+                embedded = (payload.get("artifacts") or {}).get(kind)
+                artifact = project / "artifacts" / f"{kind}.json"
+                on_disk = json.loads(artifact.read_text(encoding="utf-8"))
+            except (KeyError, OSError, json.JSONDecodeError, TypeError):
+                continue
+            if status not in {"completed", "awaiting_human"}:
+                continue
+            if not isinstance(embedded, dict) or embedded != on_disk:
+                continue
+            checkpoint_stat = checkpoint.stat()
+            artifact_stat = artifact.stat()
+            signature.append((
+                stage,
+                status,
+                checkpoint_stat.st_size,
+                checkpoint_stat.st_mtime_ns,
+                artifact_stat.st_size,
+                artifact_stat.st_mtime_ns,
+            ))
+        return tuple(signature)
+
+    def _pending_native_approval(self, state: RunState) -> Optional[dict]:
+        """Return the first native gate still awaiting typed user approval."""
+        approved = {str(item) for item in state.approval_policy.get("approved_checkpoints") or []}
+        project = Path(state.project_dir).resolve()
+        for path in sorted(project.glob("checkpoint_*.json"), key=lambda item: item.name):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            stage = str(payload.get("stage") or "")
+            if payload.get("status") == "awaiting_human" and stage not in approved:
+                return {
+                    "stage": stage,
+                    "checkpoint_path": str(path),
+                    "human_approval_required": payload.get("human_approval_required") is True,
+                }
+        return None
+
+    def _capture_terminal_payload(self, state: RunState, execution) -> None:
+        """Validate Hermes' final JSON and let the worker publish the envelope."""
+        target = Path(state.agent_result_path)
+        payload = getattr(execution, "terminal_payload", None)
+        if target.is_file() or not isinstance(payload, dict):
+            return
+        try:
+            AgentEnvelope.from_dict(payload, state.run_id)
+        except ValueError as exc:
+            execution.metadata = dict(execution.metadata or {})
+            execution.metadata["terminal_payload_error"] = str(exc)
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _heartbeat(self, state: RunState, event: dict) -> None:
         state.heartbeat_at = utc_now()

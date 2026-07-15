@@ -52,3 +52,18 @@ fi
 
 # Verify
 hermes --version && ok "Hermes version: $(hermes --version)"
+
+# The pinned Hermes web tool uses its bundled DuckDuckGo provider as the
+# zero-key research path, but ddgs is an optional dependency.  Install it into
+# Hermes' own venv so OpenMontage research stages never fall back to curl,
+# package installation, or an unavailable Python import during production.
+DDGS_VERSION="${ACD_DDGS_VERSION:-9.14.4}"
+if ! "$HERMES_DIR/venv/bin/python" -c \
+    "import importlib.metadata as m; assert m.version('ddgs') == '$DDGS_VERSION'" \
+    >/dev/null 2>&1; then
+    log "Installing Hermes zero-key DDGS research provider"
+    uv pip install --python "$HERMES_DIR/venv/bin/python" "ddgs==$DDGS_VERSION"
+fi
+"$HERMES_DIR/venv/bin/python" -c \
+    "import importlib.metadata as m; assert m.version('ddgs') == '$DDGS_VERSION'" \
+    && ok "Hermes DDGS research provider available ($DDGS_VERSION)"

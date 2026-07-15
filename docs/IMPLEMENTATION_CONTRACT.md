@@ -15,7 +15,8 @@ The controller may perform only:
 3. environment/profile/skill preflight;
 4. one supported Hermes job invocation or supported session resume, plus a
    small configured number of bounded same-session checkpoint continuations
-   when Hermes exits zero without writing its mandatory result contract;
+   only when Hermes exits zero after publishing a coherent native
+   checkpoint/artifact pair;
 5. strict creative-handoff parsing and deterministic reconciliation of an
    already-complete native edit checkpoint;
 6. compatibility, approval, schema and cross-artifact validation followed by
@@ -29,11 +30,11 @@ Allowed states are exactly `INTAKE`, `SOURCE_READY`, `AGENT_RUNNING`, `VALIDATIN
 
 Every blocker/error has a stable code, actionable message, phase and optional evidence. Expected missing external prerequisites map to `BLOCKED`; malformed results and unexpected execution faults map to `FAILED`.
 
-Terminal states are immutable during ordinary resume. One explicit exception
-is permitted: `BLOCKED -> AGENT_RUNNING` when the persisted blocker is exactly
-`HERMES_RUNTIME_UNAVAILABLE` and the caller requests a blocked retry. It must
-reuse the same project and supported Hermes `--resume` session. No other
-blocked or failed state may reopen.
+Terminal states are immutable during ordinary resume. An explicit
+`--retry-blocked` may reopen only the controller's fixed retryable blocker
+allowlist (provider/runtime availability, typed approval, and bounded native
+progress blockers). It must reuse the same project and, when one exists, the
+supported Hermes `--resume` session. Failed and delivered states never reopen.
 
 ## Hermes contract
 
@@ -43,35 +44,46 @@ blocked or failed state may reopen.
   the project, session, history and validation contract remain unchanged.
 - Use `--resume`, not invented session flags.
 - Pass the Hermes root as `HERMES_HOME`; let `-p` resolve the named profile.
-- Preload the bridge/router/story entry skills and instruct progressive use of every relevant Football Emotion skill.
-- Run from the pinned OpenMontage root so native agent guidance is in scope.
-- Capture stdout/stderr, redact secrets, enforce timeout and trust neither exit code nor prose as delivery evidence.
-- A JSON result file inside the project workspace is mandatory. Delivered
-  envelopes remain fully strict. For safety-only terminal reporting, the parser
-  may normalize missing `schema_version` and empty `output_media` only on an
-  otherwise identifiable blocked/failed envelope; this can never create or
-  validate a delivery claim.
-- Pinned Hermes may exhaust its per-turn tool budget and make a final
-  tools-disabled summary call. In that exact missing-result condition, the
-  controller may resume the same session through bounded slices. Each slice
-  must trust schema-valid existing artifacts, resume the next incomplete
-  OpenMontage checkpoint, and avoid repeated discovery/research. The controller
-  chooses only whether another Hermes slice is available; Hermes and
-  OpenMontage still own every workflow/stage decision. The final slice must
-  write an honest terminal envelope if native delivery remains impossible.
+- Preload the six core bridge/story/cutting/audio/quality entry skills and
+  instruct progressive use of every relevant Football Emotion skill. The full
+  system remains installed and first-class.
+- Run from the isolated per-run project directory with `coding_context: off`.
+  Never run the production conversation from either source checkout.
+- Enable the installed `acd-openmontage` plugin/toolset. Do not expose terminal,
+  mutable file or code-execution toolsets and do not enable headless `--yolo`.
+- Capture stdout/stderr for diagnostics, redact secrets and enforce timeout.
+  Capture the supported `run_conversation` return value separately because
+  quiet CLI stdout can still contain reasoning/progress rendering; never scan
+  general stdout for a convenient JSON substring.
+- Hermes returns exactly one strict JSON terminal object. The worker validates
+  and atomically publishes it; Hermes has no direct file-write authority. No
+  missing field is normalized and no prose is parsed as a result.
+- A bounded same-session continuation is allowed only after a checkpoint with
+  `completed`/`awaiting_human` status embeds the same canonical artifact JSON
+  that exists on disk. Loose files, event activity and exit zero are not
+  progress. A slice with no new coherent checkpoint blocks immediately.
 
 ## Deterministic native bridge contract
 
 - Keep the exact pinned OpenMontage commit. Apply only the tracked, hashed
   compatibility patch/overlay; bootstrap and execution must reject any other
   tracked delta or hash mismatch.
-- Hermes must read the actual guide, context, selected manifest and director skills.
-- Capability discovery goes through the real ToolRegistry.
-- Native tool execution goes through the pinned singleton registry contract:
-  `registry.get(name).execute(inputs)`. Hermes must inspect `ToolResult`
-  attributes directly and must not guess module-level functions or serializers.
-- Hermes authors canonical creative artifacts only through the native edit
-  checkpoint, then writes `ready_for_execution`.
+- Hermes reads bounded allowlisted regions of the actual guide, context,
+  selected manifest/director skills and Football references through
+  `openmontage_native(operation=read_document)`.
+- The plugin's isolated adapter imports the pinned OpenMontage checkout,
+  initializes the native project and discovers the real ToolRegistry. Hermes
+  never imports OpenMontage or guesses a CLI/module function.
+- Hermes authors canonical creative payloads; `publish_artifact` validates each
+  against the pinned schema, enforces native stage order, writes it atomically
+  and calls the native checkpoint writer. Approval is derived only from typed
+  run policy.
+- `run_tool` may invoke only the audited zero-cost creative allowlist and calls
+  `registry.get(name).execute(inputs)` under the pinned OpenMontage interpreter.
+  Source/publish tiers, `video_compose`, paid calls, unsafe code and paths
+  outside the run project are rejected.
+- Hermes authors through the native edit checkpoint, then returns
+  `ready_for_execution`. The worker owns publication of the terminal envelope.
 - The worker overwrites any model-supplied approval fields with run-state policy,
   validates native checkpoint gates through pinned OpenMontage, and invokes the
   isolated native adapter exactly once per input fingerprint.

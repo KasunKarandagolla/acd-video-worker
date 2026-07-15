@@ -29,6 +29,7 @@ class HermesSessionResult:
     returncode: int = -1
     artifacts: Dict = field(default_factory=dict)
     metadata: Dict = field(default_factory=dict)
+    terminal_payload: Optional[Dict[str, Any]] = None
 
 
 class HermesRunner:
@@ -48,9 +49,10 @@ class HermesRunner:
         hermes_cli: Optional[str] = None,
         cwd: Optional[Path] = None,
         max_turns: int = 60,
-        headless_auto_approve: bool = True,
+        headless_auto_approve: bool = False,
         model_override: Optional[str] = None,
         event_adapter: Optional[Path] = None,
+        toolsets: Optional[List[str]] = None,
     ):
         self.hermes_home = Path(hermes_home).expanduser().resolve()
         self.profile = profile
@@ -60,6 +62,9 @@ class HermesRunner:
         self.max_turns = max_turns
         self.headless_auto_approve = headless_auto_approve
         self.model_override = model_override.strip() if model_override else None
+        self.toolsets = tuple(toolsets or (
+            "web", "memory", "session_search", "skills", "acd-openmontage",
+        ))
         self.profile_dir = self.hermes_home / "profiles" / profile
         self.event_adapter = Path(event_adapter).resolve() if event_adapter else Path(__file__).resolve().parents[2] / "scripts" / "hermes_event_adapter.py"
 
@@ -106,6 +111,7 @@ class HermesRunner:
         expected_skills: List[str] = None,
         max_turns: Optional[int] = None,
         progress_callback=None,
+        environment: Optional[Dict[str, str]] = None,
     ) -> HermesSessionResult:
         """
         Execute a Hermes chat session with the given prompt.
@@ -133,6 +139,15 @@ class HermesRunner:
         # The supported `-p` selector resolves this root to profiles/<name>.
         # Passing the profile directory here as well creates nested profile paths.
         env["HERMES_HOME"] = str(self.hermes_home)
+        for key, value in (environment or {}).items():
+            env[str(key)] = str(value)
+        # A production creative session must not inherit Hermes' coding-agent
+        # posture from either source checkout.  The isolated run workspace is
+        # the session cwd; the typed plugin launches OpenMontage separately.
+        run_cwd = self.cwd
+        project_cwd = env.get("ACD_PROJECT_DIR", "").strip()
+        if project_cwd and Path(project_cwd).is_dir():
+            run_cwd = Path(project_cwd).resolve()
 
         # Build command - use -q for single query mode, -Q for quiet (programmatic)
         cmd = [
@@ -146,17 +161,16 @@ class HermesRunner:
             cmd.extend(["-m", self.model_override])
         cmd.extend([
             "chat",
+            "--toolsets", ",".join(self.toolsets),
             "-q", prompt,
             "-Q",  # Quiet mode for programmatic use
             "--source", "tool",
             "--max-turns", str(max_turns if max_turns is not None else self.max_turns),
         ])
 
-        # This runner is fully non-interactive. Without Hermes's supported
-        # headless approval flag, dangerous-command prompts wait for a TTY that
-        # cannot exist and are denied after 60 seconds. This affects terminal
-        # execution only; creative/native checkpoint decisions remain governed
-        # by the job contract and must still be returned as structured blockers.
+        # Kept only as an explicit compatibility switch. Production defaults
+        # disable it and expose no terminal/file/code tools; creative/native
+        # checkpoint decisions remain governed by the typed run policy.
         if self.headless_auto_approve:
             cmd.append("--yolo")
 
@@ -176,10 +190,11 @@ class HermesRunner:
         try:
             adapter_python = self._adapter_python()
             if adapter_python and self.event_adapter.is_file():
-                result, event_file = self._run_with_events(
+                result, event_file, terminal_response_file = self._run_with_events(
                     cmd,
                     adapter_python,
                     env=env,
+                    cwd=run_cwd,
                     progress_callback=progress_callback,
                 )
             else:
@@ -189,10 +204,11 @@ class HermesRunner:
                     capture_output=True,
                     text=True,
                     timeout=self.timeout,
-                    cwd=str(self.cwd) if self.cwd else None,
+                    cwd=str(run_cwd) if run_cwd else None,
                     check=False,
                 )
                 event_file = None
+                terminal_response_file = None
 
             session_id = self._extract_session_id(result.stderr) or self._extract_session_id(result.stdout)
             error = self._redact(result.stderr) if result.returncode != 0 else None
@@ -212,9 +228,17 @@ class HermesRunner:
             session_result.session_id = session_id
             if event_file:
                 session_result.metadata["event_file"] = str(event_file)
+                session_result.metadata["event_summary"] = self._event_summary(event_file)
 
             # Parse artifacts from output
             session_result.artifacts = self._extract_artifacts(result.stdout)
+            session_result.terminal_payload = (
+                self._read_terminal_payload_file(terminal_response_file)
+                or self._extract_terminal_payload(result.stdout)
+            )
+            session_result.metadata["terminal_response_captured"] = (
+                session_result.terminal_payload is not None
+            )
 
             # Record in history
             self.session_history.append({
@@ -249,14 +273,29 @@ class HermesRunner:
         candidate = resolved.parent / "python"
         return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
 
-    def _run_with_events(self, command: list[str], python: Path, *, env: dict[str, str], progress_callback=None):
+    def _run_with_events(
+        self,
+        command: list[str],
+        python: Path,
+        *,
+        env: dict[str, str],
+        cwd: Optional[Path],
+        progress_callback=None,
+    ):
         event_dir = self.profile_dir / "logs" / "acd-events"
         event_dir.mkdir(parents=True, exist_ok=True)
         token = uuid.uuid4().hex
         event_file = event_dir / f"{token}.jsonl"
+        terminal_response_file = event_dir / f"{token}.terminal.json"
         stdout_path = event_dir / f"{token}.stdout"
         stderr_path = event_dir / f"{token}.stderr"
-        adapter_command = [str(python), str(self.event_adapter), "--event-file", str(event_file), *command[1:]]
+        adapter_command = [
+            str(python),
+            str(self.event_adapter),
+            "--event-file", str(event_file),
+            "--terminal-response-file", str(terminal_response_file),
+            *command[1:],
+        ]
         started = time.monotonic()
         offset = 0
         last_alive = 0.0
@@ -264,7 +303,7 @@ class HermesRunner:
             process = subprocess.Popen(
                 adapter_command,
                 env=env,
-                cwd=str(self.cwd) if self.cwd else None,
+                cwd=str(cwd) if cwd else None,
                 stdout=stdout,
                 stderr=stderr,
             )
@@ -285,7 +324,11 @@ class HermesRunner:
         self._emit_new_events(event_file, offset, progress_callback)
         stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
         stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
-        return subprocess.CompletedProcess(adapter_command, process.returncode, stdout_text, stderr_text), event_file
+        return (
+            subprocess.CompletedProcess(adapter_command, process.returncode, stdout_text, stderr_text),
+            event_file,
+            terminal_response_file,
+        )
 
     @staticmethod
     def _emit_new_events(path: Path, offset: int, callback) -> int:
@@ -301,6 +344,46 @@ class HermesRunner:
                 except (json.JSONDecodeError, TypeError, ValueError):
                     continue
             return handle.tell()
+
+    @staticmethod
+    def _event_summary(path: Path) -> Dict[str, Any]:
+        """Return bounded execution evidence without copying a full trace."""
+        counts: Dict[str, int] = {}
+        tool_counts: Dict[str, int] = {}
+        max_step = 0
+        terminal_event = None
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return {}
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            event = str(item.get("event") or "")
+            if event:
+                counts[event] = counts.get(event, 0) + 1
+            if event == "tool_start":
+                tool = str(item.get("tool") or "unknown")
+                tool_counts[tool] = tool_counts.get(tool, 0) + 1
+            if event == "agent_step":
+                try:
+                    max_step = max(max_step, int(item.get("step") or 0))
+                except (TypeError, ValueError):
+                    pass
+            if event in {"adapter_finished", "adapter_failed"}:
+                terminal_event = {
+                    key: item.get(key)
+                    for key in ("event", "return_value", "error_type", "exit_code")
+                    if item.get(key) is not None
+                }
+        return {
+            "events": counts,
+            "tool_calls": tool_counts,
+            "max_step": max_step,
+            "terminal_event": terminal_event,
+        }
 
     @staticmethod
     def _redact(value: str) -> str:
@@ -352,6 +435,31 @@ class HermesRunner:
     def _extract_artifacts(self, output: str) -> Dict:
         """Native artifacts stay in OpenMontage; stdout is not an artifact bus."""
         return {}
+
+    @staticmethod
+    def _extract_terminal_payload(output: str) -> Optional[Dict[str, Any]]:
+        """Accept only one exact final JSON object as non-authoritative advice."""
+        text = (output or "").strip()
+        if text.startswith("```json") and text.endswith("```"):
+            text = text[7:-3].strip()
+        elif text.startswith("```") and text.endswith("```"):
+            text = text[3:-3].strip()
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _read_terminal_payload_file(path: Optional[Path]) -> Optional[Dict[str, Any]]:
+        """Read the adapter-captured final response, never general CLI output."""
+        if path is None or not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def get_session_history(self) -> List[Dict]:
         """Get history of all sessions run."""

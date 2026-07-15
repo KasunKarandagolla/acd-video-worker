@@ -20,7 +20,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 HERMES_PIN = "5ecc07986f46463ca3096679b03a46402eb19cee"
 OPENMONTAGE_PIN = "f633b5f428b9be9a2afecba851dfddd101619756"
-ENTRY_SKILLS = ("hermes-openmontage-repo-bridge", "social-edit-reasoning", "football-story-strategy")
+ENTRY_SKILLS = (
+    "hermes-openmontage-repo-bridge",
+    "social-edit-reasoning",
+    "football-story-strategy",
+    "football-pro-cutting-pacing",
+    "football-audio-music-director",
+    "football-retention-quality-control",
+)
 OPENMONTAGE_PATCH_ID = "cinematic-cut-props-v1"
 OPENMONTAGE_PATCH_PATH = ROOT / "patches" / "openmontage" / "f633b5f-cinematic-cut-props-v1.patch"
 OPENMONTAGE_OVERLAY_ROOT = ROOT / "patches" / "openmontage" / "overlay"
@@ -43,8 +50,21 @@ class Gate:
     evidence: str
 
 
-def run(command: list[str], cwd: Path | None = None, timeout: int = 120) -> subprocess.CompletedProcess:
-    return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
+def run(
+    command: list[str],
+    cwd: Path | None = None,
+    timeout: int = 120,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
 
 
 def git_pin(name: str, path: Path, expected: str) -> Gate:
@@ -178,6 +198,83 @@ def skill_gate(profile_home: Path) -> Gate:
     return Gate("football_skills", "passed", f"{len(found)} SKILL.md packages discovered")
 
 
+def hermes_openmontage_plugin_gate(profile_home: Path, hermes_repo: Path) -> Gate:
+    plugin = profile_home / "plugins" / "acd-openmontage"
+    missing = [
+        str(path)
+        for path in (plugin / "plugin.yaml", plugin / "__init__.py", ROOT / "scripts" / "openmontage_creative_adapter.py")
+        if not path.is_file()
+    ]
+    reference_dir = profile_home / "skills" / "football-emotion-video" / "skills" / "hermes-openmontage-repo-bridge" / "references"
+    for name in ("repo-setup-status.md", "openmontage-schema-lock.md", "repo-source-lock.md"):
+        if not (reference_dir / name).is_file():
+            missing.append(str(reference_dir / name))
+    hermes_python = hermes_repo / "venv" / "bin" / "python"
+    if not hermes_python.is_file():
+        missing.append(str(hermes_python))
+    if missing:
+        return Gate("hermes_openmontage_plugin", "blocked", "missing: " + ", ".join(missing))
+    ddgs_version = os.environ.get("ACD_DDGS_VERSION", "9.14.4")
+    probe = run([
+        str(hermes_python), "-c",
+        f"import importlib.metadata as m; assert m.version('ddgs') == {ddgs_version!r}; print(m.version('ddgs'))",
+    ], timeout=30)
+    if probe.returncode:
+        return Gate("hermes_openmontage_plugin", "blocked", "Hermes DDGS dependency is unavailable: " + probe.stderr.strip()[-500:])
+    config_path = profile_home / "config.yaml"
+    config = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+    required = ("acd-openmontage", "search_backend: ddgs", "coding_context: off")
+    absent = [item for item in required if item not in config]
+    if absent:
+        return Gate("hermes_openmontage_plugin", "failed", "profile config missing: " + ", ".join(absent))
+    toolset_lines: list[str] = []
+    collecting = False
+    for line in config.splitlines():
+        if line.startswith("toolsets:"):
+            collecting = True
+            toolset_lines.append(line)
+            continue
+        if collecting and (line.startswith("  - ") or not line.strip()):
+            toolset_lines.append(line)
+            continue
+        if collecting:
+            break
+    toolset_text = "\n".join(toolset_lines)
+    mutable = [name for name in ("file", "terminal", "code_execution", "coding") if name in toolset_text]
+    if mutable:
+        return Gate(
+            "hermes_openmontage_plugin",
+            "failed",
+            "production profile exposes mutable coding toolsets: " + ", ".join(mutable),
+        )
+    discovery = run(
+        [
+            str(hermes_python),
+            "-c",
+            (
+                "from hermes_cli.plugins import discover_plugins,get_plugin_manager; "
+                "from tools.registry import registry; discover_plugins(force=True); "
+                "m=get_plugin_manager(); names=set(m._plugin_tool_names); "
+                "expected={'openmontage_native','acd_acquire_source'}; "
+                "assert expected.issubset(names), names; "
+                "assert all(registry.get_entry(n) and registry.get_entry(n).toolset=='acd-openmontage' for n in expected); "
+                "print(','.join(sorted(expected)))"
+            ),
+        ],
+        cwd=hermes_repo,
+        timeout=60,
+        env={**os.environ, "HERMES_HOME": str(profile_home)},
+    )
+    if discovery.returncode:
+        detail = (discovery.stderr or discovery.stdout).strip()[-1000:]
+        return Gate("hermes_openmontage_plugin", "failed", "pinned Hermes plugin discovery failed: " + detail)
+    return Gate(
+        "hermes_openmontage_plugin",
+        "passed",
+        "pinned Hermes discovered typed tools; bridge references and zero-key web search verified",
+    )
+
+
 def registry_gate(openmontage: Path) -> Gate:
     python = Path(os.environ.get("OPENMONTAGE_PYTHON", openmontage / ".venv" / "bin" / "python")).expanduser().absolute()
     if not python.is_file():
@@ -236,7 +333,7 @@ def main() -> int:
         production_boundary(),
     ]
 
-    compile_result = run([sys.executable, "-m", "compileall", "-q", "src", "scripts", "bootstrap"], cwd=ROOT)
+    compile_result = run([sys.executable, "-m", "compileall", "-q", "src", "scripts", "bootstrap", "plugins"], cwd=ROOT)
     gates.append(Gate("python_compile", "passed" if compile_result.returncode == 0 else "failed", compile_result.stderr.strip() or "compiled"))
     test_result = run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], cwd=ROOT, timeout=180)
     gates.append(Gate("focused_tests", "passed" if test_result.returncode == 0 else "failed", (test_result.stderr or test_result.stdout).strip()[-1000:]))
@@ -245,6 +342,7 @@ def main() -> int:
     gates.append(Gate("hermes_cli", "passed" if hermes_cli else "blocked", hermes_cli or "Hermes CLI is not installed"))
     gates.append(Gate("hermes_profile", "passed" if (profile_home / "config.yaml").is_file() else "blocked", str(profile_home)))
     gates.append(skill_gate(profile_home))
+    gates.append(hermes_openmontage_plugin_gate(profile_home, hermes_repo))
     skill_result = run([sys.executable, str(ROOT / "skills" / "football-emotion-video" / "tools" / "validate_skill_system.py"), str(ROOT / "skills" / "football-emotion-video")])
     gates.append(Gate("canonical_skill_validation", "passed" if skill_result.returncode == 0 and "Result: PASSED" in skill_result.stdout else "failed", (skill_result.stdout + skill_result.stderr).strip()[-1000:]))
     gates.append(model_gate(profile_home))

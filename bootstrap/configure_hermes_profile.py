@@ -68,7 +68,11 @@ providers:
     models:
       {q(model)}: {{}}
 
-toolsets: [file, terminal, web, memory, session_search, skills]
+toolsets: [web, memory, session_search, skills, acd-openmontage]
+web:
+  search_backend: ddgs
+plugins:
+  enabled: [acd-openmontage]
 memory:
   provider: builtin
 display:
@@ -80,7 +84,8 @@ skills:
   inline_shell: false
   write_approval: false
 agent:
-  max_turns: 60
+  max_turns: 32
+  coding_context: off
   max_spawn_depth: 1
   subagent_auto_approve: false
 moa:

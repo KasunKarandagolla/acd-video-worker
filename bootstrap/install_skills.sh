@@ -22,6 +22,7 @@ else
     PROFILE_HOME="$HERMES_ROOT/profiles/$HERMES_PROFILE"
 fi
 PROFILE_SKILLS_DIR="$PROFILE_HOME/skills/football-emotion-video"
+PROFILE_PLUGINS_DIR="$PROFILE_HOME/plugins"
 
 # 1. Ensure canonical skills exist (extracted from ZIP)
 if [[ ! -d "$CANONICAL_SKILLS/skills" ]]; then
@@ -49,6 +50,25 @@ log "Installing to Hermes profile: $PROFILE_SKILLS_DIR"
 mkdir -p "$PROFILE_SKILLS_DIR"
 rsync -a --delete "$CANONICAL_SKILLS/" "$PROFILE_SKILLS_DIR/"
 ok "Skills synced to Hermes profile"
+
+# Hermes skill_view resolves linked reference files from the individual skill
+# directory.  The canonical Football Emotion package intentionally keeps its
+# shared references at package scope, so install read-only runtime mirrors
+# without rewriting or reducing the canonical skill system.
+BRIDGE_RUNTIME_REFS="$PROFILE_SKILLS_DIR/skills/hermes-openmontage-repo-bridge/references"
+mkdir -p "$BRIDGE_RUNTIME_REFS"
+rsync -a "$CANONICAL_SKILLS/shared/references/repo-bridge/" "$BRIDGE_RUNTIME_REFS/"
+cp "$CANONICAL_SKILLS/shared/contracts/openmontage-artifact-bridge.md" \
+   "$BRIDGE_RUNTIME_REFS/openmontage-artifact-bridge.md"
+ok "Bridge reference mirrors installed for Hermes skill_view"
+
+# Install the supported Hermes plugin that exposes the pinned OpenMontage
+# authoring/tool surface directly.  This removes the need for the agent to
+# improvise shell commands or import OpenMontage from Hermes' Python sandbox.
+mkdir -p "$PROFILE_PLUGINS_DIR/acd-openmontage"
+rsync -a --delete "$PROJECT_ROOT/plugins/acd-openmontage/" \
+  "$PROFILE_PLUGINS_DIR/acd-openmontage/"
+ok "ACD OpenMontage Hermes plugin installed"
 
 # 4. Validate installed skills
 log "Validating installed skills..."

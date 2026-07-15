@@ -8,6 +8,7 @@ import subprocess
 import sqlite3
 import sys
 import tempfile
+import types
 from types import SimpleNamespace
 import unittest
 from pathlib import Path
@@ -40,6 +41,10 @@ class FakeRunner:
             target = self.profile_dir / "skills" / "football-emotion-video" / "skills" / skill
             target.mkdir(parents=True, exist_ok=True)
             (target / "SKILL.md").write_text(f"---\nname: {skill}\ndescription: test\n---\n", encoding="utf-8")
+        plugin = self.profile_dir / "plugins" / "acd-openmontage"
+        plugin.mkdir(parents=True, exist_ok=True)
+        (plugin / "plugin.yaml").write_text("name: acd-openmontage\n", encoding="utf-8")
+        (plugin / "__init__.py").write_text("def register(ctx): pass\n", encoding="utf-8")
         self.behavior = behavior
         self.calls = []
 
@@ -142,9 +147,12 @@ class PromptAndBoundaryTests(unittest.TestCase):
         self.assertIn('"status": "ready_for_execution|blocked|failed"', prompt)
         self.assertIn('"execution_request":', prompt)
         self.assertIn("Do not call `video_compose` yourself", prompt)
-        self.assertIn("ToolResult` exposes `.success`, `.data`, `.artifacts`, `.error`", prompt)
+        self.assertIn('openmontage_native(operation="status"', prompt)
+        self.assertIn('openmontage_native(operation="publish_artifact"', prompt)
+        self.assertIn("acd_acquire_source", prompt)
+        self.assertIn("terminal, execute_code", prompt)
         self.assertIn("do not invent, generate, analyze or probe `source.mp4`", prompt)
-        self.assertIn("shared/...` inside any Football Emotion skill resolve from", prompt)
+        self.assertIn("canonical `shared/...` paths still resolve from", prompt)
         self.assertNotIn("from tools.video.video_compose import video_compose", prompt)
 
     def test_production_entrypoint_has_no_legacy_orchestrator_import(self):
@@ -191,10 +199,41 @@ class HermesRunnerTests(unittest.TestCase):
             self.assertEqual(command[:4], [str(cli), "-p", "football-emotion", "chat"])
             self.assertIn("--resume", command)
             self.assertIn("--skills", command)
-            self.assertIn("--yolo", command)
+            self.assertNotIn("--yolo", command)
+            toolsets = command[command.index("--toolsets") + 1].split(",")
+            self.assertIn("acd-openmontage", toolsets)
+            self.assertNotIn("terminal", toolsets)
+            self.assertNotIn("file", toolsets)
+            self.assertNotIn("code_execution", toolsets)
             self.assertEqual(command[command.index("--max-turns") + 1], "9")
             self.assertEqual(mocked.call_args.kwargs["env"]["HERMES_HOME"], str(root / "home"))
             self.assertEqual(result.session_id, "20260712_abc12345")
+
+    def test_runtime_environment_is_scoped_into_plugin_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli = root / "hermes"
+            cli.write_text("#!/bin/sh\n", encoding="utf-8")
+            cli.chmod(0o755)
+            (root / "home" / "profiles" / "football-emotion").mkdir(parents=True)
+            (root / "project").mkdir()
+            completed = subprocess.CompletedProcess([], 0, stdout="", stderr="session_id: session_12345678\n")
+            runner = HermesRunner(str(root / "home"), hermes_cli=str(cli), cwd=root)
+            with patch("acd_worker.hermes_runner.subprocess.run", return_value=completed) as mocked:
+                runner.run_session("prompt", environment={"ACD_RUN_ID": "run-1", "ACD_PROJECT_DIR": root / "project"})
+            environment = mocked.call_args.kwargs["env"]
+            self.assertEqual(environment["ACD_RUN_ID"], "run-1")
+            self.assertEqual(environment["ACD_PROJECT_DIR"], str(root / "project"))
+            self.assertEqual(mocked.call_args.kwargs["cwd"], str((root / "project").resolve()))
+
+    def test_terminal_payload_requires_one_exact_json_object(self):
+        payload = {"schema_version": "1.0", "run_id": "run-1", "status": "blocked"}
+        self.assertEqual(HermesRunner._extract_terminal_payload(json.dumps(payload)), payload)
+        self.assertEqual(
+            HermesRunner._extract_terminal_payload(f"```json\n{json.dumps(payload)}\n```"),
+            payload,
+        )
+        self.assertIsNone(HermesRunner._extract_terminal_payload("prose\n" + json.dumps(payload)))
 
     def test_explicit_model_override_precedes_chat_on_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -364,6 +403,150 @@ class OptionalInfrastructureTests(unittest.TestCase):
         ):
             self.assertIn(key, received)
 
+    def test_hermes_event_adapter_captures_only_exact_final_response(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from hermes_event_adapter import EventSink, instrument_run_agent
+
+        payload = {
+            "schema_version": "1.0",
+            "run_id": "run-1",
+            "status": "blocked",
+            "output_media": [],
+            "openmontage_artifacts": [],
+            "source_requests": [],
+            "blocker": {
+                "code": "TEST_BLOCKER",
+                "message": "contract test",
+                "phase": "agent",
+                "evidence": {},
+            },
+            "error": None,
+            "summary": "contract test",
+        }
+
+        class FakeAgent:
+            def __init__(self, **_kwargs):
+                pass
+
+            def run_conversation(self):
+                return {"final_response": json.dumps(payload), "messages": ["not persisted"]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sink = EventSink(root / "events.jsonl", root / "terminal.json")
+            module = SimpleNamespace(AIAgent=FakeAgent)
+            instrument_run_agent(module, sink)
+            result = module.AIAgent().run_conversation()
+            self.assertEqual(result["messages"], ["not persisted"])
+            self.assertEqual(json.loads((root / "terminal.json").read_text(encoding="utf-8")), payload)
+
+            (root / "terminal.json").unlink()
+            sink.capture_terminal_response({"final_response": "reasoning before\n" + json.dumps(payload)})
+            self.assertFalse((root / "terminal.json").exists())
+
+    def test_hermes_event_adapter_records_clean_system_exit_as_finished(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import hermes_event_adapter
+
+        class FakeAgent:
+            def __init__(self, **_kwargs):
+                pass
+
+        run_agent = types.ModuleType("run_agent")
+        run_agent.AIAgent = FakeAgent
+        hermes_cli = types.ModuleType("hermes_cli")
+        hermes_cli.__path__ = []
+        hermes_main = types.ModuleType("hermes_cli.main")
+
+        def clean_exit():
+            raise SystemExit(0)
+
+        hermes_main.main = clean_exit
+        with tempfile.TemporaryDirectory() as tmp:
+            events = Path(tmp) / "events.jsonl"
+            with (
+                patch.dict(sys.modules, {"run_agent": run_agent, "hermes_cli": hermes_cli, "hermes_cli.main": hermes_main}),
+                patch.object(sys, "argv", ["adapter", "--event-file", str(events)]),
+            ):
+                self.assertEqual(hermes_event_adapter.main(), 0)
+            payloads = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(payloads[-1]["event"], "adapter_finished")
+            self.assertEqual(payloads[-1]["exit_code"], "0")
+
+    def test_profile_plugin_and_bridge_reference_mirrors_are_installed(self):
+        installer = (ROOT / "bootstrap" / "install_skills.sh").read_text(encoding="utf-8")
+        self.assertIn("PROFILE_PLUGINS_DIR/acd-openmontage", installer)
+        self.assertIn("Bridge reference mirrors", installer)
+        self.assertIn("openmontage-artifact-bridge.md", installer)
+
+    def test_hermes_bootstrap_pins_ddgs_search_dependency(self):
+        installer = (ROOT / "bootstrap" / "install_hermes.sh").read_text(encoding="utf-8")
+        self.assertIn('DDGS_VERSION="${ACD_DDGS_VERSION:-9.14.4}"', installer)
+        self.assertIn('"ddgs==$DDGS_VERSION"', installer)
+
+    def test_openmontage_plugin_exposes_typed_tools_without_render(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "acd_openmontage_plugin",
+            ROOT / "plugins" / "acd-openmontage" / "__init__.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        registered = {}
+
+        class Context:
+            def register_tool(self, **kwargs):
+                registered[kwargs["name"]] = kwargs
+
+        module.register(Context())
+        self.assertEqual(set(registered), {"openmontage_native", "acd_acquire_source"})
+        operations = registered["openmontage_native"]["schema"]["parameters"]["properties"]["operation"]["enum"]
+        self.assertEqual(operations, ["status", "read_document", "tool_info", "publish_artifact", "run_tool"])
+        self.assertNotIn("video_compose", operations)
+
+    def test_creative_adapter_document_and_tool_paths_are_fail_closed(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "openmontage_creative_adapter",
+            ROOT / "scripts" / "openmontage_creative_adapter.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            openmontage = root / "OpenMontage"
+            (project / "artifacts").mkdir(parents=True)
+            (openmontage / "schemas" / "artifacts").mkdir(parents=True)
+            document = project / "artifacts" / "scene_plan.json"
+            document.write_text("{}", encoding="utf-8")
+            self.assertEqual(
+                module._document_path(
+                    "project", "artifacts/scene_plan.json",
+                    project=project, openmontage=openmontage,
+                ),
+                document.resolve(),
+            )
+            with self.assertRaises(ValueError):
+                module._document_path(
+                    "openmontage", "../.env",
+                    project=project, openmontage=openmontage,
+                )
+            info = {
+                "input_schema": {"properties": {"output_path": {"type": "string"}}},
+                "side_effects": ["writes output"],
+            }
+            with self.assertRaises(ValueError):
+                module._validate_tool_paths(project, "math_animate", {}, info)
+            with self.assertRaises(ValueError):
+                module._validate_tool_paths(
+                    project, "math_animate", {"output_path": str(root / "escape.webm")}, info,
+                )
+
     def test_canary_font_supports_portable_environment_override(self):
         sys.path.insert(0, str(ROOT / "scripts"))
         from run_native_contract_canary import discover_canary_font
@@ -457,6 +640,12 @@ class OptionalInfrastructureTests(unittest.TestCase):
             self.assertNotIn(secret, config)
             self.assertIn("key_env: LLM_API_KEY", config)
             self.assertIn("context_length: 65536", config)
+            self.assertIn("search_backend: ddgs", config)
+            self.assertIn("enabled: [acd-openmontage]", config)
+            self.assertIn("acd-openmontage", config)
+            self.assertNotIn("terminal", next(line for line in config.splitlines() if line.startswith("toolsets:")))
+            self.assertNotIn("file", next(line for line in config.splitlines() if line.startswith("toolsets:")))
+            self.assertIn("coding_context: off", config)
 
     def test_ultra_profile_enables_native_thinking_request(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -494,6 +683,40 @@ class OptionalInfrastructureTests(unittest.TestCase):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_worker_publishes_validated_terminal_payload_from_stdout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+
+            def behavior(call):
+                run_id = call["environment"]["ACD_RUN_ID"]
+                return HermesSessionResult(
+                    success=True,
+                    session_id="session_12345678",
+                    returncode=0,
+                    terminal_payload={
+                        "schema_version": "1.0",
+                        "run_id": run_id,
+                        "status": "blocked",
+                        "output_media": [],
+                        "openmontage_artifacts": [],
+                        "source_requests": [],
+                        "blocker": {
+                            "code": "CREATIVE_INPUT_UNAVAILABLE",
+                            "message": "Required creative input is unavailable.",
+                            "phase": "research",
+                            "evidence": {},
+                        },
+                        "error": None,
+                        "summary": "Blocked honestly.",
+                    },
+                )
+
+            state = ThinRunController(cfg, runner=FakeRunner(root, behavior)).start("test")
+            self.assertEqual(state.status, RunStatus.BLOCKED)
+            self.assertEqual(state.blocker.code, "CREATIVE_INPUT_UNAVAILABLE")
+            self.assertTrue(Path(state.agent_result_path).is_file())
+
     def test_ready_handoff_executes_bridge_before_delivery_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -504,7 +727,7 @@ class ControllerTests(unittest.TestCase):
                 result_path = Path(next(
                     line.split(":", 1)[1].strip()
                     for line in prompt.splitlines()
-                    if line.startswith("- mandatory final result file:")
+                    if line.startswith("- worker-owned terminal envelope path:")
                 ))
                 run_id = next(line.split(":", 1)[1].strip() for line in prompt.splitlines() if line.startswith("RUN ID:"))
                 result_path.write_text(json.dumps({
@@ -559,14 +782,53 @@ class ControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cfg = config_for(root)
-            runner = FakeRunner(root, lambda _: HermesSessionResult(success=True, session_id="session_12345678", returncode=0))
+
+            def behavior(call):
+                # A loose artifact without its matching native checkpoint is
+                # not durable progress and must not earn another model slice.
+                project = Path(call["environment"]["ACD_PROJECT_DIR"])
+                artifacts = project / "artifacts"
+                artifacts.mkdir(parents=True, exist_ok=True)
+                (artifacts / "research_brief.json").write_text(
+                    '{"version":"1.0"}', encoding="utf-8"
+                )
+                return HermesSessionResult(
+                    success=True,
+                    session_id="session_12345678",
+                    returncode=0,
+                    metadata={"event_summary": {"max_step": 32, "tool_calls": {"read_file": 20}}},
+                )
+
+            runner = FakeRunner(root, behavior)
             state = ThinRunController(cfg, runner=runner).start("test")
             self.assertEqual(state.status, RunStatus.BLOCKED)
-            self.assertEqual(state.blocker.code, "CREATIVE_HANDOFF_INCOMPLETE")
-            self.assertEqual(len(runner.calls), 2)
-            self.assertEqual(runner.calls[1]["session_id"], "session_12345678")
-            self.assertEqual(runner.calls[1]["max_turns"], 60)
-            self.assertIn("CONTINUATION SLICE: 1 of 1", runner.calls[1]["prompt"])
+            self.assertEqual(state.blocker.code, "HERMES_NO_NATIVE_PROGRESS")
+            self.assertEqual(len(runner.calls), 1)
+            self.assertEqual(runner.calls[0]["environment"]["ACD_RUN_ID"], state.run_id)
+            self.assertEqual(runner.calls[0]["environment"]["ACD_PROJECT_DIR"], state.project_dir)
+            self.assertEqual(state.blocker.evidence["execution"]["event_summary"]["max_step"], 32)
+
+    def test_invalid_terminal_payload_is_reported_in_no_progress_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+
+            def behavior(call):
+                return HermesSessionResult(
+                    success=True,
+                    session_id="session_12345678",
+                    returncode=0,
+                    terminal_payload={
+                        "schema_version": "1.0",
+                        "run_id": call["environment"]["ACD_RUN_ID"],
+                        "status": "blocked",
+                    },
+                )
+
+            state = ThinRunController(cfg, runner=FakeRunner(root, behavior)).start("test")
+            self.assertEqual(state.status, RunStatus.BLOCKED)
+            self.assertEqual(state.blocker.code, "HERMES_NO_NATIVE_PROGRESS")
+            self.assertIn("terminal_payload_error", state.blocker.evidence["execution"])
 
     def test_missing_result_gets_bounded_checkpoint_continuations(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -575,19 +837,29 @@ class ControllerTests(unittest.TestCase):
 
             def behavior(call):
                 if len(runner.calls) == 1:
+                    project = Path(call["environment"]["ACD_PROJECT_DIR"])
+                    artifacts = project / "artifacts"
+                    artifacts.mkdir(parents=True, exist_ok=True)
+                    research = {"version": "1.0"}
+                    (artifacts / "research_brief.json").write_text(json.dumps(research), encoding="utf-8")
+                    (project / "checkpoint_research.json").write_text(json.dumps({
+                        "stage": "research",
+                        "status": "completed",
+                        "artifacts": {"research_brief": research},
+                    }), encoding="utf-8")
                     return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
                 prompt = call["prompt"]
                 self.assertIn("Do not repeat repository", prompt)
                 self.assertIn("status: ready_for_execution", prompt)
                 self.assertIn("Never invoke `math_animate`", prompt)
-                self.assertIn("at most one corrected retry", prompt)
+                self.assertIn("one corrected retry", prompt)
                 self.assertIn("do not generate, redesign or compose anything", prompt)
                 self.assertIn("CONTINUATION SLICE: 1 of 1", prompt)
                 self.assertIn("final continuation slice", prompt)
                 result_path = Path(next(
                     line.split(":", 1)[1].strip()
                     for line in prompt.splitlines()
-                    if line.startswith("MANDATORY RESULT PATH:")
+                    if line.startswith("WORKER-OWNED RESULT PATH:")
                 ))
                 result_path.write_text(json.dumps({
                     "schema_version": "1.0",
@@ -651,7 +923,7 @@ class ControllerTests(unittest.TestCase):
             resumed = controller.resume(state.run_id)
 
             self.assertEqual(resumed.status, RunStatus.BLOCKED)
-            self.assertEqual(resumed.blocker.code, "CREATIVE_HANDOFF_INCOMPLETE")
+            self.assertEqual(resumed.blocker.code, "HERMES_NATIVE_PROGRESS_STALLED")
             self.assertEqual(len(runner.calls), 1)
             self.assertIn("CONTINUATION SLICE: 1 of 1", runner.calls[0]["prompt"])
             self.assertNotEqual(runner.calls[0]["prompt"], "original prompt")
@@ -710,11 +982,13 @@ class ControllerTests(unittest.TestCase):
 
             def behavior(call):
                 prompt = call["prompt"]
-                result_path = Path(next(line.split(":", 1)[1].strip() for line in prompt.splitlines() if line.startswith("- mandatory final result file:")))
+                result_path = Path(next(line.split(":", 1)[1].strip() for line in prompt.splitlines() if line.startswith("- worker-owned terminal envelope path:")))
                 run_id = next(line.split(":", 1)[1].strip() for line in prompt.splitlines() if line.startswith("RUN ID:"))
                 result_path.write_text(json.dumps({
                     "schema_version": "1.0", "run_id": run_id, "status": "ready_for_execution",
                     "output_media": [], "openmontage_artifacts": [],
+                    "source_requests": [], "blocker": None, "error": None,
+                    "summary": "typed handoff with intentionally mismatched declarations",
                     "execution_request": {
                         "pipeline": "cinematic",
                         "artifacts": {"scene_plan": str(root / "scene_plan.json")},
@@ -847,27 +1121,20 @@ class NativeBridgeContractTests(unittest.TestCase):
                 bridge.prepare(request)
             self.assertEqual(raised.exception.code, "UNAPPROVED_SILENCE_PLAN")
 
-    def test_legacy_flat_blocker_is_safely_normalized(self):
-        envelope = AgentEnvelope.from_dict({
-            "run_id": "run-1",
-            "status": "blocked",
-            "blocker_code": "NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED",
-            "last_valid_artifact": "proposal_packet",
-            "last_valid_stage": "proposal",
-            "missing_native_stages": ["scene_plan", "assets", "edit"],
-            "note": "Native pipeline remains incomplete.",
-        }, "run-1")
-        self.assertEqual(envelope.schema_version, "1.0")
-        self.assertEqual(envelope.output_media, [])
-        self.assertEqual(envelope.blocker["code"], "NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED")
-        self.assertEqual(envelope.blocker["phase"], "proposal")
-        self.assertEqual(
-            envelope.blocker["evidence"]["missing_native_stages"],
-            ["scene_plan", "assets", "edit"],
-        )
+    def test_legacy_flat_blocker_is_rejected_instead_of_normalized(self):
+        with self.assertRaisesRegex(ValueError, "Agent result missing fields"):
+            AgentEnvelope.from_dict({
+                "run_id": "run-1",
+                "status": "blocked",
+                "blocker_code": "NATIVE_PIPELINE_TURN_BUDGET_EXHAUSTED",
+                "last_valid_artifact": "proposal_packet",
+                "last_valid_stage": "proposal",
+                "missing_native_stages": ["scene_plan", "assets", "edit"],
+                "note": "Native pipeline remains incomplete.",
+            }, "run-1")
 
     def test_delivered_envelope_remains_strict(self):
-        with self.assertRaisesRegex(ValueError, "Delivered agent result missing fields"):
+        with self.assertRaisesRegex(ValueError, "Agent result missing fields"):
             AgentEnvelope.from_dict({
                 "run_id": "run-1",
                 "status": "delivered",
@@ -882,7 +1149,7 @@ class NativeBridgeContractTests(unittest.TestCase):
                 result_path = Path(next(
                     line.split(":", 1)[1].strip()
                     for line in call["prompt"].splitlines()
-                    if line.startswith("- mandatory final result file:")
+                    if line.startswith("- worker-owned terminal envelope path:")
                 ))
                 output = result_path.parent.parent / "renders" / "final.mp4"
                 output.parent.mkdir(parents=True)

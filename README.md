@@ -15,7 +15,9 @@ request / mixed inputs
         ↓
 thin ACD controller (7 macro states)
         ↓
-Hermes + Football Emotion skills (creative work through native edit checkpoint)
+Hermes + Football Emotion skills
+        ↓ typed acd-openmontage toolset (no shell/file/code tools)
+OpenMontage schema/checkpoint/tool adapter (creative work through edit)
         ↓
 typed ready_for_execution handoff
         ↓
@@ -109,13 +111,16 @@ OpenMontage work. This setting never creates a new session or fallback router.
 
 OpenMontage pipelines can span more than one Hermes CLI tool-turn slice. When
 Hermes exits cleanly without a terminal result, the controller may run one
-bounded same-session checkpoint continuation by default (60 turns). Configure
+bounded same-session checkpoint continuation by default (32 initial turns plus
+24 continuation turns, each inside the same 20-minute process timeout). Configure
 the slice budgets with `ACD_HERMES_MAX_TURNS`,
 `ACD_HERMES_RECOVERY_MAX_TURNS`, and `ACD_HERMES_MAX_CONTINUATIONS`. Every slice
 uses the same Hermes session and resumes the next incomplete native OpenMontage
 checkpoint without repeating research or capability discovery. This is session
 budgeting, not a worker creative stage machine, and it cannot weaken delivery
-validation.
+validation. Only a coherent canonical artifact plus its matching native
+checkpoint counts as progress; loose files, chat/tool activity and exit zero do
+not earn another slice.
 
 A resumed `AGENT_RUNNING` run counts its first checkpoint continuation as slice
 one; it does not receive an additional uncounted recovery call. Continuations
@@ -124,15 +129,23 @@ corrected retry per missing asset, require immediate native asset checkpointing,
 and direct Hermes to publish the typed handoff as soon as the canonical edit
 prerequisites validate.
 
-The production prompt binds Hermes to the pinned OpenMontage authoring surface:
-`tools.tool_registry.registry.get(name).execute(inputs)`. It also records the
-actual Football Emotion package root for `shared/...` references, forbids
-invented source media and bounds one-time research/discovery. Hermes stops after
-schema-valid planning, scene, asset and edit checkpoints and writes
-`ready_for_execution`. The worker then validates the runtime tuple, checkpoint
-approvals, native schemas and cross-artifact media references before invoking
-OpenMontage `video_compose` exactly once. Hermes cannot render, review or claim
-delivery on the production path.
+The production profile installs the `acd-openmontage` Hermes plugin. Its narrow
+tools expose bounded read-only contract access, schema-validated artifact and
+checkpoint publication, certified zero-cost creative tools, and the existing
+worker-owned source acquisition boundary. Hermes runs from the isolated project
+workspace with `coding_context: off`; production does not expose terminal,
+mutable file or code-execution toolsets and does not enable `--yolo`.
+
+The adapter is the only process that imports the pinned OpenMontage contracts
+and calls `registry.get(name).execute(inputs)`. Hermes stops after schema-valid
+planning, scene, asset and edit checkpoints and returns `ready_for_execution` as
+one exact JSON object. The event adapter captures the supported Hermes
+`run_conversation` return separately from diagnostic CLI output. The worker
+validates and atomically publishes that terminal envelope (or reconstructs it
+from complete native checkpoints), then
+validates the runtime tuple, approvals, schemas and cross-artifact references
+before invoking OpenMontage `video_compose` exactly once. Hermes cannot render,
+review or claim delivery on the production path.
 
 Prepare intake and the Hermes job prompt without executing production:
 

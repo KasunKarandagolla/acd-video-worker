@@ -28,6 +28,13 @@ The worker never authors a scene, cut, title, pacing decision or audio choice.
 Checkpoint reconciliation recognizes existing canonical files; it does not fill
 or transform their creative contents.
 
+Hermes is given a typed `acd-openmontage` plugin instead of being asked to
+discover or import OpenMontage through a general shell. The plugin launches a
+small adapter under the pinned OpenMontage interpreter for bounded contract
+reads, schema/checkpoint publication and a certified zero-cost creative-tool
+allowlist. It cannot invoke `video_compose`; the deterministic bridge below is
+the sole render/review owner.
+
 Hermes progress events are observed in an isolated CLI adapter that wraps the
 pinned `AIAgent.__init__` callback injection point without replacing the class.
 This preserves Hermes' class constants/static helpers and supported profile,
@@ -35,12 +42,13 @@ model, session and tool behavior.
 
 ## Transaction
 
-1. Hermes writes exactly one planning artifact (`proposal_packet` or `brief`),
-   then `scene_plan`, `asset_manifest`, `edit_decisions` and their native
-   checkpoints.
-2. Hermes writes `status: ready_for_execution` with canonical paths and the
-   selected runtime tuple. If the envelope is missing but all required files
-   already exist, the worker may reconcile the same typed handoff.
+1. Hermes authors exactly one planning payload (`proposal_packet` or `brief`),
+   then `scene_plan`, `asset_manifest` and `edit_decisions`. The typed plugin
+   validates and atomically publishes each payload with its native checkpoint.
+2. Hermes returns `status: ready_for_execution` with canonical paths and the
+   selected runtime tuple. The worker validates and publishes the envelope. If
+   it is missing but all required native files already exist, the worker may
+   reconcile the same typed handoff.
 3. The worker replaces any model-supplied approvals with the immutable typed
    run policy.
 4. The bridge checks the exact OpenMontage commit, compatibility patch and
