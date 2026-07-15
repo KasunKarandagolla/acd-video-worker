@@ -78,9 +78,12 @@ User request and mixed inputs
 Worker macro states only:
 
 ```text
-INTAKE → SOURCE_READY → AGENT_RUNNING → VALIDATING → DELIVERED
-                    ↘ BLOCKED / FAILED ↙
+INTAKE → SOURCE_READY → AGENT_RUNNING → NATIVE_EXECUTING → VALIDATING → DELIVERED
+                    ↘ BLOCKED / FAILED ↙          ↘ BLOCKED / FAILED ↙
 ```
+
+`NATIVE_EXECUTING` is only a durable exactly-once transaction boundary; it is
+not a worker-owned creative workflow stage.
 
 `BLOCKED` is correct for an unavailable free model endpoint, missing native render runtime, protected/unavailable sources, an unresolved native approval gate or Kaggle restriction. `FAILED` is reserved for protocol/code/unexpected execution faults. No fixture, dry run, plan JSON, self-referential artifact claim, blank render, ad-hoc fallback MP4, compose-only artifact or exit code can produce `DELIVERED`.
 

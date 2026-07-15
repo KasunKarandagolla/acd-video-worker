@@ -1,6 +1,7 @@
 # Deterministic Native Bridge
 
-**Status:** implemented and contract-canary certified
+**Status:** implemented; recovery revision failure-injection certified. Rerun
+the full native canary after Kaggle bootstrap to certify the installed runtime.
 
 ## Why it exists
 
@@ -39,6 +40,13 @@ Hermes progress events are observed in an isolated CLI adapter that wraps the
 pinned `AIAgent.__init__` callback injection point without replacing the class.
 This preserves Hermes' class constants/static helpers and supported profile,
 model, session and tool behavior.
+
+The adapter sets the real Hermes argv and imports `hermes_cli.main` before
+`run_agent`. This ordering is required by pinned Hermes: the supported
+`-p/--profile` bootstrap changes `HERMES_HOME` at import time before agent and
+CLI modules cache profile-scoped configuration. Reversing that order makes an
+isolated plugin discovery probe pass while the live AIAgent uses the root
+profile and omits `openmontage_native` and `acd_acquire_source`.
 
 An uncertified production run has one deterministic protocol entry on the same
 Hermes request path used by the creative session. The existing event adapter
@@ -85,8 +93,13 @@ flags—never prompts, schemas, reasoning text, response text or credentials.
 6. An isolated OpenMontage Python process invokes
    `registry.get("video_compose").execute(...)` once. OpenMontage publishes
    `render_report`, `final_review`, the compose checkpoint and output hash.
-7. The worker independently revalidates artifact identity/schema/hash lineage,
-   ffprobe evidence, sampled-frame detail and temporal change before `DELIVERED`.
+7. Before canonical publication, the bridge persists the reviewed output hash,
+   `render_report`, `final_review`, and a `rendered_reviewed` journal. Recovery
+   publishes those exact bytes without another compose call. An ambiguous
+   post-render/pre-review crash blocks instead of guessing or rerendering.
+8. The worker independently revalidates artifact identity/schema/hash lineage,
+   ffprobe evidence, eleven-frame detail and whole-timeline temporal-change
+   distribution before `DELIVERED`.
 
 ## Audited OpenMontage compatibility
 
@@ -128,6 +141,17 @@ check, expected modified-path set and overlay hashes.
 - A model-authored legacy `delivered` envelope always fails with
   `LEGACY_DELIVERY_UNSUPPORTED`.
 - Discord failure never changes the run result.
+- A changed Hermes profile/model/plugin/Football-skill identity cannot resume
+  an old conversation without explicit `--restart-hermes-session` authority.
+- Missing/partial persistence generations never hydrate; export never advances
+  its current pointer until every non-secret file and manifest hash is durable.
+- Hydration failure stops production, persistence export holds a global run
+  barrier, and any export failure makes the launcher fail regardless of the
+  worker's terminal status. Persistence roots and export destinations may not
+  overlap.
+- Adapter timeouts kill the complete process group. A render left without a
+  durable native review is never an automatic-retry state; it requires explicit
+  recovery evidence rather than a second compose.
 
 ## Certification
 
@@ -143,20 +167,22 @@ Canary typography discovers a local bold font through fontconfig and portable
 Linux font-directory fallbacks. `ACD_CANARY_FONT` may explicitly select a local
 TTF/OTF file; no particular distribution font package is assumed.
 
-The full native canary was verified on 2026-07-14 against the exact pinned
-commit and audited patch. In the ChatGPT build sandbox only, Node required a
+The earlier full native canary was verified on 2026-07-14 against the exact
+pinned commit and audited patch. The crash-safe transaction revision must earn
+a fresh Kaggle canary certificate before production promotion. In the earlier
+ChatGPT build sandbox only, Node required a
 temporary `os.networkInterfaces()` loopback shim because that container's
 libuv interface lookup fails before Remotion starts. The shim is not part of
 this repository or the Kaggle/production design; all render, artifact, review,
 hash-lineage and independent media checks used the real native path.
 
-Verification evidence for this implementation revision:
+Historical native evidence (not a certificate for the new transaction overlay):
 
 | Evidence | Value |
 |---|---|
 | Native input/media fingerprint | `a6b7ab01bd1d01f5cf9d0ca57907efaf4a97420767f7057d3b60e70499597ecd` |
 | Output SHA-256 | `40cc923d002d27e0606994639bbf4c9e06624d17110ca84ff538a70d3513f76e` |
 | Media | 12.053333 s, H.264, 1280x720, 1,337,104 bytes |
-| Sampled-frame validation | 5 frames; temporal change 12.208; visual detail 25.648; luma range 164 |
+| Sampled-frame validation | Historical canary value; current contract uses 11 frames plus segment/distribution/frozen-ending checks |
 | Native artifacts | proposal, scene plan, asset manifest, edit, render report and final review all valid |
 | Review/lineage | `pass`, `present_to_user`; checkpoint content, review fingerprint and output hash matched |

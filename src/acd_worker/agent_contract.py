@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+# Hermes may author a typed creative handoff or report a problem. Delivery is
+# never a model-owned status: only native execution plus worker validation can
+# transition RunState to DELIVERED.
+# ``delivered`` remains parseable solely so the controller can reject old
+# model-authored delivery envelopes with a precise migration error. It is not
+# an accepted production transition.
 VALID_AGENT_STATUSES = {"ready_for_execution", "delivered", "blocked", "failed"}
 
 
@@ -85,8 +91,6 @@ class AgentEnvelope:
             error=error,
             summary=data["summary"],
         )
-        if envelope.status == "delivered" and not envelope.output_media:
-            raise ValueError("Delivered agent result contains no output media")
         if envelope.status == "ready_for_execution":
             if envelope.output_media:
                 raise ValueError("Ready-for-execution result must not claim output media")

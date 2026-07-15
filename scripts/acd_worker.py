@@ -49,13 +49,13 @@ class ACDConfig:
             openmontage_root=openmontage_root,
             openmontage_projects_dir=Path(os.environ.get("OPENMONTAGE_PROJECTS_DIR", openmontage_root / "projects")).expanduser(),
             state_dir=Path(os.environ.get("ACD_STATE_DIR", PROJECT_ROOT / "state" / "runs")).expanduser(),
-            hermes_timeout=int(os.environ.get("ACD_HERMES_TIMEOUT", "1200")),
-            hermes_max_turns=int(os.environ.get("ACD_HERMES_MAX_TURNS", "32")),
-            hermes_recovery_max_turns=int(os.environ.get("ACD_HERMES_RECOVERY_MAX_TURNS", "24")),
+            hermes_timeout=int(os.environ.get("ACD_HERMES_TIMEOUT", "480")),
+            hermes_max_turns=int(os.environ.get("ACD_HERMES_MAX_TURNS", "20")),
+            hermes_recovery_max_turns=int(os.environ.get("ACD_HERMES_RECOVERY_MAX_TURNS", "12")),
             hermes_max_continuations=int(os.environ.get("ACD_HERMES_MAX_CONTINUATIONS", "1")),
             hermes_headless_auto_approve=os.environ.get("ACD_HERMES_YOLO", "false").lower() == "true",
             hermes_model_override=os.environ.get("ACD_HERMES_MODEL_OVERRIDE", "").strip() or None,
-            native_execution_timeout=int(os.environ.get("ACD_NATIVE_EXECUTION_TIMEOUT", "1800")),
+            native_execution_timeout=int(os.environ.get("ACD_NATIVE_EXECUTION_TIMEOUT", "480")),
             discord_webhook_url=os.environ.get("DISCORD_WEBHOOK_URL", ""),
             dry_run=os.environ.get("ACD_DRY_RUN", "false").lower() == "true",
         )
@@ -95,11 +95,18 @@ def main() -> int:
         action="store_true",
         help="Explicitly retry a transient Hermes/OpenMontage runtime blocker in the existing project",
     )
+    parser.add_argument(
+        "--restart-hermes-session",
+        action="store_true",
+        help="Explicitly start a fresh Hermes session after a runtime identity change while preserving native project checkpoints",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Prepare intake and Hermes prompt, then report BLOCKED without executing")
     parser.add_argument("--json", action="store_true", help="Print only the final run-state JSON")
     args = parser.parse_args()
     if args.retry_blocked and not args.run_id:
         parser.error("--retry-blocked requires --run-id")
+    if args.restart_hermes_session and not args.run_id:
+        parser.error("--restart-hermes-session requires --run-id")
 
     logging.basicConfig(
         level=getattr(logging, os.environ.get("ACD_LOG_LEVEL", "INFO").upper(), logging.INFO),
@@ -134,6 +141,7 @@ def main() -> int:
             args.run_id,
             retry_blocked=args.retry_blocked,
             approval_policy=approval_policy if policy_supplied else None,
+            restart_hermes_session=args.restart_hermes_session,
         )
     else:
         if not args.request:

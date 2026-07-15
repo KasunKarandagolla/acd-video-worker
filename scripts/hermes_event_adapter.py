@@ -508,14 +508,20 @@ def main() -> int:
     args, hermes_args = parser.parse_known_args()
     sink = EventSink(args.event_file, args.terminal_response_file)
 
+    # Pinned Hermes applies -p/--profile while importing hermes_cli.main and
+    # requires that to happen before run_agent or cli cache profile-scoped
+    # configuration. Importing run_agent first makes an isolated plugin probe
+    # pass while the real AIAgent silently uses the root profile and omits the
+    # named profile's tools.
+    sys.argv = ["hermes", *hermes_args]
+    from hermes_cli import main as hermes_main_module
+
     import run_agent
+
     instrument_run_agent(run_agent, sink)
     sink.emit("adapter_started")
-    sys.argv = ["hermes", *hermes_args]
     try:
-        from hermes_cli.main import main as hermes_main
-
-        result = hermes_main()
+        result = hermes_main_module.main()
         sink.emit("adapter_finished", return_value=result)
         return int(result or 0)
     except SystemExit as exc:

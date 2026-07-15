@@ -88,7 +88,7 @@ skills:
   inline_shell: false
   write_approval: false
 agent:
-  max_turns: 32
+  max_turns: 20
   coding_context: off
   max_spawn_depth: 1
   subagent_auto_approve: false

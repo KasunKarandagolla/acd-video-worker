@@ -1,6 +1,6 @@
 # Implementation Contract — Thin ACD Control Plane
 
-**Status:** locked
+**Status:** locked, root-cause recovery revision
 
 **Authority:** `docs/FINAL_ARCHITECTURE.md`
 
@@ -22,26 +22,35 @@ The controller may perform only:
 6. compatibility, approval, schema and cross-artifact validation followed by
    one isolated OpenMontage native compose/review transaction;
 7. independent final artifact/media/visual validation;
-8. terminal persistence and best-effort notification.
+8. generation-atomic terminal persistence and best-effort notification.
 
 ## State contract
 
-Allowed states are exactly `INTAKE`, `SOURCE_READY`, `AGENT_RUNNING`, `VALIDATING`, `DELIVERED`, `BLOCKED`, and `FAILED`. State writes are atomic. State stores no creative stage machine, chain-of-thought or duplicated OpenMontage artifacts.
+Allowed states are exactly `INTAKE`, `SOURCE_READY`, `AGENT_RUNNING`,
+`NATIVE_EXECUTING`, `VALIDATING`, `DELIVERED`, `BLOCKED`, and `FAILED`.
+`NATIVE_EXECUTING` records only the deterministic transaction boundary. State
+writes are atomic. State stores no creative stage machine, chain-of-thought or
+duplicated OpenMontage artifacts.
 
 Every blocker/error has a stable code, actionable message, phase and optional evidence. Expected missing external prerequisites map to `BLOCKED`; malformed results and unexpected execution faults map to `FAILED`.
 
 Terminal states are immutable during ordinary resume. An explicit
 `--retry-blocked` may reopen only the controller's fixed retryable blocker
 allowlist (provider/runtime availability, typed approval, and bounded native
-progress blockers). It must reuse the same project and, when one exists, the
+progress blockers). An interrupted render with no durable native review is not
+retryable because a second compose would violate exactly-once execution. It must reuse the same project and, when one exists, the
 supported Hermes `--resume` session. Failed and delivered states never reopen.
+If the persisted profile/model/plugin/Football-skill identity changes, reuse of
+that conversation is forbidden. Explicit `--restart-hermes-session` authority
+may start a clean Hermes conversation while preserving valid native project
+checkpoints.
 
 ## Hermes contract
 
 - Use the pinned supported `-p ... chat -q ... -Q` interface.
-- An operator may use Hermes' supported global `-m` selector before `chat` to
-  hand a resumed transient-provider blocker to a different configured model;
-  the project, session, history and validation contract remain unchanged.
+- The runner uses Hermes' supported global `-m` selector before `chat` for the
+  configured model. A model/profile/plugin/skill identity change requires an
+  explicit clean Hermes session; it cannot be injected into an old session.
 - Use `--resume`, not invented session flags.
 - Pass the Hermes root as `HERMES_HOME`; let `-p` resolve the named profile.
 - Preload the six core bridge/story/cutting/audio/quality entry skills and
@@ -56,6 +65,8 @@ supported Hermes `--resume` session. Failed and delivered states never reopen.
   `chat_template_kwargs.force_nonempty_content=true`. Bootstrap must fail closed
   if this reasoning-plus-tool parsing contract is absent.
 - Capture stdout/stderr for diagnostics, redact secrets and enforce timeout.
+  Isolate the adapter in its own process group and terminate all descendants on
+  timeout or heartbeat failure.
   Capture the supported `run_conversation` return value separately because
   quiet CLI stdout can still contain reasoning/progress rendering; never scan
   general stdout for a convenient JSON substring.
@@ -98,6 +109,12 @@ supported Hermes `--resume` session. Failed and delivered states never reopen.
   retryable blocker; a suppressed manifest gate is a failure.
 - Legacy Hermes `delivered` envelopes are parsed only to return
   `LEGACY_DELIVERY_UNSUPPORTED`; they cannot enter validation or delivery.
+- Native publication is a crash-safe `prepared → rendering →
+  rendered_reviewed → published` journal. Recovery after `rendered_reviewed`
+  must reuse the reviewed bytes and must not call `video_compose` twice.
+- The native input fingerprint binds the complete typed request, approvals,
+  source manifest, canonical artifacts, referenced media, Football skills,
+  pinned commits, compatibility marker, and installed adapter/overlay bytes.
 
 ## Source contract
 
@@ -108,6 +125,9 @@ supported Hermes `--resume` session. Failed and delivered states never reopen.
 - Every attempt and exact failure is recorded.
 - Never bypass DRM, login, age/geo gates, cookies, CAPTCHA, protected playback or access controls.
 - Rights status remains unverified until evidenced; transformative intent is not declared legally safe.
+- Availability, technical validation, provenance, license and rights evidence
+  are separate fields. A successful download or ffprobe result is never rights
+  verification.
 
 ## Delivery contract
 
@@ -122,7 +142,9 @@ supported Hermes `--resume` session. Failed and delivered states never reopen.
   plus `scene_plan`, `asset_manifest`, `edit_decisions`, `render_report`, and
   `final_review` exist separately under native `artifacts/`;
 - `render_report`, `final_review`, renderer family and runtime agree on the delivered file;
-- sampled frames contain meaningful visual detail rather than a blank/solid-colour technical canary;
+- eleven uniformly sampled frames contain meaningful detail and distributed
+  temporal change across the beginning, middle and ending; one changing frame,
+  an animated intro followed by a freeze, or a frozen ending cannot pass;
 - a video stream and positive duration exist;
 - validation evidence is persisted.
 
@@ -130,7 +152,12 @@ Dry runs, fixture bytes, mocked outputs, plan JSON, self-referential or schema-i
 
 ## Persistence and notification
 
-Kaggle hydration/export copies only project state, outputs and the named Hermes profile’s durable non-secret data. `.env`, tokens and other credentials are excluded. Discord is optional, receives only macro outcomes, and can never change a run result.
+Kaggle hydration/export copies only project state, outputs and the named Hermes
+profile’s durable non-secret data. It requires either an explicit fresh start
+or a hash-verified committed generation, refuses active run leases, uses SQLite
+backup, scans for secrets, publishes an immutable generation, then atomically
+advances `current.json`. `.env`, tokens and credentials are excluded. Discord
+is optional, receives only macro outcomes, and can never change a run result.
 
 ## Required validation
 

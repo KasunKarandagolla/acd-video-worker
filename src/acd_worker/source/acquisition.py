@@ -78,7 +78,12 @@ class AcquisitionAttempt:
 
 @dataclass
 class AcquiredSource:
-    """Successfully acquired and validated source."""
+    """Successfully acquired and technically validated source.
+
+    Acquisition success never implies permission to publish. Technical,
+    availability, provenance, and rights evidence are separate facts so a
+    downloaded file cannot silently become a rights-cleared asset.
+    """
     source_id: str
     candidate_id: str
     original_url: str
@@ -89,7 +94,15 @@ class AcquiredSource:
     technical_metadata: Dict
     selected_timestamps: List = field(default_factory=list)
     quality_warnings: List = field(default_factory=list)
-    verification_status: str = "verified"
+    technical_verification_status: str = "passed"
+    availability_status: str = "acquired"
+    rights_status: str = "unverified"
+    rights_evidence: List = field(default_factory=list)
+    license: str = "unknown"
+    provenance: Dict = field(default_factory=dict)
+    # Deprecated input/output retained for compatibility with old snapshots;
+    # it is explicitly technical-only and must never be interpreted as rights.
+    verification_status: str = "technical_only"
     acquisition_attempts: List = field(default_factory=list)
     file_hash: str = ""
     file_size_bytes: int = 0
@@ -384,7 +397,17 @@ class AcquisitionEngine:
                     clip_id=clip_id,
                     technical_metadata=attempt.technical_metadata,
                     quality_warnings=attempt.quality_warnings,
-                    verification_status="verified",
+                    technical_verification_status="passed",
+                    availability_status="acquired",
+                    rights_status="unverified",
+                    rights_evidence=[],
+                    license="unknown",
+                    provenance={
+                        "acquisition_tool": "yt-dlp",
+                        "candidate_id": candidate.candidate_id,
+                        "original_url": candidate.url,
+                    },
+                    verification_status="technical_only",
                     acquisition_attempts=[a.to_dict() for a in all_attempts],
                     file_hash=self._compute_hash(attempt.local_path),
                     file_size_bytes=os.path.getsize(attempt.local_path) if attempt.local_path else 0,

@@ -6,6 +6,7 @@ passing prompts that activate specific skills, and capturing structured outputs.
 """
 
 import os
+import signal
 import re
 import shutil
 import subprocess
@@ -17,6 +18,24 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, List, Dict
+
+
+def _terminate_process_group(process: subprocess.Popen, grace_seconds: float = 10) -> None:
+    """Stop the Hermes adapter and every tool process it spawned."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if process.poll() is None:
+        process.wait()
 
 
 @dataclass
@@ -45,10 +64,10 @@ class HermesRunner:
         hermes_home: str,
         profile: str = "football-emotion",
         dry_run: bool = False,
-        timeout: int = 600,
+        timeout: int = 480,
         hermes_cli: Optional[str] = None,
         cwd: Optional[Path] = None,
-        max_turns: int = 60,
+        max_turns: int = 20,
         headless_auto_approve: bool = False,
         model_override: Optional[str] = None,
         event_adapter: Optional[Path] = None,
@@ -317,21 +336,23 @@ class HermesRunner:
                 cwd=str(cwd) if cwd else None,
                 stdout=stdout,
                 stderr=stderr,
+                start_new_session=True,
             )
-            while process.poll() is None:
-                elapsed = time.monotonic() - started
-                if elapsed > self.timeout:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                    raise subprocess.TimeoutExpired(adapter_command, self.timeout)
-                offset = self._emit_new_events(event_file, offset, progress_callback)
-                if progress_callback and elapsed - last_alive >= 15:
-                    progress_callback({"event": "hermes_process_alive", "elapsed_seconds": round(elapsed, 1)})
-                    last_alive = elapsed
-                time.sleep(1.0)
+            try:
+                while process.poll() is None:
+                    elapsed = time.monotonic() - started
+                    if elapsed > self.timeout:
+                        _terminate_process_group(process)
+                        raise subprocess.TimeoutExpired(adapter_command, self.timeout)
+                    offset = self._emit_new_events(event_file, offset, progress_callback)
+                    if progress_callback and elapsed - last_alive >= 15:
+                        progress_callback({"event": "hermes_process_alive", "elapsed_seconds": round(elapsed, 1)})
+                        last_alive = elapsed
+                    time.sleep(1.0)
+            except BaseException:
+                if process.poll() is None:
+                    _terminate_process_group(process)
+                raise
         self._emit_new_events(event_file, offset, progress_callback)
         stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
         stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")

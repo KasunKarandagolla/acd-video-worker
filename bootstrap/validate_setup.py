@@ -380,6 +380,19 @@ def hermes_same_path_contract_gate(hermes_repo: Path) -> Gate:
             absent.append(f"missing {path}")
             continue
         absent.extend(f"{path.name}: {marker}" for marker in markers if marker not in source)
+    adapter_path = ROOT / "scripts" / "hermes_event_adapter.py"
+    try:
+        adapter_source = adapter_path.read_text(encoding="utf-8")
+    except OSError:
+        adapter_source = ""
+    profile_bootstrap = "from hermes_cli import main as hermes_main_module"
+    run_agent_import = "import run_agent"
+    if not (
+        profile_bootstrap in adapter_source
+        and run_agent_import in adapter_source
+        and adapter_source.index(profile_bootstrap) < adapter_source.index(run_agent_import)
+    ):
+        absent.append("hermes_event_adapter.py: named-profile bootstrap before run_agent import")
     if absent:
         return Gate(
             "hermes_same_path_contract",

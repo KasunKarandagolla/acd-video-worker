@@ -30,7 +30,7 @@ from acd_worker.job_prompt import PRELOADED_SKILLS, build_job_prompt
 from acd_worker.media_validation import FinalMediaValidator, OpenMontageArtifactValidator, REQUIRED_OPENMONTAGE_ARTIFACTS
 from acd_worker.notifications import DiscordNotifier
 from acd_worker.native_bridge import NativeExecutionBridge, NativeExecutionError, NativeExecutionRequest
-from acd_worker.run_state import RunState, RunStateStore, RunStatus, utc_now
+from acd_worker.run_state import RunProblem, RunState, RunStateStore, RunStatus, utc_now
 from acd_worker.source_service import SourceService, sanitize_reference
 from acd_worker.thin_controller import ThinControllerConfig, ThinRunController
 
@@ -185,6 +185,17 @@ class CompatibilityTests(unittest.TestCase):
 
 
 class PromptAndBoundaryTests(unittest.TestCase):
+    def test_production_resource_defaults_match_bounded_runbook(self):
+        from scripts.acd_worker import ACDConfig
+
+        with patch.dict(os.environ, {}, clear=True):
+            runtime = ACDConfig.from_env()
+        self.assertEqual(runtime.hermes_timeout, 480)
+        self.assertEqual(runtime.hermes_max_turns, 20)
+        self.assertEqual(runtime.hermes_recovery_max_turns, 12)
+        self.assertEqual(runtime.hermes_max_continuations, 1)
+        self.assertEqual(runtime.native_execution_timeout, 480)
+
     def test_prompt_delegates_creative_and_native_pipeline(self):
         prompt = build_job_prompt(
             run_id="r1", project_id="p1", request="football emotion",
@@ -231,6 +242,12 @@ class PromptAndBoundaryTests(unittest.TestCase):
             manifest = SourceService().prepare_manifest(path, [str(local), "https://example.com/video"])
             self.assertTrue(manifest["policy"]["free_only"])
             self.assertEqual([s["kind"] for s in manifest["sources"]], ["local_file", "url"])
+            for source in manifest["sources"]:
+                self.assertIn("availability_status", source)
+                self.assertIn("technical_verification_status", source)
+                self.assertIn("rights_status", source)
+                self.assertEqual(source["rights_evidence"], [])
+                self.assertNotIn("status", source)
 
     def test_source_reference_strips_credentials_but_keeps_video_id(self):
         cleaned = sanitize_reference("https://user:pass@example.com/watch?v=abc123&access_token=secret#fragment")
@@ -407,6 +424,43 @@ class HermesRunnerTests(unittest.TestCase):
                 [{"from": item["from"], "to": item["to"]} for item in retried.history],
             )
 
+    def test_runtime_change_blocks_old_session_until_explicit_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+            runner = FakeRunner(
+                root,
+                lambda _: HermesSessionResult(
+                    success=False,
+                    session_id="session_12345678",
+                    returncode=1,
+                    error="HTTP 429: Too Many Requests",
+                ),
+            )
+            controller = ThinRunController(cfg, runner=runner)
+            blocked = controller.start("test")
+            Path(blocked.agent_result_path).write_text(
+                json.dumps({"status": "blocked", "run_id": blocked.run_id}),
+                encoding="utf-8",
+            )
+            plugin = runner.profile_dir / "plugins" / "acd-openmontage" / "__init__.py"
+            plugin.write_text("def register(ctx):\n    return 'changed'\n", encoding="utf-8")
+
+            changed = controller.resume(blocked.run_id, retry_blocked=True)
+            self.assertEqual(changed.blocker.code, "HERMES_SESSION_RUNTIME_CHANGED")
+            self.assertEqual(len(runner.calls), 1)
+
+            restarted = controller.resume(
+                blocked.run_id,
+                retry_blocked=True,
+                restart_hermes_session=True,
+            )
+            self.assertEqual(restarted.blocker.code, "HERMES_PROVIDER_RATE_LIMITED")
+            self.assertEqual(restarted.hermes_session_generation, 1)
+            self.assertEqual(len(runner.calls), 2)
+            self.assertIsNone(runner.calls[-1]["session_id"])
+            self.assertFalse(Path(restarted.agent_result_path).exists())
+
     def test_authentication_blocker_is_not_retryable_without_configuration_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -435,6 +489,61 @@ class HermesRunnerTests(unittest.TestCase):
 
 
 class OptionalInfrastructureTests(unittest.TestCase):
+    def test_event_adapter_bootstraps_named_profile_before_run_agent_import(self):
+        """The live agent must load config and plugins from its named profile."""
+        adapter = ROOT / "scripts" / "hermes_event_adapter.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_modules = root / "fake-modules"
+            package = fake_modules / "hermes_cli"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "main.py").write_text(
+                "import os, sys\n"
+                "from pathlib import Path\n"
+                "index = sys.argv.index('-p')\n"
+                "name = sys.argv[index + 1]\n"
+                "os.environ['HERMES_HOME'] = str(Path(os.environ['HERMES_HOME']) / 'profiles' / name)\n"
+                "def main(): return 0\n",
+                encoding="utf-8",
+            )
+            (fake_modules / "run_agent.py").write_text(
+                "import os\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['ACD_IMPORT_ORDER_PROBE']).write_text(os.environ.get('HERMES_HOME', ''), encoding='utf-8')\n"
+                "class AIAgent:\n"
+                "    def __init__(self, **kwargs): pass\n",
+                encoding="utf-8",
+            )
+            event_file = root / "events.jsonl"
+            probe = root / "profile-seen-by-run-agent.txt"
+            hermes_root = root / "hermes-home"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(adapter),
+                    "--event-file",
+                    str(event_file),
+                    "-p",
+                    "football-emotion",
+                    "chat",
+                ],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PYTHONPATH": str(fake_modules),
+                    "HERMES_HOME": str(hermes_root),
+                    "ACD_IMPORT_ORDER_PROBE": str(probe),
+                },
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                probe.read_text(encoding="utf-8"),
+                str(hermes_root / "profiles" / "football-emotion"),
+            )
+
     def test_hermes_event_adapter_preserves_aiagent_class_contract(self):
         sys.path.insert(0, str(ROOT / "scripts"))
         from hermes_event_adapter import instrument_run_agent
@@ -994,10 +1103,12 @@ class OptionalInfrastructureTests(unittest.TestCase):
             source.mkdir()
             (source / "state.db").write_text("durable", encoding="utf-8")
             (source / ".env").write_text("SECRET=value", encoding="utf-8")
+            (source / ".env.local").write_text("SECRET=local", encoding="utf-8")
             (source / "link").symlink_to(source / "state.db")
             copy_tree(source, destination)
             self.assertTrue((destination / "state.db").is_file())
             self.assertFalse((destination / ".env").exists())
+            self.assertFalse((destination / ".env.local").exists())
             self.assertFalse((destination / "link").exists())
 
     def test_persistence_uses_sqlite_backup_for_live_database(self):
@@ -1019,6 +1130,177 @@ class OptionalInfrastructureTests(unittest.TestCase):
             with sqlite3.connect(destination / "state.db") as snapshot:
                 self.assertEqual(snapshot.execute("SELECT value FROM events").fetchone()[0], "durable")
             connection.close()
+
+    def test_persistence_generations_publish_atomically_and_hydrate_current(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import kaggle_persistence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hermes = root / "hermes" / "profiles" / "football-emotion"
+            state = root / "state" / "runs"
+            projects = root / "projects"
+            hermes.mkdir(parents=True)
+            state.mkdir(parents=True)
+            projects.mkdir()
+            (state / "run.json").write_text('{"status":"BLOCKED"}\n', encoding="utf-8")
+            destination = root / "persist"
+            environment = {
+                "HERMES_HOME": str(root / "hermes"),
+                "HERMES_PROFILE": "football-emotion",
+                "ACD_STATE_DIR": str(state),
+                "OPENMONTAGE_PROJECTS_DIR": str(projects),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                kaggle_persistence.export(destination)
+                pointer = json.loads((destination / "current.json").read_text(encoding="utf-8"))
+                generation = destination / "generations" / pointer["generation_id"]
+                self.assertTrue((generation / "snapshot-manifest.json").is_file())
+                shutil.rmtree(root / "state")
+                state.mkdir(parents=True)
+                kaggle_persistence.hydrate(destination)
+                self.assertEqual((state / "run.json").read_text(encoding="utf-8"), '{"status":"BLOCKED"}\n')
+
+    def test_persistence_rejects_unmanifested_generation_file(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import kaggle_persistence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile = root / "hermes" / "profiles" / "football-emotion"
+            state = root / "state" / "runs"
+            projects = root / "projects"
+            profile.mkdir(parents=True)
+            state.mkdir(parents=True)
+            projects.mkdir()
+            (state / "run.json").write_text("{}\n", encoding="utf-8")
+            destination = root / "persist"
+            environment = {
+                "HERMES_HOME": str(root / "hermes"),
+                "HERMES_PROFILE": "football-emotion",
+                "ACD_STATE_DIR": str(state),
+                "OPENMONTAGE_PROJECTS_DIR": str(projects),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                kaggle_persistence.export(destination)
+                pointer = json.loads((destination / "current.json").read_text(encoding="utf-8"))
+                generation = destination / "generations" / pointer["generation_id"]
+                (generation / "unmanifested.txt").write_text("tamper", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "file set mismatch"):
+                    kaggle_persistence.hydrate(destination)
+
+    def test_persistence_failed_generation_does_not_advance_current(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import kaggle_persistence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile = root / "hermes" / "profiles" / "football-emotion"
+            state = root / "state" / "runs"
+            projects = root / "projects"
+            profile.mkdir(parents=True)
+            state.mkdir(parents=True)
+            projects.mkdir()
+            (state / "run.json").write_text("{}\n", encoding="utf-8")
+            destination = root / "persist"
+            environment = {
+                "HERMES_HOME": str(root / "hermes"),
+                "HERMES_PROFILE": "football-emotion",
+                "ACD_STATE_DIR": str(state),
+                "OPENMONTAGE_PROJECTS_DIR": str(projects),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                kaggle_persistence.export(destination)
+                before = (destination / "current.json").read_bytes()
+                original = kaggle_persistence.copy_tree
+
+                def fail_after_one(source, target):
+                    if target.name == "acd-state":
+                        raise OSError("injected snapshot failure")
+                    return original(source, target)
+
+                with patch.object(kaggle_persistence, "copy_tree", side_effect=fail_after_one):
+                    with self.assertRaises(OSError):
+                        kaggle_persistence.export(destination)
+                self.assertEqual((destination / "current.json").read_bytes(), before)
+
+    def test_persistence_export_refuses_active_or_starting_run_race(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import kaggle_persistence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile = root / "hermes" / "profiles" / "football-emotion"
+            state = root / "state" / "runs"
+            projects = root / "projects"
+            profile.mkdir(parents=True)
+            state.mkdir(parents=True)
+            projects.mkdir()
+            destination = root / "persist"
+            environment = {
+                "HERMES_HOME": str(root / "hermes"),
+                "HERMES_PROFILE": "football-emotion",
+                "ACD_STATE_DIR": str(state),
+                "OPENMONTAGE_PROJECTS_DIR": str(projects),
+            }
+            store = RunStateStore(state)
+            with patch.dict(os.environ, environment, clear=False):
+                with store.lease("active-run"):
+                    with self.assertRaisesRegex(RuntimeError, "run is active"):
+                        kaggle_persistence.export(destination)
+            self.assertFalse((destination / "current.json").exists())
+
+    def test_persistence_destination_cannot_overlap_runtime_roots(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import kaggle_persistence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile = root / "hermes" / "profiles" / "football-emotion"
+            state = root / "state" / "runs"
+            projects = root / "projects"
+            profile.mkdir(parents=True)
+            state.mkdir(parents=True)
+            projects.mkdir()
+            environment = {
+                "HERMES_HOME": str(root / "hermes"),
+                "HERMES_PROFILE": "football-emotion",
+                "ACD_STATE_DIR": str(state),
+                "OPENMONTAGE_PROJECTS_DIR": str(projects),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                with self.assertRaisesRegex(ValueError, "must not overlap"):
+                    kaggle_persistence.export(projects / "persistence")
+
+    def test_persistence_secret_scan_covers_large_files_and_chunk_boundaries(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import kaggle_persistence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload = root / "large-runtime-log.bin"
+            with payload.open("wb") as handle:
+                handle.seek(33 * 1024 * 1024 - 7)
+                handle.write(b"nvapi-abcdefghijklmnopqrstuvwx")
+            with self.assertRaisesRegex(ValueError, "credential-like material"):
+                kaggle_persistence._reject_secrets(root)
+
+    def test_kaggle_launchers_fail_closed_and_preserve_unknown_directories(self):
+        launcher = (ROOT / "bootstrap" / "run_kaggle_job.sh").read_text(encoding="utf-8")
+        master = (ROOT / "bootstrap" / "kaggle_master_init.sh").read_text(encoding="utf-8")
+        self.assertIn('if [[ "$hydrate_status" -ne 0 ]]', launcher)
+        self.assertIn('exit "$hydrate_status"', launcher)
+        self.assertIn('if [[ "$persist_status" -ne 0 ]]', launcher)
+        self.assertNotIn('rm -rf "$REPO_DIR"', master)
+        self.assertIn("Refusing to replace a non-repository directory", master)
+
+    def test_timeout_processes_are_isolated_and_killed_as_groups(self):
+        native = (ROOT / "src" / "acd_worker" / "native_bridge.py").read_text(encoding="utf-8")
+        hermes = (ROOT / "src" / "acd_worker" / "hermes_runner.py").read_text(encoding="utf-8")
+        for source in (native, hermes):
+            self.assertIn("start_new_session=True", source)
+            self.assertIn("os.killpg(process.pid, signal.SIGTERM)", source)
+            self.assertIn("os.killpg(process.pid, signal.SIGKILL)", source)
 
     def test_profile_configuration_never_writes_api_key(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1138,6 +1420,40 @@ class OptionalInfrastructureTests(unittest.TestCase):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_interrupted_render_without_review_is_not_automatically_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+            now = utc_now()
+            state = RunState(
+                schema_version="1.0",
+                run_id="manual-review-required",
+                project_id="football-manual-review",
+                request="test",
+                status=RunStatus.BLOCKED,
+                created_at=now,
+                updated_at=now,
+                project_dir=str(cfg.projects_dir / "football-manual-review"),
+                source_manifest_path=str(root / "source_manifest.json"),
+                agent_result_path=str(root / "agent_result.json"),
+                prompt_path=str(root / "prompt.md"),
+                blocker=RunProblem(
+                    code="NATIVE_RENDER_RECOVERY_REVIEW_REQUIRED",
+                    message="render bytes exist without durable review",
+                    phase="native_execution",
+                ),
+                native_execution={"status": "rendering", "fingerprint": "fp"},
+            )
+            runner = FakeRunner(root, lambda _: self.fail("Hermes must not run"))
+            controller = ThinRunController(cfg, runner=runner)
+            controller.store.save(state)
+
+            resumed = controller.resume(state.run_id, retry_blocked=True)
+
+            self.assertEqual(resumed.status, RunStatus.BLOCKED)
+            self.assertEqual(resumed.blocker.code, "NATIVE_RENDER_RECOVERY_REVIEW_REQUIRED")
+            self.assertEqual(runner.calls, [])
+
     def test_successful_process_without_live_tool_contract_is_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1522,6 +1838,64 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(bridge.request["output_profile"], "generic_720p")
             self.assertEqual(set(bridge.request["artifacts"]), {"proposal_packet", "scene_plan", "asset_manifest", "edit_decisions"})
 
+    def test_interrupted_native_result_resumes_without_another_hermes_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+
+            def behavior(call):
+                project = Path(call["environment"]["ACD_PROJECT_DIR"])
+                artifacts = project / "artifacts"
+                artifacts.mkdir(parents=True, exist_ok=True)
+                (project / "project.json").write_text(
+                    json.dumps({"pipeline_type": "cinematic"}), encoding="utf-8"
+                )
+                for kind in ("proposal_packet", "scene_plan", "asset_manifest", "edit_decisions"):
+                    (artifacts / f"{kind}.json").write_text(
+                        json.dumps({"version": "1.0"}), encoding="utf-8"
+                    )
+                return HermesSessionResult(success=True, session_id="session_12345678", returncode=0)
+
+            class RecoveringBridge:
+                def __init__(self):
+                    self.calls = 0
+
+                def prepare(self, request):
+                    return SimpleNamespace(approved_silence=False), {"runtime": {}}, "recovery-fingerprint"
+
+                def execute(self, request, heartbeat=None):
+                    self.calls += 1
+                    if self.calls == 1:
+                        raise NativeExecutionError(
+                            "NATIVE_RESULT_MISSING",
+                            "injected crash after native adapter",
+                        )
+                    return SimpleNamespace(
+                        fingerprint="recovery-fingerprint",
+                        output_media=[{"path": str(root / "render.mp4"), "sha256": "hash"}],
+                        openmontage_artifacts=[{"kind": "render_report", "path": str(root / "report.json")}],
+                        compatibility={"supported": True},
+                        native_result={"status": "delivered", "recovered": True},
+                    )
+
+            runner = FakeRunner(root, behavior)
+            bridge = RecoveringBridge()
+            controller = ThinRunController(cfg, runner=runner, native_bridge=bridge)
+            blocked = controller.start("test")
+            self.assertEqual(blocked.status, RunStatus.BLOCKED)
+            self.assertEqual(blocked.blocker.code, "NATIVE_RESULT_MISSING")
+            self.assertEqual(len(runner.calls), 1)
+
+            with (
+                patch("acd_worker.thin_controller.OpenMontageArtifactValidator.validate", return_value={"valid": True}),
+                patch("acd_worker.thin_controller.FinalMediaValidator.validate", return_value={"valid": True}),
+            ):
+                delivered = controller.resume(blocked.run_id, retry_blocked=True)
+            self.assertEqual(delivered.status, RunStatus.DELIVERED)
+            self.assertEqual(bridge.calls, 2)
+            self.assertEqual(len(runner.calls), 1)
+            self.assertTrue(delivered.native_execution["native_result"]["recovered"])
+
     def test_ready_handoff_rejects_artifact_declaration_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1550,6 +1924,90 @@ class ControllerTests(unittest.TestCase):
 
 
 class NativeBridgeContractTests(unittest.TestCase):
+    def test_native_transaction_recovers_after_review_without_second_compose(self):
+        import importlib.util
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            artifacts = project / "artifacts"
+            renders = project / "renders"
+            artifacts.mkdir(parents=True)
+            renders.mkdir()
+            artifact_paths = {}
+            for kind in ("proposal_packet", "scene_plan", "asset_manifest", "edit_decisions"):
+                path = artifacts / f"{kind}.json"
+                path.write_text(json.dumps({"version": "1.0"}), encoding="utf-8")
+                artifact_paths[kind] = str(path)
+            output = renders / "final.mp4"
+            calls = []
+
+            class Tool:
+                def execute(self, inputs):
+                    calls.append(inputs)
+                    output.write_bytes(b"native-reviewed-render")
+                    return SimpleNamespace(
+                        success=True,
+                        error=None,
+                        data={"final_review": {
+                            "version": "1.0",
+                            "status": "pass",
+                            "recommended_action": "present_to_user",
+                            "metadata": {},
+                        }},
+                        duration_seconds=1.0,
+                        cost_usd=0.0,
+                        artifacts=[],
+                    )
+
+            registry = SimpleNamespace(discover=lambda: None, get=lambda name: Tool())
+            checkpoint_module = types.ModuleType("lib.checkpoint")
+            checkpoint_module.write_checkpoint = lambda *args, **kwargs: None
+            schemas_module = types.ModuleType("schemas.artifacts")
+            schemas_module.validate_artifact = lambda *args, **kwargs: None
+            registry_module = types.ModuleType("tools.tool_registry")
+            registry_module.registry = registry
+            fake_modules = {
+                "lib": types.ModuleType("lib"),
+                "lib.checkpoint": checkpoint_module,
+                "schemas": types.ModuleType("schemas"),
+                "schemas.artifacts": schemas_module,
+                "tools": types.ModuleType("tools"),
+                "tools.tool_registry": registry_module,
+            }
+            spec = importlib.util.spec_from_file_location(
+                "acd_native_delivery_transaction_test",
+                ROOT / "patches" / "openmontage" / "overlay" / "lib" / "acd_native_delivery.py",
+            )
+            module = importlib.util.module_from_spec(spec)
+            with patch.dict(sys.modules, fake_modules):
+                assert spec.loader is not None
+                spec.loader.exec_module(module)
+            module._probe = lambda _path: {
+                "duration": 12.0,
+                "width": 1280,
+                "height": 720,
+                "fps": 30.0,
+                "video_codec": "h264",
+                "audio_codec": None,
+            }
+            command = {
+                "fingerprint": "f" * 64,
+                "project_dir": str(project),
+                "output_path": str(output),
+                "pipeline": "cinematic",
+                "artifacts": artifact_paths,
+                "approved_silence": True,
+            }
+            with patch.dict(os.environ, {"ACD_NATIVE_FAULT_AFTER": "rendered_reviewed"}):
+                with self.assertRaisesRegex(RuntimeError, "Injected failure"):
+                    module.execute_delivery(command)
+            self.assertEqual(len(calls), 1)
+            recovered = module.execute_delivery(command)
+            self.assertEqual(recovered["status"], "delivered")
+            self.assertTrue(recovered["recovered"])
+            self.assertEqual(len(calls), 1)
+
     def test_native_fingerprint_binds_media_bytes_not_only_manifest_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1724,6 +2182,34 @@ class NativeBridgeContractTests(unittest.TestCase):
             self.assertEqual(state.status, RunStatus.FAILED)
             self.assertEqual(state.error.code, "LEGACY_DELIVERY_UNSUPPORTED")
             self.assertEqual(state.validation, [])
+
+    @staticmethod
+    def _detailed_frame(offset: int, size: int = 256) -> bytes:
+        base = bytes(255 if (index // 4) % 2 else 0 for index in range(size))
+        offset %= size
+        return base[offset:] + base[:offset]
+
+    def test_temporal_validator_rejects_detailed_static_video(self):
+        frame = self._detailed_frame(0)
+        evidence = FinalMediaValidator._analyze_frames([frame] * 11)
+        self.assertFalse(evidence["visually_blank"])
+        self.assertTrue(evidence["visually_frozen"])
+        self.assertEqual(evidence["changing_intervals"], 0)
+
+    def test_temporal_validator_rejects_intro_motion_then_freeze(self):
+        frames = [self._detailed_frame(index) for index in range(4)]
+        frames.extend([frames[-1]] * 7)
+        evidence = FinalMediaValidator._analyze_frames(frames)
+        self.assertTrue(evidence["visually_frozen"])
+        self.assertFalse(all(evidence["temporal_segment_coverage"]))
+        self.assertTrue(evidence["frozen_ending"])
+
+    def test_temporal_validator_accepts_motion_across_whole_timeline(self):
+        frames = [self._detailed_frame(index * 3) for index in range(11)]
+        evidence = FinalMediaValidator._analyze_frames(frames)
+        self.assertFalse(evidence["visually_blank"])
+        self.assertFalse(evidence["visually_frozen"])
+        self.assertTrue(all(evidence["temporal_segment_coverage"]))
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe required")
     def test_real_ffprobe_media_passes_independent_validator(self):

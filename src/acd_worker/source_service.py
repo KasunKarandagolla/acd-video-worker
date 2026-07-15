@@ -58,8 +58,12 @@ class SourceService:
                     "source_id": f"input_url_{index + 1}",
                     "kind": "url",
                     "original_url": reference,
-                    "status": "available_for_agent_review",
+                    "availability_status": "candidate_url",
+                    "technical_verification_status": "not_acquired",
                     "rights_status": "unverified",
+                    "rights_evidence": [],
+                    "license": "unknown",
+                    "provenance": {"origin": "user_reference"},
                 })
                 continue
             local = Path(reference)
@@ -67,8 +71,12 @@ class SourceService:
                 "source_id": f"input_file_{index + 1}",
                 "kind": "local_file",
                 "path": str(local),
-                "status": "available" if local.is_file() else "missing",
+                "availability_status": "available" if local.is_file() else "missing",
+                "technical_verification_status": "not_probed",
                 "rights_status": "user_supplied_unverified",
+                "rights_evidence": [],
+                "license": "unknown",
+                "provenance": {"origin": "user_supplied_file"},
             }
             if local.is_file():
                 digest = hashlib.sha256()

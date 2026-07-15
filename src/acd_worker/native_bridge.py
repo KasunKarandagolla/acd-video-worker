@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import tempfile
 import time
@@ -12,8 +13,33 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .compatibility import OpenMontageCompatibilityRegistry, RuntimeTuple
+from .compatibility import (
+    COMPATIBILITY_MARKER,
+    PINNED_OPENMONTAGE_COMMIT,
+    OpenMontageCompatibilityRegistry,
+    RuntimeTuple,
+)
 from .media_validation import OpenMontageArtifactValidator
+
+
+def _terminate_process_group(process: subprocess.Popen, grace_seconds: float = 10) -> None:
+    """Stop the adapter and every renderer it spawned."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        pass
+    # The parent may have exited while a Chromium/ffmpeg child ignored TERM.
+    # Kill the process group even when wait() already returned.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if process.poll() is None:
+        process.wait()
 
 
 class NativeExecutionError(RuntimeError):
@@ -92,13 +118,15 @@ class NativeExecutionBridge:
     transaction. It has no stage router and no football-specific branches.
     """
 
+    CONTRACT_VERSION = "acd-native-transaction-v2"
+
     def __init__(
         self,
         worker_root: Path,
         openmontage_root: Path,
         project_root: Path,
         *,
-        timeout: int = 1800,
+        timeout: int = 480,
         heartbeat_interval: float = 1.0,
     ):
         self.worker_root = Path(worker_root).expanduser().resolve()
@@ -183,19 +211,21 @@ class NativeExecutionBridge:
                 stdout=stdout,
                 stderr=stderr,
                 env=os.environ.copy(),
+                start_new_session=True,
             )
-            while process.poll() is None:
-                elapsed = time.monotonic() - started
-                if elapsed > self.timeout:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                    raise NativeExecutionError("NATIVE_EXECUTION_TIMEOUT", f"OpenMontage execution exceeded {self.timeout}s", {"fingerprint": fingerprint})
-                if heartbeat:
-                    heartbeat({"phase": "native_execution", "fingerprint": fingerprint, "elapsed_seconds": round(elapsed, 1)})
-                time.sleep(self.heartbeat_interval)
+            try:
+                while process.poll() is None:
+                    elapsed = time.monotonic() - started
+                    if elapsed > self.timeout:
+                        _terminate_process_group(process)
+                        raise NativeExecutionError("NATIVE_EXECUTION_TIMEOUT", f"OpenMontage execution exceeded {self.timeout}s", {"fingerprint": fingerprint})
+                    if heartbeat:
+                        heartbeat({"phase": "native_execution", "fingerprint": fingerprint, "elapsed_seconds": round(elapsed, 1)})
+                    time.sleep(self.heartbeat_interval)
+            except BaseException:
+                if process.poll() is None:
+                    _terminate_process_group(process)
+                raise
 
         try:
             native = json.loads(result_path.read_text(encoding="utf-8"))
@@ -357,7 +387,37 @@ print(json.dumps(evidence, sort_keys=True))
                 )
 
     def _fingerprint(self, request: NativeExecutionRequest, paths: dict[str, Path]) -> str:
-        digest = hashlib.sha256(json.dumps(asdict(request), sort_keys=True, separators=(",", ":")).encode())
+        identity = {
+            "contract_version": self.CONTRACT_VERSION,
+            "openmontage_commit": PINNED_OPENMONTAGE_COMMIT,
+            "request": asdict(request),
+            "compatibility_marker_sha256": self._file_digest(
+                self.openmontage_root / COMPATIBILITY_MARKER
+            ),
+            "installed_delivery_overlay_sha256": self._file_digest(
+                self.openmontage_root / "lib" / "acd_native_delivery.py"
+            ),
+            "worker_native_adapter_sha256": self._file_digest(
+                self.worker_root / "scripts" / "openmontage_native_adapter.py"
+            ),
+            "worker_delivery_overlay_sha256": self._file_digest(
+                self.worker_root / "patches" / "openmontage" / "overlay" / "lib" / "acd_native_delivery.py"
+            ),
+            "football_skill_sha256": self._tree_digest(
+                Path(
+                    os.environ.get(
+                        "ACD_FOOTBALL_SKILL_ROOT",
+                        self.worker_root / "skills" / "football-emotion-video",
+                    )
+                )
+            ),
+            "source_manifest_sha256": self._file_digest(
+                self.project_root / "football_emotion" / "source_manifest.json"
+            ),
+        }
+        digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        )
         for kind in sorted(paths):
             digest.update(kind.encode())
             digest.update(paths[kind].read_bytes())
@@ -371,6 +431,35 @@ print(json.dumps(evidence, sort_keys=True))
             with media.open("rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _file_digest(path: Path) -> str:
+        path = Path(path).expanduser().resolve()
+        if not path.is_file() or path.is_symlink():
+            return "missing"
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @classmethod
+    def _tree_digest(cls, root: Path) -> str:
+        root = Path(root).expanduser().resolve()
+        if not root.is_dir():
+            return "missing"
+        digest = hashlib.sha256()
+        for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root))):
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or "__pycache__" in path.parts
+                or path.suffix in {".pyc", ".pyo"}
+            ):
+                continue
+            digest.update(str(path.relative_to(root)).encode())
+            digest.update(cls._file_digest(path).encode())
         return digest.hexdigest()
 
     def _media_input_paths(self, paths: dict[str, Path]) -> list[Path]:

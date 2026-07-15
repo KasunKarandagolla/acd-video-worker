@@ -70,6 +70,17 @@ bash "$SCRIPT_DIR/install_skills.sh"
 log "Running thin-runtime doctor"
 PYTHONPATH="$PROJECT_ROOT/src" python3 "$PROJECT_ROOT/bootstrap/validate_setup.py"
 
+if [[ "${ACD_RUN_LIVE_GATE:-1}" == "1" ]]; then
+    if [[ -z "${LLM_API_KEY:-}" ]]; then
+        echo "Live Hermes tool-contract gate requires LLM_API_KEY in the environment." >&2
+        exit 2
+    fi
+    log "Running live Hermes/provider/OpenMontage status gate"
+    PYTHONPATH="$PROJECT_ROOT/src" python3 "$PROJECT_ROOT/scripts/run_hermes_tool_contract_gate.py" \
+        --worker-root "$PROJECT_ROOT" \
+        --output /kaggle/working/acd-runtime-validation/runtime-certificate.json
+fi
+
 python3 "$PROJECT_ROOT/scripts/kaggle_persistence.py" export
 ok "Kaggle setup complete"
 echo "Run: bash $PROJECT_ROOT/bootstrap/run_kaggle_job.sh \"<video request>\" [--input ...]"

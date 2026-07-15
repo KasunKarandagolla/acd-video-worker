@@ -38,7 +38,10 @@ HERMES_TOOL_CONTRACT_VERSION = "same-path-status-v1"
 
 
 class EnvironmentBlocker(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "RUNTIME_PREREQUISITE_MISSING", evidence: Optional[dict] = None):
+        super().__init__(message)
+        self.code = code
+        self.evidence = evidence or {}
 
 
 @dataclass
@@ -50,15 +53,15 @@ class ThinControllerConfig:
     openmontage_root: Path
     projects_dir: Path
     state_dir: Path
-    hermes_timeout: int = 1200
-    hermes_max_turns: int = 32
-    hermes_recovery_max_turns: int = 24
+    hermes_timeout: int = 480
+    hermes_max_turns: int = 20
+    hermes_recovery_max_turns: int = 12
     hermes_max_continuations: int = 1
     hermes_headless_auto_approve: bool = False
     hermes_model_override: Optional[str] = None
     discord_webhook_url: str = ""
     dry_run: bool = False
-    native_execution_timeout: int = 1800
+    native_execution_timeout: int = 480
 
 
 class ThinRunController:
@@ -116,11 +119,50 @@ class ThinRunController:
         with self.store.lease(state.run_id):
             return self._continue(state)
 
-    def resume(self, run_id: str, *, retry_blocked: bool = False, approval_policy: Optional[dict] = None) -> RunState:
+    def resume(
+        self,
+        run_id: str,
+        *,
+        retry_blocked: bool = False,
+        approval_policy: Optional[dict] = None,
+        restart_hermes_session: bool = False,
+    ) -> RunState:
         state = self.store.load(run_id)
         if approval_policy is not None:
             state.approval_policy = dict(approval_policy)
             self.store.save(state)
+        hermes_resumable = state.status in {RunStatus.SOURCE_READY, RunStatus.AGENT_RUNNING} or (
+            state.status == RunStatus.BLOCKED
+            and state.blocker is not None
+            and state.blocker.phase in {"agent", "agent_contract", "agent_preflight"}
+        )
+        if hermes_resumable:
+            runtime = self._current_hermes_runtime_identity()
+            previous = state.hermes_runtime_identity or {}
+            changed = bool(previous and previous.get("identity") != runtime["identity"])
+            if changed and not restart_hermes_session:
+                return self._block(
+                    state,
+                    "HERMES_SESSION_RUNTIME_CHANGED",
+                    "The persisted Hermes session belongs to a different model/profile/plugin/skill runtime. Resume is blocked until a fresh Hermes session is explicitly authorized.",
+                    "agent_contract",
+                    {"previous": previous, "current": runtime},
+                )
+            if restart_hermes_session:
+                state.hermes_session_id = None
+                state.hermes_tool_contract = {}
+                state.hermes_runtime_identity = runtime
+                state.hermes_session_generation += 1
+                state.continuations_used = 0
+                # The terminal envelope is worker-owned transport state, not a
+                # creative artifact. A fresh Hermes generation must not consume
+                # an old session's blocked/malformed handoff. Native artifacts
+                # and checkpoints remain untouched.
+                Path(state.agent_result_path).unlink(missing_ok=True)
+                if state.status == RunStatus.BLOCKED:
+                    state.blocker = None
+                    state.transition(RunStatus.AGENT_RUNNING)
+                self.store.save(state)
         if state.status == RunStatus.BLOCKED and retry_blocked:
             retryable = {
                 # Backward compatibility for runs persisted by pre-split builds.
@@ -130,6 +172,8 @@ class ThinRunController:
                 "OPENMONTAGE_RUNTIME_UNAVAILABLE",
                 "OPENMONTAGE_COMPATIBILITY_PATCH_MISSING",
                 "NATIVE_EXECUTION_TIMEOUT",
+                "NATIVE_RESULT_MISSING",
+                "NATIVE_REVIEWED_TRANSACTION_INCOMPLETE",
                 "UNAPPROVED_RUNTIME_TUPLE",
                 "UNAPPROVED_SILENCE_PLAN",
                 "UNAPPROVED_CHECKPOINT",
@@ -142,7 +186,14 @@ class ThinRunController:
             if not state.blocker or state.blocker.code not in retryable:
                 return state
             state.blocker = None
-            state.transition(RunStatus.AGENT_RUNNING)
+            resume_target = (
+                RunStatus.NATIVE_EXECUTING
+                if state.native_execution.get("status") in {
+                    "prepared", "rendering", "rendered_reviewed", "published"
+                }
+                else RunStatus.AGENT_RUNNING
+            )
+            state.transition(resume_target)
             self.store.save(state)
             with self.store.lease(state.run_id):
                 return self._continue(state)
@@ -162,6 +213,7 @@ class ThinRunController:
 
             if state.status == RunStatus.SOURCE_READY:
                 self._preflight(state)
+                self._bind_hermes_runtime_identity(state)
                 prompt = build_job_prompt(
                     run_id=state.run_id,
                     project_id=state.project_id,
@@ -222,6 +274,22 @@ class ThinRunController:
                             **self._native_progress_evidence(state),
                         },
                     )
+
+            if state.status == RunStatus.NATIVE_EXECUTING:
+                reconciled = self._reconcile_execution_handoff(state)
+                if reconciled is None:
+                    return self._fail(
+                        state,
+                        "NATIVE_RECOVERY_INPUT_MISSING",
+                        "A native transaction was interrupted but its canonical creative handoff can no longer be reconstructed.",
+                        "native_execution",
+                        {"native_execution": state.native_execution},
+                    )
+                execution_request, declared_artifacts = reconciled
+                self._publish_controller_handoff(state, execution_request, declared_artifacts)
+                state.openmontage_artifacts = declared_artifacts
+                native_result = self._execute_native(state, execution_request)
+                self._accept_native_result(state, native_result)
 
             if state.status == RunStatus.AGENT_RUNNING:
                 result_path = Path(state.agent_result_path)
@@ -335,6 +403,14 @@ class ThinRunController:
                 if envelope is None:
                     reconciled = self._reconcile_execution_handoff(state)
                     if reconciled is None:
+                        if protocol_error is not None:
+                            return self._fail(
+                                state,
+                                "AGENT_CONTRACT_INVALID",
+                                "Hermes published a terminal envelope that violates the worker-owned handoff contract.",
+                                "agent_contract",
+                                {"agent_protocol_error": protocol_error},
+                            )
                         return self._block(
                             state,
                             "CREATIVE_HANDOFF_INCOMPLETE",
@@ -350,13 +426,11 @@ class ThinRunController:
                             },
                         )
                     execution_request, declared_artifacts = reconciled
+                    self._publish_controller_handoff(state, execution_request, declared_artifacts)
                     state.output_candidates = []
                     state.openmontage_artifacts = declared_artifacts
                     native_result = self._execute_native(state, execution_request)
-                    state.output_candidates = native_result.output_media
-                    state.openmontage_artifacts = native_result.openmontage_artifacts
-                    state.transition(RunStatus.VALIDATING)
-                    self.store.save(state)
+                    self._accept_native_result(state, native_result)
                     envelope = None
                 else:
                     state.output_candidates = envelope.output_media
@@ -373,8 +447,8 @@ class ThinRunController:
                     return self._fail(
                         state,
                         "LEGACY_DELIVERY_UNSUPPORTED",
-                        "Hermes may author creative artifacts but cannot claim or perform production delivery; a typed ready_for_execution handoff is required.",
-                        "agent",
+                        "Hermes cannot claim delivery; only the deterministic native transaction and worker validator may deliver.",
+                        "agent_contract",
                         {"reported_outputs": len(envelope.output_media)},
                     )
                 elif envelope.status == "ready_for_execution":
@@ -393,12 +467,15 @@ class ThinRunController:
                             "CHECKPOINT_APPROVAL_MISSING",
                             "NATIVE_ADAPTER_MISSING",
                             "NATIVE_EXECUTION_TIMEOUT",
+                            "NATIVE_RESULT_MISSING",
+                            "NATIVE_REVIEWED_TRANSACTION_INCOMPLETE",
+                            "NATIVE_RENDER_RECOVERY_REVIEW_REQUIRED",
+                            "NATIVE_FAILED_TRANSACTION_HAS_OUTPUT",
                         }
                         if exc.code in runtime_blockers:
                             return self._block(state, exc.code, str(exc), "native_execution", exc.evidence)
                         return self._fail(state, exc.code, str(exc), "native_execution", exc.evidence)
-                    state.output_candidates = native_result.output_media
-                    state.openmontage_artifacts = native_result.openmontage_artifacts
+                    self._accept_native_result(state, native_result)
                 if state.status == RunStatus.AGENT_RUNNING:
                     state.transition(RunStatus.VALIDATING)
                     self.store.save(state)
@@ -437,7 +514,7 @@ class ThinRunController:
                 self.notifier.terminal(state)
             return state
         except EnvironmentBlocker as exc:
-            return self._block(state, "RUNTIME_PREREQUISITE_MISSING", str(exc), state.status.value.lower())
+            return self._block(state, exc.code, str(exc), state.status.value.lower(), exc.evidence)
         except NativeExecutionError as exc:
             runtime_blockers = {
                 "OPENMONTAGE_PIN_MISMATCH",
@@ -450,6 +527,10 @@ class ThinRunController:
                 "CHECKPOINT_APPROVAL_MISSING",
                 "NATIVE_ADAPTER_MISSING",
                 "NATIVE_EXECUTION_TIMEOUT",
+                "NATIVE_RESULT_MISSING",
+                "NATIVE_REVIEWED_TRANSACTION_INCOMPLETE",
+                "NATIVE_RENDER_RECOVERY_REVIEW_REQUIRED",
+                "NATIVE_FAILED_TRANSACTION_HAS_OUTPUT",
             }
             if exc.code in runtime_blockers:
                 return self._block(state, exc.code, str(exc), "native_execution", exc.evidence)
@@ -475,6 +556,67 @@ class ThinRunController:
             raise EnvironmentBlocker(f"Required Hermes OpenMontage plugin is not installed: {plugin}")
         if not (self.config.worker_root / "scripts" / "openmontage_creative_adapter.py").is_file():
             raise EnvironmentBlocker("OpenMontage creative adapter is missing")
+        if not Path(state.source_manifest_path).is_file():
+            raise EnvironmentBlocker("Worker source manifest is missing before Hermes startup")
+
+    @staticmethod
+    def _tree_digest(root: Path) -> str:
+        """Hash one installed contract tree without timestamps or cache files."""
+        root = Path(root).expanduser().resolve()
+        digest = hashlib.sha256()
+        if not root.is_dir():
+            return "missing"
+        for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root))):
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or "__pycache__" in path.parts
+                or path.suffix in {".pyc", ".pyo"}
+            ):
+                continue
+            relative = str(path.relative_to(root))
+            digest.update(relative.encode())
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        return digest.hexdigest()
+
+    def _current_hermes_runtime_identity(self) -> dict[str, str]:
+        profile = self.runner.profile_dir
+        plugin_root = profile / "plugins" / "acd-openmontage"
+        skill_root = profile / "skills" / "football-emotion-video"
+        config_path = profile / "config.yaml"
+        payload = {
+            "schema_version": "1.0",
+            "hermes_commit": PINNED_HERMES_COMMIT,
+            "profile": self.config.hermes_profile,
+            "model_override": self.config.hermes_model_override or "",
+            "profile_config_sha256": (
+                hashlib.sha256(config_path.read_bytes()).hexdigest()
+                if config_path.is_file()
+                else "missing"
+            ),
+            "plugin_sha256": self._tree_digest(plugin_root),
+            "football_skill_sha256": self._tree_digest(skill_root),
+            "tool_contract_version": HERMES_TOOL_CONTRACT_VERSION,
+        }
+        identity = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return {**payload, "identity": identity}
+
+    def _bind_hermes_runtime_identity(self, state: RunState) -> None:
+        current = self._current_hermes_runtime_identity()
+        previous = state.hermes_runtime_identity or {}
+        if previous and previous.get("identity") != current["identity"]:
+            raise EnvironmentBlocker(
+                "The Hermes runtime changed after this run was created; continuing the old session would mix incompatible model/profile/plugin/skill state.",
+                code="HERMES_SESSION_RUNTIME_CHANGED",
+                evidence={"previous": previous, "current": current},
+            )
+        if not previous:
+            state.hermes_runtime_identity = current
+            self.store.save(state)
 
     def _hermes_environment(self, state: RunState) -> dict[str, str]:
         """Bind plugin tools to exactly this run and typed user policy."""
@@ -538,6 +680,9 @@ class ThinRunController:
             "openmontage_commit": PINNED_OPENMONTAGE_COMMIT,
             "profile": self.config.hermes_profile,
             "model_override": self.config.hermes_model_override or "",
+            "football_skill_sha256": self._tree_digest(
+                profile / "skills" / "football-emotion-video"
+            ),
             "files": file_hashes,
         }
         return hashlib.sha256(
@@ -757,6 +902,8 @@ Return this JSON object as the final response. The worker—not Hermes—validat
                 "A different native transaction was already published for this run.",
                 {"existing": previous.get("fingerprint"), "requested": fingerprint},
             )
+        if state.status == RunStatus.AGENT_RUNNING:
+            state.transition(RunStatus.NATIVE_EXECUTING)
         state.native_execution = {
             "status": "prepared",
             "fingerprint": fingerprint,
@@ -774,6 +921,62 @@ Return this JSON object as the final response. The worker—not Hermes—validat
         }
         self.store.save(state)
         return result
+
+    def _accept_native_result(self, state: RunState, native_result) -> None:
+        """Persist native evidence before exposing the validation phase."""
+        state.output_candidates = list(native_result.output_media)
+        state.openmontage_artifacts = list(native_result.openmontage_artifacts)
+        state.native_execution = {
+            **state.native_execution,
+            "status": "published",
+            "fingerprint": getattr(
+                native_result,
+                "fingerprint",
+                state.native_execution.get("fingerprint"),
+            ),
+            "native_result": dict(native_result.native_result or {}),
+        }
+        if state.status == RunStatus.NATIVE_EXECUTING:
+            state.transition(RunStatus.VALIDATING)
+        self.store.save(state)
+
+    def _publish_controller_handoff(
+        self,
+        state: RunState,
+        execution_request: dict,
+        declared_artifacts: list[dict],
+    ) -> None:
+        """Write the deterministic terminal handoff from native evidence.
+
+        Hermes owns every creative artifact byte. The worker owns the terminal
+        envelope, so a missing/malformed final model response cannot discard a
+        complete edit checkpoint or force another model turn.
+        """
+        payload = {
+            "schema_version": "1.0",
+            "run_id": state.run_id,
+            "status": "ready_for_execution",
+            "output_media": [],
+            "openmontage_artifacts": declared_artifacts,
+            "source_requests": [],
+            "execution_request": execution_request,
+            "blocker": None,
+            "error": None,
+            "summary": "Controller reconciled a complete schema-valid OpenMontage edit handoff.",
+        }
+        AgentEnvelope.from_dict(payload, state.run_id)
+        target = Path(state.agent_result_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _reconcile_execution_handoff(self, state: RunState) -> Optional[tuple[dict, list[dict]]]:
         """Derive a typed handoff from completed native artifacts.

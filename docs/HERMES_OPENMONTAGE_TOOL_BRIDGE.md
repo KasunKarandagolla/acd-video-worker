@@ -66,8 +66,8 @@ certified deterministic post-edit bridge.
 
 ## Termination and progress rules
 
-The default budget is 32 initial turns and at most one 24-turn same-session
-continuation, each inside the 20-minute Hermes process timeout. A continuation
+The default budget is 20 initial turns and at most one 12-turn same-session
+continuation, each inside the eight-minute Hermes process timeout. A continuation
 is allowed only after a native checkpoint in `completed` or `awaiting_human`
 state embeds the exact canonical artifact also present on disk. Loose JSON,
 tool activity, a heartbeat and process exit zero are not progress. A slice with
