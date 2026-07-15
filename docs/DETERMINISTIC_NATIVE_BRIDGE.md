@@ -40,6 +40,13 @@ pinned `AIAgent.__init__` callback injection point without replacing the class.
 This preserves Hermes' class constants/static helpers and supported profile,
 model, session and tool behavior.
 
+The adapter sets the real Hermes argv and imports `hermes_cli.main` before
+`run_agent`. This ordering is required by pinned Hermes: the supported
+`-p/--profile` bootstrap changes `HERMES_HOME` at import time before agent and
+CLI modules cache profile-scoped configuration. Reversing that order makes an
+isolated plugin discovery probe pass while the live AIAgent uses the root
+profile and omits `openmontage_native` and `acd_acquire_source`.
+
 An uncertified production run has one deterministic protocol entry on the same
 Hermes request path used by the creative session. The existing event adapter
 restricts the live `openmontage_native` schema to `operation=status`, sends only

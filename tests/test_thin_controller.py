@@ -435,6 +435,61 @@ class HermesRunnerTests(unittest.TestCase):
 
 
 class OptionalInfrastructureTests(unittest.TestCase):
+    def test_event_adapter_bootstraps_named_profile_before_run_agent_import(self):
+        """The live agent must load config and plugins from its named profile."""
+        adapter = ROOT / "scripts" / "hermes_event_adapter.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_modules = root / "fake-modules"
+            package = fake_modules / "hermes_cli"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "main.py").write_text(
+                "import os, sys\n"
+                "from pathlib import Path\n"
+                "index = sys.argv.index('-p')\n"
+                "name = sys.argv[index + 1]\n"
+                "os.environ['HERMES_HOME'] = str(Path(os.environ['HERMES_HOME']) / 'profiles' / name)\n"
+                "def main(): return 0\n",
+                encoding="utf-8",
+            )
+            (fake_modules / "run_agent.py").write_text(
+                "import os\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['ACD_IMPORT_ORDER_PROBE']).write_text(os.environ.get('HERMES_HOME', ''), encoding='utf-8')\n"
+                "class AIAgent:\n"
+                "    def __init__(self, **kwargs): pass\n",
+                encoding="utf-8",
+            )
+            event_file = root / "events.jsonl"
+            probe = root / "profile-seen-by-run-agent.txt"
+            hermes_root = root / "hermes-home"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(adapter),
+                    "--event-file",
+                    str(event_file),
+                    "-p",
+                    "football-emotion",
+                    "chat",
+                ],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PYTHONPATH": str(fake_modules),
+                    "HERMES_HOME": str(hermes_root),
+                    "ACD_IMPORT_ORDER_PROBE": str(probe),
+                },
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                probe.read_text(encoding="utf-8"),
+                str(hermes_root / "profiles" / "football-emotion"),
+            )
+
     def test_hermes_event_adapter_preserves_aiagent_class_contract(self):
         sys.path.insert(0, str(ROOT / "scripts"))
         from hermes_event_adapter import instrument_run_agent
