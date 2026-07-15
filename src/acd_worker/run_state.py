@@ -79,6 +79,7 @@ class RunState:
     heartbeat: dict[str, Any] = field(default_factory=dict)
     native_execution: dict[str, Any] = field(default_factory=dict)
     approval_policy: dict[str, Any] = field(default_factory=dict)
+    hermes_tool_contract: dict[str, Any] = field(default_factory=dict)
 
     def transition(self, target: RunStatus) -> None:
         if target == self.status:

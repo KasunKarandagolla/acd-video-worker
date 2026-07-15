@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from .agent_contract import AgentEnvelope, load_agent_envelope
+from .compatibility import COMPATIBILITY_MARKER, PINNED_OPENMONTAGE_COMMIT
 from .hermes_runner import HermesRunner
 from .job_prompt import PRELOADED_SKILLS, build_job_prompt
 from .media_validation import FinalMediaValidator, OpenMontageArtifactValidator
@@ -30,6 +32,9 @@ CANONICAL_CREATIVE_ARTIFACTS = {
     "assets": "asset_manifest",
     "edit": "edit_decisions",
 }
+
+PINNED_HERMES_COMMIT = "5ecc07986f46463ca3096679b03a46402eb19cee"
+HERMES_TOOL_CONTRACT_VERSION = "same-path-status-v1"
 
 
 class EnvironmentBlocker(RuntimeError):
@@ -118,7 +123,10 @@ class ThinRunController:
             self.store.save(state)
         if state.status == RunStatus.BLOCKED and retry_blocked:
             retryable = {
+                # Backward compatibility for runs persisted by pre-split builds.
                 "HERMES_RUNTIME_UNAVAILABLE",
+                "HERMES_PROVIDER_RATE_LIMITED",
+                "HERMES_PROVIDER_TRANSIENT",
                 "OPENMONTAGE_RUNTIME_UNAVAILABLE",
                 "OPENMONTAGE_COMPATIBILITY_PATCH_MISSING",
                 "NATIVE_EXECUTION_TIMEOUT",
@@ -192,6 +200,9 @@ class ThinRunController:
                     self.store.save(state)
                 if not execution.success:
                     return self._classify_hermes_failure(state, execution)
+                contract_problem = self._validate_hermes_tool_contract(state, execution)
+                if contract_problem is not None:
+                    return contract_problem
                 self._capture_terminal_payload(state, execution)
                 last_execution_metadata = dict(execution.metadata or {})
                 if (
@@ -245,6 +256,9 @@ class ThinRunController:
                         self.store.save(state)
                     if not execution.success:
                         return self._classify_hermes_failure(state, execution)
+                    contract_problem = self._validate_hermes_tool_contract(state, execution)
+                    if contract_problem is not None:
+                        return contract_problem
                     self._capture_terminal_payload(state, execution)
                     last_execution_metadata = dict(execution.metadata or {})
 
@@ -279,6 +293,9 @@ class ThinRunController:
                         self.store.save(state)
                     if not recovery.success:
                         return self._classify_hermes_failure(state, recovery)
+                    contract_problem = self._validate_hermes_tool_contract(state, recovery)
+                    if contract_problem is not None:
+                        return contract_problem
                     self._capture_terminal_payload(state, recovery)
                     last_execution_metadata = dict(recovery.metadata or {})
                     approval = self._pending_native_approval(state)
@@ -461,6 +478,12 @@ class ThinRunController:
 
     def _hermes_environment(self, state: RunState) -> dict[str, str]:
         """Bind plugin tools to exactly this run and typed user policy."""
+        contract_id = self._hermes_tool_contract_id()
+        certificate = state.hermes_tool_contract or {}
+        contract_required = not (
+            certificate.get("status") == "passed"
+            and certificate.get("contract_id") == contract_id
+        )
         return {
             "ACD_WORKER_ROOT": str(self.config.worker_root.resolve()),
             "ACD_WORKER_PYTHON": sys.executable,
@@ -471,9 +494,11 @@ class ThinRunController:
                 (self.runner.profile_dir / "skills" / "football-emotion-video").resolve()
             ),
             "ACD_APPROVAL_POLICY_JSON": json.dumps(state.approval_policy, sort_keys=True),
-            # This enforces only the already-declared first status call. After
-            # the first real tool starts, Hermes owns all workflow decisions.
-            "ACD_FORCE_INITIAL_OPENMONTAGE_TOOL": "1",
+            # The first request of an uncertified run is the live status-only
+            # handshake. Once its real handler succeeds, the persisted
+            # certificate prevents repetition on continuation/restart.
+            "ACD_FORCE_INITIAL_OPENMONTAGE_TOOL": "1" if contract_required else "0",
+            "ACD_HERMES_TOOL_CONTRACT_ID": contract_id,
             "OPENMONTAGE_ROOT": str(self.config.openmontage_root.resolve()),
             "OPENMONTAGE_PROJECTS_DIR": str(self.config.projects_dir.resolve()),
             "OPENMONTAGE_PYTHON": os.environ.get(
@@ -481,6 +506,182 @@ class ThinRunController:
                 str(self.config.openmontage_root.resolve() / ".venv" / "bin" / "python"),
             ),
         }
+
+    def _hermes_tool_contract_id(self) -> str:
+        """Fingerprint the non-secret runtime surface certified by the handshake."""
+        profile = self.runner.profile_dir
+        adapter = Path(
+            getattr(
+                self.runner,
+                "event_adapter",
+                self.config.worker_root / "scripts" / "hermes_event_adapter.py",
+            )
+        )
+        files = {
+            "profile_config": profile / "config.yaml",
+            "plugin_manifest": profile / "plugins" / "acd-openmontage" / "plugin.yaml",
+            "plugin_code": profile / "plugins" / "acd-openmontage" / "__init__.py",
+            "event_adapter": adapter,
+            "creative_adapter": self.config.worker_root / "scripts" / "openmontage_creative_adapter.py",
+            "openmontage_compatibility": self.config.openmontage_root / COMPATIBILITY_MARKER,
+        }
+        file_hashes = {}
+        for label, path in files.items():
+            resolved = Path(path).expanduser().resolve()
+            try:
+                file_hashes[label] = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            except OSError:
+                file_hashes[label] = "missing"
+        payload = {
+            "version": HERMES_TOOL_CONTRACT_VERSION,
+            "hermes_commit": PINNED_HERMES_COMMIT,
+            "openmontage_commit": PINNED_OPENMONTAGE_COMMIT,
+            "profile": self.config.hermes_profile,
+            "model_override": self.config.hermes_model_override or "",
+            "files": file_hashes,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    @staticmethod
+    def _event_truth(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _validate_hermes_tool_contract(self, state: RunState, execution) -> Optional[RunState]:
+        """Certify the exact production request/response/tool path or block it."""
+        metadata = dict(execution.metadata or {})
+        if not metadata.get("tool_contract_requested"):
+            return None
+        summary = metadata.get("event_summary")
+        evidence = {
+            "contract_id": metadata.get("tool_contract_id"),
+            "session_id": execution.session_id or state.hermes_session_id,
+            "event_adapter_used": metadata.get("event_adapter_used") is True,
+        }
+        if not isinstance(summary, dict):
+            return self._block(
+                state,
+                "HERMES_TOOL_HANDSHAKE_UNVERIFIED",
+                "The production Hermes adapter returned no structural tool-contract evidence.",
+                "agent_contract",
+                evidence,
+            )
+        agent = summary.get("agent_contract") or {}
+        request = summary.get("first_request_contract") or summary.get("request_contract") or {}
+        response = summary.get("first_response_contract") or {}
+        handshake = summary.get("tool_handshake") or {}
+        counts = summary.get("events") or {}
+        evidence.update({
+            "agent_contract": agent,
+            "first_request_contract": request,
+            "first_response_contract": response,
+            "tool_handshake": handshake,
+            "handshake_started_events": counts.get("tool_handshake_started", 0),
+            "handshake_completed_events": counts.get("tool_handshake_completed", 0),
+            "handshake_failed_events": counts.get("tool_handshake_failed", 0),
+        })
+        if metadata.get("event_adapter_used") is not True:
+            return self._block(
+                state,
+                "HERMES_TOOL_HANDSHAKE_UNVERIFIED",
+                "The pinned Hermes event adapter was unavailable for the required live handshake.",
+                "agent_contract",
+                evidence,
+            )
+        if not self._event_truth(agent.get("has_openmontage_native")):
+            return self._block(
+                state,
+                "HERMES_TOOL_UNAVAILABLE",
+                "The live Hermes AIAgent did not expose openmontage_native.",
+                "agent_contract",
+                evidence,
+            )
+        if not self._event_truth(agent.get("has_acd_acquire_source")):
+            return self._block(
+                state,
+                "HERMES_SOURCE_TOOL_UNAVAILABLE",
+                "The live Hermes AIAgent did not expose the worker-owned source acquisition tool.",
+                "agent_contract",
+                evidence,
+            )
+        request_valid = (
+            self._event_truth(request.get("handshake_request"))
+            and str(request.get("tool_count")) == "1"
+            and request.get("tools") == "openmontage_native"
+            and self._event_truth(request.get("status_only"))
+            and request.get("tool_choice_mode") == "named"
+            and request.get("tool_choice_name") == "openmontage_native"
+        )
+        if not request_valid:
+            return self._block(
+                state,
+                "HERMES_TOOL_REQUEST_INVALID",
+                "The first production provider request did not enforce the status-only native handshake.",
+                "agent_contract",
+                evidence,
+            )
+        model = str(request.get("model") or agent.get("model") or "").lower()
+        if "nemotron-3-ultra-550b-a55b" in model and not (
+            self._event_truth(request.get("enable_thinking"))
+            and self._event_truth(request.get("force_nonempty_content"))
+        ):
+            return self._block(
+                state,
+                "HERMES_TOOL_CONTRACT_CONFIG_INVALID",
+                "Nemotron Ultra tool parsing flags were absent from the live production request.",
+                "agent_contract",
+                evidence,
+            )
+        response_valid = (
+            str(response.get("tool_call_count")) == "1"
+            and response.get("tool_call_names") == "openmontage_native"
+            and self._event_truth(response.get("status_operation"))
+        )
+        completed = (
+            self._event_truth(handshake.get("required"))
+            and self._event_truth(handshake.get("started"))
+            and self._event_truth(handshake.get("completed"))
+            and not self._event_truth(handshake.get("failed"))
+            and self._event_truth(handshake.get("result_success"))
+            and str(counts.get("tool_handshake_started", 0)) == "1"
+            and str(counts.get("tool_handshake_completed", 0)) == "1"
+        )
+        handler_failure = str(handshake.get("failure_code") or "")
+        if response_valid and self._event_truth(handshake.get("failed")) and handler_failure not in {
+            "INVALID_PROVIDER_TOOL_RESPONSE",
+            "UNEXPECTED_INITIAL_TOOL",
+        }:
+            return self._block(
+                state,
+                "OPENMONTAGE_RUNTIME_UNAVAILABLE",
+                "The real openmontage_native status handler did not complete successfully.",
+                "agent_contract",
+                evidence,
+            )
+        if not response_valid or not completed:
+            return self._block(
+                state,
+                "HERMES_TOOL_PROTOCOL_UNSUPPORTED",
+                "The provider did not return one executable native status call through the pinned Hermes path.",
+                "agent_contract",
+                evidence,
+            )
+        state.hermes_tool_contract = {
+            "schema_version": "1.0",
+            "status": "passed",
+            "contract_id": metadata.get("tool_contract_id") or self._hermes_tool_contract_id(),
+            "certified_at": utc_now(),
+            "session_id": execution.session_id or state.hermes_session_id,
+            "provider": agent.get("provider"),
+            "model": request.get("model") or agent.get("model"),
+            "tool": "openmontage_native",
+            "operation": "status",
+        }
+        self.store.save(state)
+        return None
 
     def _checkpoint_continuation_prompt(self, state: RunState, *, continuation: int, final: bool) -> str:
         final_instruction = (
@@ -738,13 +939,117 @@ Return this JSON object as the final response. The worker—not Hermes—validat
 
     def _classify_hermes_failure(self, state: RunState, execution) -> RunState:
         error = (execution.error or "Hermes exited without a result").lower()
+        evidence = {
+            "returncode": execution.returncode,
+            "execution": dict(execution.metadata or {}),
+        }
+        event_summary = evidence["execution"].get("event_summary") or {}
+        handshake = event_summary.get("tool_handshake") or {}
+        handshake_code = str(handshake.get("failure_code") or "")
+        if handshake_code == "NATIVE_TOOL_UNAVAILABLE":
+            return self._block(
+                state,
+                "HERMES_TOOL_UNAVAILABLE",
+                "The live Hermes AIAgent did not expose openmontage_native.",
+                "agent_contract",
+                evidence,
+            )
+        if handshake_code == "NEMOTRON_TOOL_FLAGS_MISSING":
+            return self._block(
+                state,
+                "HERMES_TOOL_CONTRACT_CONFIG_INVALID",
+                "The final provider request is missing required model tool-parsing configuration.",
+                "agent_contract",
+                evidence,
+            )
+        if handshake_code == "INVALID_FINAL_PROVIDER_REQUEST":
+            return self._block(
+                state,
+                "HERMES_TOOL_REQUEST_INVALID",
+                "The final provider request did not preserve the named status-only native contract.",
+                "agent_contract",
+                evidence,
+            )
+        if handshake_code in {"INVALID_PROVIDER_TOOL_RESPONSE", "UNEXPECTED_INITIAL_TOOL"}:
+            return self._block(
+                state,
+                "HERMES_TOOL_PROTOCOL_UNSUPPORTED",
+                "The provider did not return one executable native status call.",
+                "agent_contract",
+                evidence,
+            )
+        if handshake_code:
+            return self._block(
+                state,
+                "OPENMONTAGE_RUNTIME_UNAVAILABLE",
+                "The real openmontage_native status handler did not complete successfully.",
+                "agent_contract",
+                evidence,
+            )
         if any(token in error for token in (
             "api key", "credentials", "unauthorized", "authentication failed", " 401",
-            "provider unavailable", "unknown provider",
-            "provider not configured", "rate limit", "too many requests", "quota",
-            "resourceexhausted", "workers are busy", "timed out", "timeout", " 429", " 503",
+            " 403", "forbidden",
+            "unknown provider", "provider not configured",
         )):
-            return self._block(state, "HERMES_RUNTIME_UNAVAILABLE", execution.error or "Hermes runtime unavailable", "agent", {"returncode": execution.returncode})
+            return self._block(
+                state,
+                "HERMES_AUTH_REQUIRED",
+                execution.error or "Hermes provider authentication is unavailable.",
+                "agent",
+                evidence,
+            )
+        if any(token in error for token in (
+            "provider unavailable", "workers are busy", "timed out", "timeout", " 503",
+        )):
+            return self._block(
+                state,
+                "HERMES_PROVIDER_TRANSIENT",
+                execution.error or "Hermes provider is temporarily unavailable.",
+                "agent",
+                evidence,
+            )
+        if any(token in error for token in (
+            "rate limit", "too many requests", "quota", "resourceexhausted", " 429",
+        )):
+            return self._block(
+                state,
+                "HERMES_PROVIDER_RATE_LIMITED",
+                execution.error or "Hermes provider rate limit is active.",
+                "agent",
+                evidence,
+            )
+        if "acd_hermes_tool_unavailable" in error:
+            return self._block(
+                state,
+                "HERMES_TOOL_UNAVAILABLE",
+                "The live Hermes AIAgent did not expose openmontage_native.",
+                "agent_contract",
+                evidence,
+            )
+        if "acd_hermes_tool_contract_config_invalid" in error:
+            return self._block(
+                state,
+                "HERMES_TOOL_CONTRACT_CONFIG_INVALID",
+                "The live provider request is missing required model tool-parsing configuration.",
+                "agent_contract",
+                evidence,
+            )
+        if "acd_hermes_tool_request_invalid" in error:
+            return self._block(
+                state,
+                "HERMES_TOOL_REQUEST_INVALID",
+                "The final provider request did not preserve the named status-only native contract.",
+                "agent_contract",
+                evidence,
+            )
+        if "acd_hermes_tool_handshake_failed" in error:
+            return self._block(
+                state,
+                "HERMES_TOOL_PROTOCOL_UNSUPPORTED",
+                "The required native status handshake failed in the pinned Hermes path.",
+                "agent_contract",
+                evidence,
+            )
         return self._fail(state, "HERMES_EXECUTION_FAILED", execution.error or "Hermes execution failed", "agent", {"returncode": execution.returncode})
 
     def _problem_from_envelope(self, state: RunState, envelope: AgentEnvelope, blocked: bool) -> RunState:

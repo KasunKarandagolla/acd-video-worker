@@ -343,6 +343,56 @@ def model_tool_contract_gate(profile_home: Path) -> Gate:
     )
 
 
+def hermes_same_path_contract_gate(hermes_repo: Path) -> Gate:
+    """Verify the exact pinned hooks used by the production handshake adapter."""
+    required = {
+        hermes_repo / "run_agent.py": (
+            "class AIAgent",
+            "def _build_api_kwargs(",
+            "def _interruptible_api_call(",
+            "def _interruptible_streaming_api_call(",
+        ),
+        hermes_repo / "agent" / "conversation_loop.py": (
+            "_cc_fr = agent._get_transport()",
+            "_finish_result = _cc_fr.normalize_response(response)",
+        ),
+        hermes_repo / "agent" / "tool_executor.py": (
+            "agent.tool_start_callback(",
+            "agent.tool_complete_callback(",
+            "function_result",
+        ),
+        hermes_repo / "agent" / "transports" / "types.py": (
+            "class ToolCall",
+            "arguments: str",
+            "class NormalizedResponse",
+        ),
+        ROOT / "scripts" / "hermes_event_adapter.py": (
+            "_status_only_tool",
+            "api_response_normalized",
+            "ACD_HERMES_TOOL_HANDSHAKE_FAILED",
+        ),
+    }
+    absent = []
+    for path, markers in required.items():
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError:
+            absent.append(f"missing {path}")
+            continue
+        absent.extend(f"{path.name}: {marker}" for marker in markers if marker not in source)
+    if absent:
+        return Gate(
+            "hermes_same_path_contract",
+            "failed",
+            "pinned request/response/callback surface differs: " + "; ".join(absent),
+        )
+    return Gate(
+        "hermes_same_path_contract",
+        "passed",
+        "live request restriction, normalized response and real tool callbacks verified",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate the thin ACD runtime")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "state" / "setup")
@@ -356,6 +406,7 @@ def main() -> int:
 
     gates = [
         git_pin("hermes_pin", hermes_repo, HERMES_PIN),
+        hermes_same_path_contract_gate(hermes_repo),
         openmontage_compatibility_gate(openmontage),
         production_boundary(),
     ]

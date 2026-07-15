@@ -40,15 +40,28 @@ pinned `AIAgent.__init__` callback injection point without replacing the class.
 This preserves Hermes' class constants/static helpers and supported profile,
 model, session and tool behavior.
 
-Every production slice has one deterministic protocol entry: the adapter sets
-an OpenAI-compatible named `tool_choice` for `openmontage_native` until its
-first real tool-start callback. This enforces the job contract's initial
-`status` handoff even when a provider would otherwise choose a text response
-under `tool_choice=auto`. The override is removed immediately after that first
-tool starts; Hermes still owns all subsequent creative reasoning, skill use
-and workflow decisions. Bounded events record the installed/sent tool counts,
-presence of the native tool, named-choice enforcement and required NVIDIA chat
-template flags without recording prompts, schemas or credentials.
+An uncertified production run has one deterministic protocol entry on the same
+Hermes request path used by the creative session. The existing event adapter
+restricts the live `openmontage_native` schema to `operation=status`, sends only
+that tool with an OpenAI-compatible named `tool_choice`, and observes the
+pinned transport's normalized response. It revalidates the final kwargs at the
+actual interruptible provider-call boundary after Hermes LLM middleware, so a
+middleware mutation cannot weaken the restriction. Full tools are restored
+only after the model returned exactly one native call and Hermes' real
+tool-completion callback reported `success: true` from the status handler.
+Prompt text, a synthetic gate,
+an exit-zero process, or a tool-start event cannot certify the boundary.
+
+The controller validates the request, response and handler evidence and then
+persists a non-secret contract certificate in the structured run state. Its
+fingerprint covers the pinned Hermes commit, selected model/profile config,
+plugin code/manifest and event adapter. Continuations and kernel-restored runs
+reuse a matching certificate, so they do not spend another provider turn on a
+redundant handshake; a changed runtime surface is recertified automatically.
+Hermes still owns all subsequent creative reasoning, skill use and workflow
+decisions. Bounded events record only structural facts—tool names/counts,
+choice mode, response tool-call shape, handler success and required NVIDIA
+flags—never prompts, schemas, reasoning text, response text or credentials.
 
 ## Transaction
 
@@ -96,7 +109,18 @@ check, expected modified-path set and overlay hashes.
 
 ## Failure semantics
 
-- Provider/auth/capacity and missing native runtime are `BLOCKED`.
+- Missing/invalid live native tool registration is `HERMES_TOOL_UNAVAILABLE`.
+- A text-only or malformed first provider response is
+  `HERMES_TOOL_PROTOCOL_UNSUPPORTED`; no production workflow begins.
+- Missing live structural evidence is `HERMES_TOOL_HANDSHAKE_UNVERIFIED`.
+- Missing Nemotron Ultra parser flags is
+  `HERMES_TOOL_CONTRACT_CONFIG_INVALID` before the provider call.
+- A successful provider tool call whose real native status handler fails is
+  `OPENMONTAGE_RUNTIME_UNAVAILABLE`, preserving the handler's evidence.
+- Provider authentication is `HERMES_AUTH_REQUIRED`; throttling and temporary
+  capacity are separately retryable as `HERMES_PROVIDER_RATE_LIMITED` and
+  `HERMES_PROVIDER_TRANSIENT`.
+- Missing native runtime is `BLOCKED`.
 - Typed runtime, checkpoint or silence approvals are `BLOCKED` and may be
   supplied on an explicit retry of the same project/session.
 - Schema, checkpoint tampering, artifact integrity, fingerprint conflicts,

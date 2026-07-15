@@ -93,11 +93,10 @@ PYTHONPATH=src python3 scripts/acd_worker.py \
 ```
 
 This is accepted only for the explicit retryable blocker allowlist, including
-provider/runtime unavailability and typed approval blockers. Delivery,
+provider throttling/capacity, runtime unavailability and typed approval
+blockers. Delivery, authentication/configuration errors, protocol failures,
 validation failures, dry-run and other failed states remain terminal.
-Missing/expired provider credentials,
-provider authentication failures, throttling and provider capacity errors are
-classified as this retryable blocker. The generated Hermes profile caps the
+The generated Hermes profile caps the
 effective context at 65,536 tokens by default (`ACD_HERMES_CONTEXT_LENGTH`) so
 Hermes' native compression runs before large free-endpoint requests are
 typically throttled.
@@ -141,6 +140,14 @@ required reasoning-plus-tool-call parser flags (`enable_thinking` and
 `force_nonempty_content`). The setup doctor rejects an Ultra profile missing
 either flag; model-emitted JSON is never reinterpreted as an executable tool
 call by the worker.
+
+For each new runtime fingerprint, the first real production provider request
+is a status-only named `openmontage_native` call on this same Hermes session.
+The controller requires matching normalized-response structure and a successful
+real handler callback before it accepts creative work. It persists that
+non-secret certificate in the run state, so bounded continuations and restored
+Kaggle sessions do not repeat the handshake. No separate probe session or
+second adapter is part of production.
 
 The adapter is the only process that imports the pinned OpenMontage contracts
 and calls `registry.get(name).execute(inputs)`. Hermes stops after schema-valid

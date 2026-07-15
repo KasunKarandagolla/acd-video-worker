@@ -36,7 +36,7 @@ from acd_worker.thin_controller import ThinControllerConfig, ThinRunController
 
 
 class FakeRunner:
-    def __init__(self, root: Path, behavior):
+    def __init__(self, root: Path, behavior, *, autocertify: bool = True):
         self.profile_dir = root / "hermes" / "profiles" / "football-emotion"
         for skill in PRELOADED_SKILLS:
             target = self.profile_dir / "skills" / "football-emotion-video" / "skills" / skill
@@ -47,6 +47,7 @@ class FakeRunner:
         (plugin / "plugin.yaml").write_text("name: acd-openmontage\n", encoding="utf-8")
         (plugin / "__init__.py").write_text("def register(ctx): pass\n", encoding="utf-8")
         self.behavior = behavior
+        self.autocertify = autocertify
         self.calls = []
 
     def find_skill(self, name):
@@ -55,7 +56,53 @@ class FakeRunner:
 
     def run_session(self, **kwargs):
         self.calls.append(kwargs)
-        return self.behavior(kwargs)
+        result = self.behavior(kwargs)
+        environment = kwargs.get("environment") or {}
+        required = environment.get("ACD_FORCE_INITIAL_OPENMONTAGE_TOOL") == "1"
+        if self.autocertify and result.success and required:
+            result.metadata = dict(result.metadata or {})
+            result.metadata.update({
+                "event_adapter_used": True,
+                "tool_contract_requested": True,
+                "tool_contract_id": environment.get("ACD_HERMES_TOOL_CONTRACT_ID"),
+            })
+            summary = dict(result.metadata.get("event_summary") or {})
+            summary.setdefault("events", {
+                "tool_handshake_started": 1,
+                "tool_handshake_completed": 1,
+            })
+            summary.setdefault("agent_contract", {
+                "has_openmontage_native": True,
+                "has_acd_acquire_source": True,
+                "provider": "custom:acd-free",
+                "model": "test-model",
+            })
+            request = {
+                "handshake_request": True,
+                "tool_count": 1,
+                "tools": "openmontage_native",
+                "status_only": True,
+                "tool_choice_mode": "named",
+                "tool_choice_name": "openmontage_native",
+                "model": "test-model",
+            }
+            summary.setdefault("request_contract", request)
+            summary.setdefault("first_request_contract", request)
+            summary.setdefault("first_response_contract", {
+                "tool_call_count": 1,
+                "tool_call_names": "openmontage_native",
+                "status_operation": True,
+                "finish_reason": "tool_calls",
+            })
+            summary.setdefault("tool_handshake", {
+                "required": True,
+                "started": True,
+                "completed": True,
+                "failed": False,
+                "result_success": True,
+            })
+            result.metadata["event_summary"] = summary
+        return result
 
 
 def config_for(root: Path, dry_run: bool = False) -> ThinControllerConfig:
@@ -95,9 +142,16 @@ class RunStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             now = utc_now()
             state = RunState("1.0", "resume_1", "p1", "request", RunStatus.INTAKE, now, now, "/p", "/s", "/a", "/j")
+            state.hermes_tool_contract = {
+                "schema_version": "1.0",
+                "status": "passed",
+                "contract_id": "contract-1",
+            }
             store = RunStateStore(Path(tmp))
             store.save(state)
-            self.assertEqual(store.load("resume_1").status, RunStatus.INTAKE)
+            restored = store.load("resume_1")
+            self.assertEqual(restored.status, RunStatus.INTAKE)
+            self.assertEqual(restored.hermes_tool_contract["contract_id"], "contract-1")
 
     def test_store_lease_prevents_concurrent_run_owner(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -295,7 +349,7 @@ class HermesRunnerTests(unittest.TestCase):
             )
             state = ThinRunController(cfg, runner=runner).start("test")
             self.assertEqual(state.status, RunStatus.BLOCKED)
-            self.assertEqual(state.blocker.code, "HERMES_RUNTIME_UNAVAILABLE")
+            self.assertEqual(state.blocker.code, "HERMES_PROVIDER_TRANSIENT")
 
     def test_provider_authentication_failure_is_structured_blocker(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -315,7 +369,7 @@ class HermesRunnerTests(unittest.TestCase):
             )
             state = ThinRunController(cfg, runner=runner).start("test")
             self.assertEqual(state.status, RunStatus.BLOCKED)
-            self.assertEqual(state.blocker.code, "HERMES_RUNTIME_UNAVAILABLE")
+            self.assertEqual(state.blocker.code, "HERMES_AUTH_REQUIRED")
             self.assertIsNone(state.error)
 
     def test_transient_provider_blocker_requires_explicit_same_session_retry(self):
@@ -335,6 +389,7 @@ class HermesRunnerTests(unittest.TestCase):
             controller = ThinRunController(cfg, runner=runner)
             blocked = controller.start("test")
             self.assertEqual(blocked.status, RunStatus.BLOCKED)
+            self.assertEqual(blocked.blocker.code, "HERMES_PROVIDER_RATE_LIMITED")
             self.assertEqual(len(runner.calls), 1)
 
             unchanged = controller.resume(blocked.run_id)
@@ -351,6 +406,25 @@ class HermesRunnerTests(unittest.TestCase):
                 {"from": "BLOCKED", "to": "AGENT_RUNNING"},
                 [{"from": item["from"], "to": item["to"]} for item in retried.history],
             )
+
+    def test_authentication_blocker_is_not_retryable_without_configuration_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+            runner = FakeRunner(
+                root,
+                lambda _: HermesSessionResult(
+                    success=False,
+                    session_id="session_12345678",
+                    returncode=1,
+                    error="HTTP 401: Unauthorized",
+                ),
+            )
+            controller = ThinRunController(cfg, runner=runner)
+            blocked = controller.start("test")
+            retried = controller.resume(blocked.run_id, retry_blocked=True)
+            self.assertEqual(retried.blocker.code, "HERMES_AUTH_REQUIRED")
+            self.assertEqual(len(runner.calls), 1)
 
     def test_secret_redaction(self):
         token = "ghp" + "_abcdefghijk"
@@ -451,7 +525,19 @@ class OptionalInfrastructureTests(unittest.TestCase):
 
         native_tool = {
             "type": "function",
-            "function": {"name": "openmontage_native", "parameters": {"type": "object"}},
+            "function": {
+                "name": "openmontage_native",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["status", "read_document", "publish_artifact"],
+                        }
+                    },
+                    "required": ["operation"],
+                },
+            },
         }
         web_tool = {
             "type": "function",
@@ -474,33 +560,290 @@ class OptionalInfrastructureTests(unittest.TestCase):
                     },
                 }
 
+            def _interruptible_api_call(self, request):
+                return request
+
         with tempfile.TemporaryDirectory() as tmp:
             events = Path(tmp) / "events.jsonl"
-            sink = EventSink(events)
             module = SimpleNamespace(AIAgent=FakeAgent)
             with patch.dict(os.environ, {"ACD_FORCE_INITIAL_OPENMONTAGE_TOOL": "1"}):
+                sink = EventSink(events)
                 instrument_run_agent(module, sink)
                 agent = module.AIAgent()
                 first = agent._build_api_kwargs([])
+                agent._interruptible_api_call(first)
                 self.assertEqual(
                     first["tool_choice"],
                     {"type": "function", "function": {"name": "openmontage_native"}},
                 )
-                sink.start("call-1", "openmontage_native")
+                self.assertEqual(len(first["tools"]), 1)
+                self.assertEqual(
+                    first["tools"][0]["function"]["parameters"]["properties"]["operation"]["enum"],
+                    ["status"],
+                )
+                self.assertEqual(
+                    native_tool["function"]["parameters"]["properties"]["operation"]["enum"],
+                    ["status", "read_document", "publish_artifact"],
+                )
+                sink.start("call-1", "openmontage_native", {"operation": "status"})
+                sink.complete(
+                    "call-1",
+                    "openmontage_native",
+                    {"operation": "status"},
+                    json.dumps({"success": True, "operation": "status"}),
+                )
                 second = agent._build_api_kwargs([])
+                agent._interruptible_api_call(second)
 
             self.assertEqual(second["tool_choice"], "auto")
             summary = HermesRunner._event_summary(events)
             self.assertEqual(summary["agent_contract"]["tool_count"], "3")
             self.assertEqual(summary["agent_contract"]["has_openmontage_native"], "True")
             self.assertEqual(summary["request_contract"]["has_openmontage_native"], "True")
-            self.assertEqual(summary["request_contract"]["forced_initial_native"], "False")
+            self.assertEqual(summary["request_contract"]["handshake_request"], "True")
+            self.assertEqual(summary["request_contract"]["tool_count"], "1")
+            self.assertEqual(summary["request_contract"]["status_only"], "True")
+            self.assertEqual(summary["request_contract"]["tool_choice_mode"], "named")
+            self.assertEqual(summary["last_request_contract"]["handshake_request"], "False")
+            self.assertEqual(summary["last_request_contract"]["tool_count"], "2")
+            self.assertEqual(summary["tool_handshake"]["completed"], True)
             request_events = [
                 json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()
                 if '"event": "api_request_ready"' in line
             ]
-            self.assertEqual(request_events[0]["forced_initial_native"], "True")
+            self.assertEqual(request_events[0]["handshake_request"], "True")
             self.assertEqual(request_events[0]["force_nonempty_content"], "True")
+
+    def test_hermes_event_adapter_captures_normalized_response_structure_only(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from hermes_event_adapter import EventSink, instrument_run_agent
+
+        native_tool = {
+            "type": "function",
+            "function": {
+                "name": "openmontage_native",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {"type": "string", "enum": ["status"]},
+                    },
+                    "required": ["operation"],
+                },
+            },
+        }
+
+        class FakeTransport:
+            def normalize_response(self, _response, **_kwargs):
+                return SimpleNamespace(
+                    finish_reason="tool_calls",
+                    content="must-not-be-recorded",
+                    reasoning="hidden-reasoning-must-not-be-recorded",
+                    provider_data={},
+                    tool_calls=[SimpleNamespace(
+                        name="openmontage_native",
+                        arguments=json.dumps({"operation": "status"}),
+                    )],
+                )
+
+        class FakeAgent:
+            def __init__(self, **_kwargs):
+                self.valid_tool_names = {"openmontage_native", "acd_acquire_source"}
+                self.transport = FakeTransport()
+
+            def _build_api_kwargs(self, _messages):
+                return {"model": "test", "tools": [native_tool]}
+
+            def _get_transport(self):
+                return self.transport
+
+            def _interruptible_api_call(self, request):
+                return request
+
+        with tempfile.TemporaryDirectory() as tmp:
+            events = Path(tmp) / "events.jsonl"
+            sink = EventSink(events)
+            module = SimpleNamespace(AIAgent=FakeAgent)
+            instrument_run_agent(module, sink)
+            agent = module.AIAgent()
+            normalized = agent._get_transport().normalize_response(object())
+            self.assertEqual(normalized.finish_reason, "tool_calls")
+            raw = events.read_text(encoding="utf-8")
+            self.assertNotIn("must-not-be-recorded", raw)
+            self.assertNotIn("hidden-reasoning-must-not-be-recorded", raw)
+            summary = HermesRunner._event_summary(events)
+            self.assertEqual(summary["first_response_contract"]["tool_call_count"], "1")
+            self.assertEqual(
+                summary["first_response_contract"]["tool_call_names"],
+                "openmontage_native",
+            )
+
+    def test_hermes_event_adapter_rejects_post_build_request_mutation(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from hermes_event_adapter import EventSink, instrument_run_agent
+
+        native_tool = {
+            "type": "function",
+            "function": {
+                "name": "openmontage_native",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["status", "publish_artifact"],
+                        }
+                    },
+                },
+            },
+        }
+
+        class FakeAgent:
+            def __init__(self, **_kwargs):
+                self.valid_tool_names = {"openmontage_native", "acd_acquire_source"}
+
+            def _build_api_kwargs(self, _messages):
+                return {"model": "test", "tools": [native_tool], "tool_choice": "auto"}
+
+            def _interruptible_api_call(self, request):
+                return request
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"ACD_FORCE_INITIAL_OPENMONTAGE_TOOL": "1"}
+        ):
+            module = SimpleNamespace(AIAgent=FakeAgent)
+            instrument_run_agent(module, EventSink(Path(tmp) / "events.jsonl"))
+            agent = module.AIAgent()
+            request = agent._build_api_kwargs([])
+            # Simulate an LLM middleware weakening the prepared request.
+            request["tool_choice"] = "auto"
+            with self.assertRaisesRegex(RuntimeError, "ACD_HERMES_TOOL_REQUEST_INVALID"):
+                agent._interruptible_api_call(request)
+
+    def test_hermes_event_adapter_rejects_text_response_before_second_request(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from hermes_event_adapter import EventSink, instrument_run_agent
+
+        native_tool = {
+            "type": "function",
+            "function": {
+                "name": "openmontage_native",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"operation": {"type": "string", "enum": ["status"]}},
+                },
+            },
+        }
+
+        class FakeTransport:
+            def normalize_response(self, _response, **_kwargs):
+                return SimpleNamespace(
+                    finish_reason="stop",
+                    content="text-only refusal",
+                    reasoning=None,
+                    provider_data={},
+                    tool_calls=[],
+                )
+
+        class FakeAgent:
+            def __init__(self, **_kwargs):
+                self.valid_tool_names = {"openmontage_native", "acd_acquire_source"}
+                self.transport = FakeTransport()
+
+            def _build_api_kwargs(self, _messages):
+                return {"model": "test", "tools": [native_tool], "tool_choice": "auto"}
+
+            def _get_transport(self):
+                return self.transport
+
+            def _interruptible_api_call(self, request):
+                return request
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"ACD_FORCE_INITIAL_OPENMONTAGE_TOOL": "1"}
+        ):
+            events = Path(tmp) / "events.jsonl"
+            module = SimpleNamespace(AIAgent=FakeAgent)
+            instrument_run_agent(module, EventSink(events))
+            agent = module.AIAgent()
+            first = agent._build_api_kwargs([])
+            agent._interruptible_api_call(first)
+            agent._get_transport().normalize_response(object())
+            with self.assertRaisesRegex(RuntimeError, "ACD_HERMES_TOOL_HANDSHAKE_FAILED"):
+                agent._build_api_kwargs([])
+            summary = HermesRunner._event_summary(events)
+            self.assertEqual(summary["first_response_contract"]["tool_call_count"], "0")
+            self.assertEqual(
+                summary["tool_handshake"]["failure_code"],
+                "INVALID_PROVIDER_TOOL_RESPONSE",
+            )
+
+    def test_hermes_event_adapter_fails_before_provider_without_native_tool(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from hermes_event_adapter import EventSink, instrument_run_agent
+
+        class FakeAgent:
+            def __init__(self, **_kwargs):
+                self.valid_tool_names = {"acd_acquire_source"}
+
+            def _build_api_kwargs(self, _messages):
+                return {
+                    "model": "test-model",
+                    "tools": [{
+                        "type": "function",
+                        "function": {"name": "acd_acquire_source", "parameters": {}},
+                    }],
+                }
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"ACD_FORCE_INITIAL_OPENMONTAGE_TOOL": "1"}
+        ):
+            sink = EventSink(Path(tmp) / "events.jsonl")
+            module = SimpleNamespace(AIAgent=FakeAgent)
+            instrument_run_agent(module, sink)
+            with self.assertRaisesRegex(RuntimeError, "ACD_HERMES_TOOL_UNAVAILABLE"):
+                module.AIAgent()._build_api_kwargs([])
+
+    def test_hermes_event_adapter_fails_before_ultra_request_without_flags(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from hermes_event_adapter import EventSink, instrument_run_agent
+
+        native_tool = {
+            "type": "function",
+            "function": {
+                "name": "openmontage_native",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"operation": {"type": "string", "enum": ["status"]}},
+                },
+            },
+        }
+
+        class FakeAgent:
+            def __init__(self, **_kwargs):
+                self.valid_tool_names = {"openmontage_native", "acd_acquire_source"}
+
+            def _build_api_kwargs(self, _messages):
+                return {
+                    "model": "nvidia/nemotron-3-ultra-550b-a55b",
+                    "tools": [native_tool],
+                    "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
+                }
+
+            def _interruptible_api_call(self, request):
+                return request
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"ACD_FORCE_INITIAL_OPENMONTAGE_TOOL": "1"}
+        ):
+            sink = EventSink(Path(tmp) / "events.jsonl")
+            module = SimpleNamespace(AIAgent=FakeAgent)
+            instrument_run_agent(module, sink)
+            agent = module.AIAgent()
+            request = agent._build_api_kwargs([])
+            with self.assertRaisesRegex(
+                RuntimeError, "ACD_HERMES_TOOL_CONTRACT_CONFIG_INVALID"
+            ):
+                agent._interruptible_api_call(request)
 
     def test_hermes_event_adapter_records_clean_system_exit_as_finished(self):
         sys.path.insert(0, str(ROOT / "scripts"))
@@ -747,6 +1090,38 @@ class OptionalInfrastructureTests(unittest.TestCase):
             )
             self.assertEqual(model_tool_contract_gate(profile).status, "passed")
 
+    def test_doctor_checks_pinned_same_path_hermes_hooks(self):
+        from bootstrap.validate_setup import hermes_same_path_contract_gate
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes = Path(tmp)
+            (hermes / "agent" / "transports").mkdir(parents=True)
+            (hermes / "run_agent.py").write_text(
+                "class AIAgent:\n"
+                "    def _build_api_kwargs(self): pass\n"
+                "    def _interruptible_api_call(self): pass\n"
+                "    def _interruptible_streaming_api_call(self): pass\n",
+                encoding="utf-8",
+            )
+            (hermes / "agent" / "conversation_loop.py").write_text(
+                "_cc_fr = agent._get_transport()\n"
+                "_finish_result = _cc_fr.normalize_response(response)\n",
+                encoding="utf-8",
+            )
+            executor = hermes / "agent" / "tool_executor.py"
+            executor.write_text(
+                "agent.tool_start_callback(x)\n"
+                "agent.tool_complete_callback(x, function_result)\n",
+                encoding="utf-8",
+            )
+            (hermes / "agent" / "transports" / "types.py").write_text(
+                "class ToolCall:\n    arguments: str\nclass NormalizedResponse: pass\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(hermes_same_path_contract_gate(hermes).status, "passed")
+            executor.write_text("callbacks missing\n", encoding="utf-8")
+            self.assertEqual(hermes_same_path_contract_gate(hermes).status, "failed")
+
     def test_candidate_validator_rejects_missing_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -763,6 +1138,77 @@ class OptionalInfrastructureTests(unittest.TestCase):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_successful_process_without_live_tool_contract_is_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+            runner = FakeRunner(
+                root,
+                lambda _call: HermesSessionResult(
+                    success=True,
+                    session_id="session_12345678",
+                    returncode=0,
+                    metadata={
+                        "event_adapter_used": False,
+                        "tool_contract_requested": True,
+                    },
+                ),
+                autocertify=False,
+            )
+            state = ThinRunController(cfg, runner=runner).start("test")
+            self.assertEqual(state.status, RunStatus.BLOCKED)
+            self.assertEqual(state.blocker.code, "HERMES_TOOL_HANDSHAKE_UNVERIFIED")
+            self.assertEqual(len(runner.calls), 1)
+
+    def test_real_native_status_handler_failure_is_runtime_blocker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config_for(root)
+            metadata = {
+                "event_adapter_used": True,
+                "tool_contract_requested": True,
+                "event_summary": {
+                    "events": {"tool_handshake_started": 1, "tool_handshake_failed": 1},
+                    "agent_contract": {
+                        "has_openmontage_native": True,
+                        "has_acd_acquire_source": True,
+                    },
+                    "first_request_contract": {
+                        "handshake_request": True,
+                        "tool_count": 1,
+                        "tools": "openmontage_native",
+                        "status_only": True,
+                        "tool_choice_mode": "named",
+                        "tool_choice_name": "openmontage_native",
+                    },
+                    "first_response_contract": {
+                        "tool_call_count": 1,
+                        "tool_call_names": "openmontage_native",
+                        "status_operation": True,
+                    },
+                    "tool_handshake": {
+                        "required": True,
+                        "started": True,
+                        "completed": False,
+                        "failed": True,
+                        "failure_code": "OPENMONTAGE_TOOL_BRIDGE_UNAVAILABLE",
+                    },
+                },
+            }
+            runner = FakeRunner(
+                root,
+                lambda _call: HermesSessionResult(
+                    success=True,
+                    session_id="session_12345678",
+                    returncode=0,
+                    metadata=metadata,
+                ),
+                autocertify=False,
+            )
+            state = ThinRunController(cfg, runner=runner).start("test")
+            self.assertEqual(state.status, RunStatus.BLOCKED)
+            self.assertEqual(state.blocker.code, "OPENMONTAGE_RUNTIME_UNAVAILABLE")
+
     def test_worker_publishes_validated_terminal_payload_from_stdout(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -972,6 +1418,19 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(state.status, RunStatus.BLOCKED)
             self.assertEqual(state.blocker.code, "NATIVE_PIPELINE_INCOMPLETE")
             self.assertEqual(len(runner.calls), 2)
+            self.assertEqual(
+                runner.calls[0]["environment"]["ACD_FORCE_INITIAL_OPENMONTAGE_TOOL"],
+                "1",
+            )
+            self.assertEqual(
+                runner.calls[1]["environment"]["ACD_FORCE_INITIAL_OPENMONTAGE_TOOL"],
+                "0",
+            )
+            self.assertEqual(state.hermes_tool_contract["status"], "passed")
+            self.assertEqual(
+                state.hermes_tool_contract["contract_id"],
+                runner.calls[0]["environment"]["ACD_HERMES_TOOL_CONTRACT_ID"],
+            )
 
     def test_resume_counts_only_bounded_continuation_slices(self):
         with tempfile.TemporaryDirectory() as tmp:

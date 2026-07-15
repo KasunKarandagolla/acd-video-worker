@@ -227,8 +227,19 @@ class HermesRunner:
             # Try to extract session ID from output
             session_result.session_id = session_id
             if event_file:
+                session_result.metadata["event_adapter_used"] = True
                 session_result.metadata["event_file"] = str(event_file)
                 session_result.metadata["event_summary"] = self._event_summary(event_file)
+            else:
+                session_result.metadata["event_adapter_used"] = False
+            session_result.metadata["tool_contract_requested"] = (
+                env.get("ACD_FORCE_INITIAL_OPENMONTAGE_TOOL", "").strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
+            if env.get("ACD_HERMES_TOOL_CONTRACT_ID"):
+                session_result.metadata["tool_contract_id"] = env[
+                    "ACD_HERMES_TOOL_CONTRACT_ID"
+                ]
 
             # Parse artifacts from output
             session_result.artifacts = self._extract_artifacts(result.stdout)
@@ -353,7 +364,16 @@ class HermesRunner:
         max_step = 0
         terminal_event = None
         agent_contract = None
-        request_contract = None
+        first_request_contract = None
+        last_request_contract = None
+        first_response_contract = None
+        last_response_contract = None
+        handshake = {
+            "required": False,
+            "started": False,
+            "completed": False,
+            "failed": False,
+        }
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
@@ -378,7 +398,8 @@ class HermesRunner:
                 agent_contract = {
                     key: item.get(key)
                     for key in (
-                        "tool_count", "has_openmontage_native", "has_acd_acquire_source",
+                        "tool_count", "tools", "has_openmontage_native",
+                        "has_acd_acquire_source", "provider", "model", "api_mode",
                     )
                     if item.get(key) is not None
                 }
@@ -386,11 +407,55 @@ class HermesRunner:
                 request_contract = {
                     key: item.get(key)
                     for key in (
-                        "tool_count", "has_openmontage_native", "forced_initial_native",
-                        "enable_thinking", "force_nonempty_content",
+                        "request_index", "handshake_request", "tool_count", "tools",
+                        "has_openmontage_native", "status_only", "tool_choice_mode",
+                        "tool_choice_name", "enable_thinking",
+                        "force_nonempty_content", "model",
                     )
                     if item.get(key) is not None
                 }
+                if first_request_contract is None:
+                    first_request_contract = request_contract
+                last_request_contract = request_contract
+            if event == "api_response_normalized":
+                response_contract = {
+                    key: item.get(key)
+                    for key in (
+                        "response_index", "finish_reason", "content_present",
+                        "reasoning_present", "tool_call_count", "tool_call_names",
+                        "status_operation",
+                    )
+                    if item.get(key) is not None
+                }
+                if first_response_contract is None:
+                    first_response_contract = response_contract
+                last_response_contract = response_contract
+            if event == "tool_handshake_required":
+                handshake.update({
+                    "required": True,
+                    "contract_id": item.get("contract_id"),
+                    "tool": item.get("tool"),
+                    "operation": item.get("operation"),
+                })
+            if event == "tool_handshake_started":
+                handshake.update({
+                    "started": True,
+                    "tool": item.get("tool"),
+                    "operation": item.get("operation"),
+                })
+            if event == "tool_handshake_completed":
+                handshake.update({
+                    "completed": True,
+                    "failed": False,
+                    "result_success": item.get("result_success"),
+                    "result_code": item.get("result_code"),
+                })
+            if event == "tool_handshake_failed":
+                handshake.update({
+                    "failed": True,
+                    "failure_code": item.get("code"),
+                    "result_success": item.get("result_success"),
+                })
             if event in {"adapter_finished", "adapter_failed"}:
                 terminal_event = {
                     key: item.get(key)
@@ -403,7 +468,14 @@ class HermesRunner:
             "max_step": max_step,
             "terminal_event": terminal_event,
             "agent_contract": agent_contract,
-            "request_contract": request_contract,
+            # Compatibility alias now intentionally means the first request;
+            # the old implementation accidentally returned only the last one.
+            "request_contract": first_request_contract,
+            "first_request_contract": first_request_contract,
+            "last_request_contract": last_request_contract,
+            "first_response_contract": first_response_contract,
+            "last_response_contract": last_response_contract,
+            "tool_handshake": handshake,
         }
 
     @staticmethod
