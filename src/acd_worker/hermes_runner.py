@@ -352,6 +352,8 @@ class HermesRunner:
         tool_counts: Dict[str, int] = {}
         max_step = 0
         terminal_event = None
+        agent_contract = None
+        request_contract = None
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
@@ -372,6 +374,23 @@ class HermesRunner:
                     max_step = max(max_step, int(item.get("step") or 0))
                 except (TypeError, ValueError):
                     pass
+            if event == "agent_created":
+                agent_contract = {
+                    key: item.get(key)
+                    for key in (
+                        "tool_count", "has_openmontage_native", "has_acd_acquire_source",
+                    )
+                    if item.get(key) is not None
+                }
+            if event == "api_request_ready":
+                request_contract = {
+                    key: item.get(key)
+                    for key in (
+                        "tool_count", "has_openmontage_native", "forced_initial_native",
+                        "enable_thinking", "force_nonempty_content",
+                    )
+                    if item.get(key) is not None
+                }
             if event in {"adapter_finished", "adapter_failed"}:
                 terminal_event = {
                     key: item.get(key)
@@ -383,6 +402,8 @@ class HermesRunner:
             "tool_calls": tool_counts,
             "max_step": max_step,
             "terminal_event": terminal_event,
+            "agent_contract": agent_contract,
+            "request_contract": request_contract,
         }
 
     @staticmethod

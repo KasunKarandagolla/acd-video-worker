@@ -40,6 +40,16 @@ pinned `AIAgent.__init__` callback injection point without replacing the class.
 This preserves Hermes' class constants/static helpers and supported profile,
 model, session and tool behavior.
 
+Every production slice has one deterministic protocol entry: the adapter sets
+an OpenAI-compatible named `tool_choice` for `openmontage_native` until its
+first real tool-start callback. This enforces the job contract's initial
+`status` handoff even when a provider would otherwise choose a text response
+under `tool_choice=auto`. The override is removed immediately after that first
+tool starts; Hermes still owns all subsequent creative reasoning, skill use
+and workflow decisions. Bounded events record the installed/sent tool counts,
+presence of the native tool, named-choice enforcement and required NVIDIA chat
+template flags without recording prompts, schemas or credentials.
+
 ## Transaction
 
 1. Hermes authors exactly one planning payload (`proposal_packet` or `brief`),

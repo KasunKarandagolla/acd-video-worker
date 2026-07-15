@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sqlite3
@@ -444,6 +445,63 @@ class OptionalInfrastructureTests(unittest.TestCase):
             sink.capture_terminal_response({"final_response": "reasoning before\n" + json.dumps(payload)})
             self.assertFalse((root / "terminal.json").exists())
 
+    def test_hermes_event_adapter_forces_only_initial_native_tool(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from hermes_event_adapter import EventSink, instrument_run_agent
+
+        native_tool = {
+            "type": "function",
+            "function": {"name": "openmontage_native", "parameters": {"type": "object"}},
+        }
+        web_tool = {
+            "type": "function",
+            "function": {"name": "web_search", "parameters": {"type": "object"}},
+        }
+
+        class FakeAgent:
+            def __init__(self, **_kwargs):
+                self.valid_tool_names = {"openmontage_native", "acd_acquire_source", "web_search"}
+
+            def _build_api_kwargs(self, _messages):
+                return {
+                    "tools": [native_tool, web_tool],
+                    "tool_choice": "auto",
+                    "extra_body": {
+                        "chat_template_kwargs": {
+                            "enable_thinking": True,
+                            "force_nonempty_content": True,
+                        }
+                    },
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            events = Path(tmp) / "events.jsonl"
+            sink = EventSink(events)
+            module = SimpleNamespace(AIAgent=FakeAgent)
+            with patch.dict(os.environ, {"ACD_FORCE_INITIAL_OPENMONTAGE_TOOL": "1"}):
+                instrument_run_agent(module, sink)
+                agent = module.AIAgent()
+                first = agent._build_api_kwargs([])
+                self.assertEqual(
+                    first["tool_choice"],
+                    {"type": "function", "function": {"name": "openmontage_native"}},
+                )
+                sink.start("call-1", "openmontage_native")
+                second = agent._build_api_kwargs([])
+
+            self.assertEqual(second["tool_choice"], "auto")
+            summary = HermesRunner._event_summary(events)
+            self.assertEqual(summary["agent_contract"]["tool_count"], "3")
+            self.assertEqual(summary["agent_contract"]["has_openmontage_native"], "True")
+            self.assertEqual(summary["request_contract"]["has_openmontage_native"], "True")
+            self.assertEqual(summary["request_contract"]["forced_initial_native"], "False")
+            request_events = [
+                json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()
+                if '"event": "api_request_ready"' in line
+            ]
+            self.assertEqual(request_events[0]["forced_initial_native"], "True")
+            self.assertEqual(request_events[0]["force_nonempty_content"], "True")
+
     def test_hermes_event_adapter_records_clean_system_exit_as_finished(self):
         sys.path.insert(0, str(ROOT / "scripts"))
         import hermes_event_adapter
@@ -828,6 +886,10 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(len(runner.calls), 1)
             self.assertEqual(runner.calls[0]["environment"]["ACD_RUN_ID"], state.run_id)
             self.assertEqual(runner.calls[0]["environment"]["ACD_PROJECT_DIR"], state.project_dir)
+            self.assertEqual(
+                runner.calls[0]["environment"]["ACD_FORCE_INITIAL_OPENMONTAGE_TOOL"],
+                "1",
+            )
             self.assertEqual(state.blocker.evidence["execution"]["event_summary"]["max_step"], 32)
 
     def test_invalid_terminal_payload_is_reported_in_no_progress_evidence(self):

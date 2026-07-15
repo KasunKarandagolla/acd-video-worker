@@ -471,6 +471,9 @@ class ThinRunController:
                 (self.runner.profile_dir / "skills" / "football-emotion-video").resolve()
             ),
             "ACD_APPROVAL_POLICY_JSON": json.dumps(state.approval_policy, sort_keys=True),
+            # This enforces only the already-declared first status call. After
+            # the first real tool starts, Hermes owns all workflow decisions.
+            "ACD_FORCE_INITIAL_OPENMONTAGE_TOOL": "1",
             "OPENMONTAGE_ROOT": str(self.config.openmontage_root.resolve()),
             "OPENMONTAGE_PROJECTS_DIR": str(self.config.projects_dir.resolve()),
             "OPENMONTAGE_PYTHON": os.environ.get(

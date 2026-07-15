@@ -13,6 +13,22 @@ from pathlib import Path
 
 
 SECRET_RE = re.compile(r"(?i)(?:sk-|ghp_|github_pat_|bearer\s+)[A-Za-z0-9_.-]{8,}")
+TRUE_VALUES = {"1", "true", "yes", "on"}
+INITIAL_NATIVE_TOOL = "openmontage_native"
+
+
+def _tool_names(tool_definitions) -> set[str]:
+    """Extract OpenAI-compatible function names without retaining schemas."""
+    names: set[str] = set()
+    for definition in tool_definitions or []:
+        if not isinstance(definition, dict):
+            continue
+        function = definition.get("function")
+        if isinstance(function, dict) and function.get("name"):
+            names.add(str(function["name"]))
+        elif definition.get("name"):
+            names.add(str(definition["name"]))
+    return names
 
 
 class EventSink:
@@ -24,6 +40,7 @@ class EventSink:
             if terminal_response_path is not None
             else None
         )
+        self.tool_started = False
 
     def emit(self, event: str, **fields) -> None:
         safe = {"at": datetime.now(timezone.utc).isoformat(), "event": event}
@@ -41,6 +58,7 @@ class EventSink:
         self.emit("tool_progress", signal=args[0] if args else None, tool=args[1] if len(args) > 1 else None)
 
     def start(self, *args, **_kwargs):
+        self.tool_started = True
         self.emit("tool_start", call_id=args[0] if args else None, tool=args[1] if len(args) > 1 else None)
 
     def complete(self, *args, **_kwargs):
@@ -132,7 +150,60 @@ def instrument_run_agent(run_agent_module, sink: EventSink):
             "event_callback": sink.event,
         })
         original_init(agent_self, *agent_args, **agent_kwargs)
-        sink.emit("agent_created")
+        installed_tools = {
+            str(name) for name in (getattr(agent_self, "valid_tool_names", None) or set())
+        }
+        sink.emit(
+            "agent_created",
+            tool_count=len(installed_tools),
+            has_openmontage_native=INITIAL_NATIVE_TOOL in installed_tools,
+            has_acd_acquire_source="acd_acquire_source" in installed_tools,
+        )
+
+        # The production contract requires the first action in every Hermes
+        # slice to be openmontage_native(status). Prompt-only compliance is not
+        # a reliable protocol boundary: an OpenAI-compatible endpoint may
+        # legally choose a text response when tool_choice remains "auto".
+        # Force only that first named tool; after any real tool starts, Hermes
+        # regains normal autonomous tool selection for the creative workflow.
+        original_build_api_kwargs = getattr(agent_self, "_build_api_kwargs", None)
+        force_initial_native = (
+            os.environ.get("ACD_FORCE_INITIAL_OPENMONTAGE_TOOL", "").strip().lower()
+            in TRUE_VALUES
+        )
+        if callable(original_build_api_kwargs):
+            def instrumented_build_api_kwargs(api_messages):
+                request = original_build_api_kwargs(api_messages)
+                if not isinstance(request, dict):
+                    return request
+                request_tools = _tool_names(request.get("tools"))
+                force_applied = (
+                    force_initial_native
+                    and not getattr(sink, "tool_started", False)
+                    and INITIAL_NATIVE_TOOL in request_tools
+                )
+                if force_applied:
+                    request["tool_choice"] = {
+                        "type": "function",
+                        "function": {"name": INITIAL_NATIVE_TOOL},
+                    }
+                extra_body = request.get("extra_body")
+                chat_template = (
+                    extra_body.get("chat_template_kwargs", {})
+                    if isinstance(extra_body, dict)
+                    else {}
+                )
+                sink.emit(
+                    "api_request_ready",
+                    tool_count=len(request_tools),
+                    has_openmontage_native=INITIAL_NATIVE_TOOL in request_tools,
+                    forced_initial_native=force_applied,
+                    enable_thinking=chat_template.get("enable_thinking"),
+                    force_nonempty_content=chat_template.get("force_nonempty_content"),
+                )
+                return request
+
+            agent_self._build_api_kwargs = instrumented_build_api_kwargs
 
     agent_class.__init__ = instrumented_init
     if callable(original_run_conversation):
