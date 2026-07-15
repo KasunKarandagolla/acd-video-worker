@@ -136,6 +136,12 @@ worker-owned source acquisition boundary. Hermes runs from the isolated project
 workspace with `coding_context: off`; production does not expose terminal,
 mutable file or code-execution toolsets and does not enable `--yolo`.
 
+When Nemotron 3 Ultra is selected, profile generation also applies NVIDIA's
+required reasoning-plus-tool-call parser flags (`enable_thinking` and
+`force_nonempty_content`). The setup doctor rejects an Ultra profile missing
+either flag; model-emitted JSON is never reinterpreted as an executable tool
+call by the worker.
+
 The adapter is the only process that imports the pinned OpenMontage contracts
 and calls `registry.get(name).execute(inputs)`. Hermes stops after schema-valid
 planning, scene, asset and edit checkpoints and returns `ready_for_execution` as

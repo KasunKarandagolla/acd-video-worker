@@ -665,7 +665,29 @@ class OptionalInfrastructureTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             config = (root / "hermes" / "profiles" / "football-emotion" / "config.yaml").read_text(encoding="utf-8")
             self.assertIn("enable_thinking: true", config)
+            self.assertIn("force_nonempty_content: true", config)
             self.assertIn("reasoning_budget: 16384", config)
+
+    def test_doctor_fails_closed_on_incomplete_ultra_tool_contract(self):
+        from bootstrap.validate_setup import model_tool_contract_gate
+
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp)
+            config = profile / "config.yaml"
+            config.write_text(
+                "model:\n  default: nvidia/nemotron-3-ultra-550b-a55b\n"
+                "chat_template_kwargs:\n  enable_thinking: true\n",
+                encoding="utf-8",
+            )
+            missing = model_tool_contract_gate(profile)
+            self.assertEqual(missing.status, "failed")
+            self.assertIn("force_nonempty_content", missing.evidence)
+
+            config.write_text(
+                config.read_text(encoding="utf-8") + "  force_nonempty_content: true\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(model_tool_contract_gate(profile).status, "passed")
 
     def test_candidate_validator_rejects_missing_result(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -829,6 +851,10 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(state.status, RunStatus.BLOCKED)
             self.assertEqual(state.blocker.code, "HERMES_NO_NATIVE_PROGRESS")
             self.assertIn("terminal_payload_error", state.blocker.evidence["execution"])
+            self.assertEqual(
+                state.blocker.evidence["execution"]["terminal_payload_keys"],
+                ["run_id", "schema_version", "status"],
+            )
 
     def test_missing_result_gets_bounded_checkpoint_continuations(self):
         with tempfile.TemporaryDirectory() as tmp:

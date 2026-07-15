@@ -709,6 +709,12 @@ Return this JSON object as the final response. The worker—not Hermes—validat
         except ValueError as exc:
             execution.metadata = dict(execution.metadata or {})
             execution.metadata["terminal_payload_error"] = str(exc)
+            # Bounded key names are structural evidence, not hidden reasoning
+            # or model prose. They distinguish a malformed envelope from a
+            # provider surfacing function-call arguments as assistant JSON.
+            execution.metadata["terminal_payload_keys"] = sorted(
+                str(key)[:120] for key in payload.keys()
+            )[:40]
             return
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")

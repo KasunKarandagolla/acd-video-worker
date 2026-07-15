@@ -48,6 +48,10 @@ def main() -> int:
             "    extra_body:\n"
             "      chat_template_kwargs:\n"
             "        enable_thinking: true\n"
+            # NVIDIA requires this flag whenever Ultra combines reasoning
+            # with tools. Without it, function-call-shaped output can surface
+            # as ordinary assistant content instead of a parsed tool call.
+            "        force_nonempty_content: true\n"
             f"      reasoning_budget: {budget}\n"
         )
 

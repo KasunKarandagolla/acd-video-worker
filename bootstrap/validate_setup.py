@@ -316,6 +316,33 @@ def model_gate(profile_home: Path) -> Gate:
     return Gate("free_model_endpoint", "blocked", "model configured but its endpoint credential is unavailable")
 
 
+def model_tool_contract_gate(profile_home: Path) -> Gate:
+    """Fail closed when a selected provider needs tool-parsing request flags."""
+    config_path = profile_home / "config.yaml"
+    if not config_path.is_file():
+        return Gate("model_tool_contract", "blocked", "Hermes profile config is missing")
+    config_text = config_path.read_text(encoding="utf-8")
+    if "nvidia/nemotron-3-ultra-550b-a55b" not in config_text:
+        return Gate("model_tool_contract", "passed", "no additional selected-model tool contract")
+    required = (
+        "chat_template_kwargs:",
+        "enable_thinking: true",
+        "force_nonempty_content: true",
+    )
+    missing = [item for item in required if item not in config_text]
+    if missing:
+        return Gate(
+            "model_tool_contract",
+            "failed",
+            "Nemotron 3 Ultra reasoning/tool parsing contract is incomplete: " + ", ".join(missing),
+        )
+    return Gate(
+        "model_tool_contract",
+        "passed",
+        "Nemotron 3 Ultra reasoning/tool parsing flags are configured",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate the thin ACD runtime")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "state" / "setup")
@@ -346,6 +373,7 @@ def main() -> int:
     skill_result = run([sys.executable, str(ROOT / "skills" / "football-emotion-video" / "tools" / "validate_skill_system.py"), str(ROOT / "skills" / "football-emotion-video")])
     gates.append(Gate("canonical_skill_validation", "passed" if skill_result.returncode == 0 and "Result: PASSED" in skill_result.stdout else "failed", (skill_result.stdout + skill_result.stderr).strip()[-1000:]))
     gates.append(model_gate(profile_home))
+    gates.append(model_tool_contract_gate(profile_home))
 
     manifest = openmontage / "pipeline_defs" / "documentary-montage.yaml"
     gates.append(Gate("openmontage_manifest", "passed" if manifest.is_file() else "failed", str(manifest)))

@@ -95,6 +95,7 @@ decisions.
 | Repeated asset regeneration | Output journal, reuse of valid non-empty output and one corrected retry |
 | Search dependency missing | Exact `ddgs==9.14.4` installed and verified in the Hermes venv |
 | Provider 401/429/503 | Structured retryable blocker; explicit same-session retry/model override |
+| Nemotron Ultra emits tool JSON as assistant text | Generated profile supplies NVIDIA's required `enable_thinking` + `force_nonempty_content` tool-parsing flags; setup doctor fails closed on drift |
 | Prose or malformed terminal result | Exact-object parser and strict envelope validation |
 | Blank/frozen or lineage-mismatched render | Native review plus independent ffprobe, hash and sampled-frame checks |
 | Restart/concurrent ownership | Atomic run state, lease, Kaggle hydration/export and resumable native checkpoints |
@@ -112,3 +113,16 @@ Then start a **fresh** production run. Do not resume the pre-fix Hermes sessions
 their history contains the contradictory coding posture and repeated failed
 tool strategies, while their run directories have no trustworthy typed creative
 handoff to preserve.
+
+The 2026-07-15 first typed-bridge production probe proved every local boundary
+but exited after two model steps with zero registered tool calls. NVIDIA's
+[Ultra API contract](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3-ultra-550b-a55b)
+requires `chat_template_kwargs.enable_thinking=true` together with
+`chat_template_kwargs.force_nonempty_content=true` when reasoning and tool calls
+are combined. The original generated profile omitted the second flag. That is a
+verified provider-contract violation and is consistent with the observed
+JSON-shaped terminal response plus zero parsed tool calls; the prior trace did
+not preserve the response keys needed to claim more than that. Profile
+generation and the doctor now enforce the complete contract, and future
+malformed-envelope evidence records bounded key names. No prose-to-tool shim or
+additional retry loop was introduced.

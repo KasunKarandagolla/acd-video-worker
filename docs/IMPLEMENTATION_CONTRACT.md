@@ -51,6 +51,10 @@ supported Hermes `--resume` session. Failed and delivered states never reopen.
   Never run the production conversation from either source checkout.
 - Enable the installed `acd-openmontage` plugin/toolset. Do not expose terminal,
   mutable file or code-execution toolsets and do not enable headless `--yolo`.
+- For `nvidia/nemotron-3-ultra-550b-a55b`, the generated provider request must
+  include both `chat_template_kwargs.enable_thinking=true` and NVIDIA's required
+  `chat_template_kwargs.force_nonempty_content=true`. Bootstrap must fail closed
+  if this reasoning-plus-tool parsing contract is absent.
 - Capture stdout/stderr for diagnostics, redact secrets and enforce timeout.
   Capture the supported `run_conversation` return value separately because
   quiet CLI stdout can still contain reasoning/progress rendering; never scan
