@@ -21,6 +21,7 @@ class RunStatus(str, Enum):
     INTAKE = "INTAKE"
     SOURCE_READY = "SOURCE_READY"
     AGENT_RUNNING = "AGENT_RUNNING"
+    NATIVE_EXECUTING = "NATIVE_EXECUTING"
     VALIDATING = "VALIDATING"
     DELIVERED = "DELIVERED"
     BLOCKED = "BLOCKED"
@@ -32,13 +33,19 @@ TERMINAL_STATUSES = {RunStatus.DELIVERED, RunStatus.BLOCKED, RunStatus.FAILED}
 ALLOWED_TRANSITIONS = {
     RunStatus.INTAKE: {RunStatus.SOURCE_READY, RunStatus.BLOCKED, RunStatus.FAILED},
     RunStatus.SOURCE_READY: {RunStatus.AGENT_RUNNING, RunStatus.BLOCKED, RunStatus.FAILED},
-    RunStatus.AGENT_RUNNING: {RunStatus.VALIDATING, RunStatus.BLOCKED, RunStatus.FAILED},
+    RunStatus.AGENT_RUNNING: {
+        RunStatus.NATIVE_EXECUTING,
+        RunStatus.VALIDATING,
+        RunStatus.BLOCKED,
+        RunStatus.FAILED,
+    },
+    RunStatus.NATIVE_EXECUTING: {RunStatus.VALIDATING, RunStatus.BLOCKED, RunStatus.FAILED},
     RunStatus.VALIDATING: {RunStatus.DELIVERED, RunStatus.BLOCKED, RunStatus.FAILED},
     RunStatus.DELIVERED: set(),
     # BLOCKED remains terminal during ordinary resume. The controller may use
     # this single transition only for an explicit retry of a transient Hermes
     # provider blocker, preserving the same project and Hermes session.
-    RunStatus.BLOCKED: {RunStatus.AGENT_RUNNING},
+    RunStatus.BLOCKED: {RunStatus.AGENT_RUNNING, RunStatus.NATIVE_EXECUTING},
     RunStatus.FAILED: set(),
 }
 
@@ -80,6 +87,8 @@ class RunState:
     native_execution: dict[str, Any] = field(default_factory=dict)
     approval_policy: dict[str, Any] = field(default_factory=dict)
     hermes_tool_contract: dict[str, Any] = field(default_factory=dict)
+    hermes_runtime_identity: dict[str, Any] = field(default_factory=dict)
+    hermes_session_generation: int = 0
 
     def transition(self, target: RunStatus) -> None:
         if target == self.status:
@@ -149,21 +158,30 @@ class RunStateStore:
         lease_dir = self.root / ".leases"
         lease_dir.mkdir(parents=True, exist_ok=True)
         path = lease_dir / f"{self.path_for(run_id).stem}.lock"
-        handle = path.open("a+", encoding="utf-8")
+        barrier = (self.root / ".persistence.lock").open("a+b")
         try:
+            handle = path.open("a+", encoding="utf-8")
             try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise RuntimeError(f"Run {run_id} is already owned by another worker") from exc
-            handle.seek(0)
-            handle.truncate()
-            json.dump({"run_id": run_id, "pid": os.getpid(), "acquired_at": utc_now()}, handle)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-            yield
+                # Shared while a worker owns any run. Persistence export takes
+                # the exclusive side, preventing both active and newly
+                # starting runs from racing snapshot file-set/hash creation.
+                fcntl.flock(barrier.fileno(), fcntl.LOCK_SH)
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise RuntimeError(f"Run {run_id} is already owned by another worker") from exc
+                handle.seek(0)
+                handle.truncate()
+                json.dump({"run_id": run_id, "pid": os.getpid(), "acquired_at": utc_now()}, handle)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                handle.close()
         finally:
             try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(barrier.fileno(), fcntl.LOCK_UN)
             finally:
-                handle.close()
+                barrier.close()

@@ -405,8 +405,11 @@ class FinalMediaValidator:
         return evidence
 
     def _visual_probe(self, path: Path, duration: float) -> dict[str, Any]:
-        frame_count = 5
-        interval = max(duration / frame_count, 0.1)
+        # Five frames plus a maximum-delta test allowed a static or mostly
+        # frozen render to pass when only one sampled transition changed. Use
+        # a denser, whole-timeline distribution check instead.
+        frame_count = 11
+        interval = max(duration / max(frame_count - 1, 1), 0.1)
         width, height = 64, 36
         try:
             result = subprocess.run(
@@ -428,8 +431,36 @@ class FinalMediaValidator:
         frame_size = width * height
         frames = [result.stdout[offset:offset + frame_size] for offset in range(0, len(result.stdout), frame_size)]
         frames = [frame for frame in frames if len(frame) == frame_size]
+        return self._analyze_frames(frames)
+
+    @staticmethod
+    def _analyze_frames(frames: list[bytes]) -> dict[str, Any]:
+        """Analyze uniformly sampled 8-bit grayscale frames.
+
+        This pure function makes the validator failure-injectable: tests can
+        prove that a detailed still, an animated intro followed by a freeze,
+        and a frozen ending are rejected without invoking ffmpeg.
+        """
         if not frames:
-            return {"visually_blank": True, "sampled_frames": 0, "visual_detail_score": 0.0}
+            return {
+                "visually_blank": True,
+                "visually_frozen": True,
+                "sampled_frames": 0,
+                "visual_detail_score": 0.0,
+                "temporal_change_score": 0.0,
+                "temporal_change_distribution": [],
+            }
+        frame_size = len(frames[0])
+        if frame_size <= 0 or any(len(frame) != frame_size for frame in frames):
+            return {
+                "visually_blank": True,
+                "visually_frozen": True,
+                "sampled_frames": 0,
+                "visual_detail_score": 0.0,
+                "temporal_change_score": 0.0,
+                "temporal_change_distribution": [],
+                "error": "Visual samples have inconsistent frame sizes",
+            }
         deviations = []
         ranges = []
         for frame in frames:
@@ -440,12 +471,39 @@ class FinalMediaValidator:
         changes = []
         for previous, current in zip(frames, frames[1:]):
             changes.append(sum(abs(a - b) for a, b in zip(previous, current)) / frame_size)
-        temporal = max(changes) if changes else 0.0
+        change_threshold = 0.5
+        changed = [value >= change_threshold for value in changes]
+        required_changes = max(2, math.ceil(len(changes) * 0.35)) if changes else 0
+        changing_intervals = sum(changed)
+        segment_coverage = []
+        if changes:
+            for segment in range(3):
+                start = math.floor(segment * len(changes) / 3)
+                end = math.floor((segment + 1) * len(changes) / 3)
+                if segment == 2:
+                    end = len(changes)
+                segment_coverage.append(any(changed[start:end]))
+        temporal = sum(changes) / len(changes) if changes else 0.0
+        frozen_ending = len(changes) >= 2 and not any(changed[-2:])
+        frozen = (
+            len(frames) > 1
+            and (
+                changing_intervals < required_changes
+                or not all(segment_coverage)
+                or frozen_ending
+            )
+        )
         return {
             "sampled_frames": len(frames),
             "visual_detail_score": round(detail, 3),
             "visual_luma_range": max(ranges),
             "temporal_change_score": round(temporal, 3),
+            "temporal_change_peak": round(max(changes), 3) if changes else 0.0,
+            "temporal_change_distribution": [round(value, 3) for value in changes],
+            "changing_intervals": changing_intervals,
+            "required_changing_intervals": required_changes,
+            "temporal_segment_coverage": segment_coverage,
+            "frozen_ending": frozen_ending,
             "visually_blank": detail < 2.0 or max(ranges) < 12,
-            "visually_frozen": len(frames) > 1 and temporal < 0.5,
+            "visually_frozen": frozen,
         }

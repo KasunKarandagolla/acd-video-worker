@@ -13,7 +13,7 @@ The complete Football Emotion Skill System remains first-class under `skills/foo
 ```text
 request / mixed inputs
         ↓
-thin ACD controller (7 macro states)
+thin ACD controller (8 macro states)
         ↓
 Hermes + Football Emotion skills
         ↓ typed acd-openmontage toolset (no shell/file/code tools)
@@ -28,7 +28,11 @@ worker native-artifact + ffprobe + visual-content validation
 DELIVERED / BLOCKED / FAILED
 ```
 
-The macro states are `INTAKE`, `SOURCE_READY`, `AGENT_RUNNING`, `VALIDATING`, `DELIVERED`, `BLOCKED`, and `FAILED`. The old 19-stage Python orchestrator is legacy code and is not imported by the production entrypoint.
+The macro states are `INTAKE`, `SOURCE_READY`, `AGENT_RUNNING`,
+`NATIVE_EXECUTING`, `VALIDATING`, `DELIVERED`, `BLOCKED`, and `FAILED`.
+`NATIVE_EXECUTING` is a transaction/recovery boundary, not a creative stage.
+The old 19-stage Python orchestrator is legacy code and is not imported by the
+production entrypoint.
 
 ## Setup
 
@@ -52,14 +56,31 @@ reverses cleanly, or an overlay hash differs.
 
 Configure a free Hermes model endpoint in the named profile. Do not commit credentials.
 
-For a Kaggle session, expose the existing `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY` secrets as environment variables, then run:
+For a Kaggle session, expose the existing `LLM_BASE_URL`, `LLM_MODEL`, and
+`LLM_API_KEY` secrets as environment variables. On the first empty runtime,
+explicitly select a fresh start; on later runs mount the prior persistence
+export instead:
 
 ```bash
+export ACD_FRESH_START=1  # first run only; never combine with a persistence source
 bash bootstrap/bootstrap_kaggle.sh
 bash bootstrap/run_kaggle_job.sh "<video request>" --input <optional-path-or-url>
 ```
 
-Set `ACD_PERSIST_SOURCE` to a mounted prior `acd-persist-export` directory to hydrate earlier non-secret state. The launcher always exports updated state to `ACD_PERSIST_EXPORT` (default `/kaggle/working/acd-persist-export`) for the notebook version/output to preserve.
+Set `ACD_PERSIST_SOURCE` to a mounted prior `acd-persist-export` directory to
+hydrate earlier non-secret state. Missing persistence is no longer silently
+treated as a fresh production run. Exports use immutable, hash-verified
+generations plus an atomic `current.json` pointer, refuse active run leases,
+snapshot SQLite through its backup API, and scan for credential-like material
+before publication. Hydration fails closed before a worker starts; export takes
+a global run barrier so a new worker cannot race the snapshot, and an export
+failure makes every terminal result non-durable/failed at the launcher boundary.
+The persistence destination must not overlap any runtime root. The launcher exports updated state to
+`ACD_PERSIST_EXPORT` (default `/kaggle/working/acd-persist-export`).
+
+`bootstrap/kaggle_master_init.sh` is the single restart-safe checkout/bootstrap
+entrypoint. It refuses a dirty checkout, uses only a fast-forward update, and
+can enforce `ACD_EXPECTED_COMMIT` before any installation.
 
 ## Run
 
@@ -95,23 +116,32 @@ PYTHONPATH=src python3 scripts/acd_worker.py \
 This is accepted only for the explicit retryable blocker allowlist, including
 provider throttling/capacity, runtime unavailability and typed approval
 blockers. Delivery, authentication/configuration errors, protocol failures,
-validation failures, dry-run and other failed states remain terminal.
+validation failures, dry-run and other failed states do not reopen through an
+ordinary retry. An interrupted render that exists without a durable native
+review is a manual recovery blocker and is never recomposed by ordinary retry.
+Authentication/configuration blockers may start a new Hermes
+session only through the explicit runtime-change command below; `FAILED` and
+`DELIVERED` never reopen.
 The generated Hermes profile caps the
 effective context at 65,536 tokens by default (`ACD_HERMES_CONTEXT_LENGTH`) so
 Hermes' native compression runs before large free-endpoint requests are
 typically throttled.
 
-If that provider remains unavailable, the same Hermes session can be handed to
-another model already configured in the named profile. Set
-`ACD_HERMES_MODEL_OVERRIDE` to the exact configured model ID before the explicit
-blocked retry. The runner passes Hermes' supported global `-m` selector before
-`chat`; `--resume` still restores the existing conversation, memory and native
-OpenMontage work. This setting never creates a new session or fallback router.
+The selected profile/model/plugin/Football-skill runtime is fingerprinted into
+the run. A changed runtime cannot silently resume the old Hermes conversation.
+After intentionally reconfiguring a provider or model, use
+`--restart-hermes-session --retry-blocked`; this starts a clean Hermes session
+while preserving schema-valid native project checkpoints. There is no automatic
+model fallback router.
 
 OpenMontage pipelines can span more than one Hermes CLI tool-turn slice. When
 Hermes exits cleanly without a terminal result, the controller may run one
-bounded same-session checkpoint continuation by default (32 initial turns plus
-24 continuation turns, each inside the same 20-minute process timeout). Configure
+bounded same-session checkpoint continuation by default (20 initial turns plus
+12 continuation turns, each inside an eight-minute process timeout). Native
+execution has the same default eight-minute limit, keeping a warm short-form
+attempt near a 25-minute phase-budget envelope instead of allowing individual
+phases to run silently for 20–30 minutes. Longer approved productions may
+override these budgets. Configure
 the slice budgets with `ACD_HERMES_MAX_TURNS`,
 `ACD_HERMES_RECOVERY_MAX_TURNS`, and `ACD_HERMES_MAX_CONTINUATIONS`. Every slice
 uses the same Hermes session and resumes the next incomplete native OpenMontage
@@ -120,6 +150,10 @@ budgeting, not a worker creative stage machine, and it cannot weaken delivery
 validation. Only a coherent canonical artifact plus its matching native
 checkpoint counts as progress; loose files, chat/tool activity and exit zero do
 not earn another slice.
+
+Both Hermes and native adapters run in isolated process groups. Timeout or
+heartbeat failure terminates the adapter and all renderer/tool descendants, so
+an orphaned Chromium/ffmpeg process cannot mutate a blocked transaction later.
 
 A resumed `AGENT_RUNNING` run counts its first checkpoint continuation as slice
 one; it does not receive an additional uncounted recovery call. Continuations
@@ -159,6 +193,12 @@ from complete native checkpoints), then
 validates the runtime tuple, approvals, schemas and cross-artifact references
 before invoking OpenMontage `video_compose` exactly once. Hermes cannot render,
 review or claim delivery on the production path.
+
+Native delivery is journaled as `prepared → rendering → rendered_reviewed →
+published`. The reviewed output, `render_report`, and `final_review` are durable
+before canonical publication. A crash after review resumes publication without
+calling `video_compose` again; an ambiguous render without durable review is a
+manual blocker rather than an unsafe duplicate render.
 
 Prepare intake and the Hermes job prompt without executing production:
 
