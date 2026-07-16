@@ -1,3 +1,5 @@
+> **Historical analysis. Current ownership and production behavior are defined only by `FINAL_ARCHITECTURE.md`, `IMPLEMENTATION_CONTRACT.md`, and `THIN_ORCHESTRATION_MODULE_MAP.md`. The Football Emotion skills remain complete; old recommendations for a Python stage wrapper are superseded.**
+
 # Football Emotion V7 Skill System Reconciliation
 
 **Inspection Date:** 2026-07-11  

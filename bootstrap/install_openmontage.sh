@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Install OpenMontage at pinned commit (FFmpeg-only path)
+# Install OpenMontage at pinned commit
 
 set -euo pipefail
 
-PROJECT_ROOT="/home/kasun/Music/Director/acd-video-worker"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_DIR="$PROJECT_ROOT/bootstrap"
 
 log() { echo -e "\033[1;33m→\033[0m $*"; }
@@ -31,7 +31,13 @@ else
     ok "OpenMontage already at pinned commit"
 fi
 
-# 3. Install FFmpeg-only (make install skips Remotion/HyperFrames/Piper)
+# Preserve the upstream pin and apply only the audited compatibility layer.
+# The installer refuses to overwrite unexpected local work.
+python3 "$PROJECT_ROOT/bootstrap/apply_openmontage_compatibility.py" \
+    --worker-root "$PROJECT_ROOT" \
+    --openmontage-root "$OM_DIR"
+
+# 3. Install OpenMontage Python dependencies.
 if [[ -d ".venv" ]] && [[ -x ".venv/bin/python" ]]; then
     ok "OpenMontage venv exists"
 else
@@ -39,6 +45,13 @@ else
     make install
     ok "OpenMontage Python deps installed"
 fi
+
+if [[ ! -x "$OM_DIR/remotion-composer/node_modules/.bin/remotion" ]]; then
+    log "Installing locked Remotion dependencies..."
+    npm ci --prefix "$OM_DIR/remotion-composer" --no-audit --no-fund
+fi
+log "Pre-installing the Remotion browser..."
+(cd "$OM_DIR/remotion-composer" && npx --no-install remotion browser ensure)
 
 # 4. Verify tool registry loads
 log "Verifying tool registry..."

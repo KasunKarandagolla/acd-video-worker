@@ -1,681 +1,499 @@
 #!/usr/bin/env python3
-"""
-Unified setup validation for Session 2 completion gates.
-Produces state/setup/setup-validation.json and .md
-"""
+"""Truthful environment doctor for the thin ACD production path."""
 
-import os
-import sys
+from __future__ import annotations
+
+import argparse
+import ast
+import hashlib
+import importlib.util
 import json
+import os
+import shutil
 import subprocess
-import sqlite3
-import tempfile
+import sys
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
 
-def run_cmd(cmd, cwd=None, env=None, timeout=60):
+
+ROOT = Path(__file__).resolve().parent.parent
+HERMES_PIN = "5ecc07986f46463ca3096679b03a46402eb19cee"
+OPENMONTAGE_PIN = "f633b5f428b9be9a2afecba851dfddd101619756"
+ENTRY_SKILLS = (
+    "hermes-openmontage-repo-bridge",
+    "social-edit-reasoning",
+    "football-story-strategy",
+    "football-pro-cutting-pacing",
+    "football-audio-music-director",
+    "football-retention-quality-control",
+)
+OPENMONTAGE_PATCH_ID = "cinematic-cut-props-v1"
+OPENMONTAGE_PATCH_PATH = ROOT / "patches" / "openmontage" / "f633b5f-cinematic-cut-props-v1.patch"
+OPENMONTAGE_OVERLAY_ROOT = ROOT / "patches" / "openmontage" / "overlay"
+OPENMONTAGE_PATCHED_PATHS = {
+    "lib/media_profiles.py",
+    "remotion-composer/src/CinematicRenderer.tsx",
+    "remotion-composer/src/CollageBurst.tsx",
+    "remotion-composer/src/Explainer.tsx",
+    "remotion-composer/src/LyricOverlay.tsx",
+    "remotion-composer/src/TitledVideo.tsx",
+    "scripts/scaffold_atelier_project.py",
+    "tools/video/video_compose.py",
+}
+
+
+@dataclass
+class Gate:
+    name: str
+    status: str
+    evidence: str
+
+
+def run(
+    command: list[str],
+    cwd: Path | None = None,
+    timeout: int = 120,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def git_pin(name: str, path: Path, expected: str) -> Gate:
+    if not (path / ".git").is_dir():
+        return Gate(name, "blocked", f"checkout missing: {path}")
+    result = run(["git", "rev-parse", "HEAD"], cwd=path)
+    actual = result.stdout.strip()
+    if actual != expected:
+        return Gate(name, "failed", f"expected {expected}, found {actual or result.stderr.strip()}")
+    # LFS/sandbox smudge differences can change a checked-out binary without
+    # changing upstream source. Fail only on tracked text/source differences.
+    numstat = run(["git", "diff", "--numstat"], cwd=path).stdout.splitlines()
+    text_differences = [line for line in numstat if line and not line.startswith("-\t-\t")]
+    if text_differences:
+        return Gate(name, "failed", "pinned checkout has tracked source modifications")
+    binary_note = "; binary smudge difference ignored" if numstat else ""
+    return Gate(name, "passed", expected + binary_note)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def openmontage_compatibility_gate(openmontage: Path) -> Gate:
+    """Accept only the audited compatibility delta on the exact upstream pin."""
+    if not (openmontage / ".git").is_dir():
+        return Gate("openmontage_compatibility", "blocked", f"checkout missing: {openmontage}")
+    head = run(["git", "rev-parse", "HEAD"], cwd=openmontage)
+    actual = head.stdout.strip()
+    if head.returncode or actual != OPENMONTAGE_PIN:
+        return Gate("openmontage_compatibility", "failed", f"expected {OPENMONTAGE_PIN}, found {actual or head.stderr.strip()}")
+
+    marker_path = openmontage / ".acd-compatibility-patches.json"
     try:
-        result = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
-        return result.returncode == 0, result.stdout, result.stderr
-    except subprocess.TimeoutExpired:
-        return False, "", "TIMEOUT"
-    except Exception as e:
-        return False, "", str(e)
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return Gate("openmontage_compatibility", "failed", f"compatibility marker unavailable: {exc}")
+    if marker.get("openmontage_commit") != OPENMONTAGE_PIN:
+        return Gate("openmontage_compatibility", "failed", "compatibility marker is for a different OpenMontage commit")
+    if marker.get("patches") != [OPENMONTAGE_PATCH_ID]:
+        return Gate("openmontage_compatibility", "failed", f"unexpected compatibility patch set: {marker.get('patches')!r}")
+    if not OPENMONTAGE_PATCH_PATH.is_file() or marker.get("patch_sha256") != sha256(OPENMONTAGE_PATCH_PATH):
+        return Gate("openmontage_compatibility", "failed", "installed marker does not match the tracked compatibility patch")
 
-class SetupValidator:
-    def __init__(self, project_root: str):
-        self.project_root = Path(project_root)
-        self.results: Dict[str, Dict[str, Any]] = {}
-        self.hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
-        self.profile_dir = Path(self.hermes_home) / "profiles" / "football-emotion"
-        self.om_dir = self.project_root / "external" / "OpenMontage"
-        self.hermes_dir = self.project_root / "external" / "Hermes-Agent"
-        self.canonical_skills = self.project_root / "skills" / "football-emotion-video"
-        self.installed_skills = self.profile_dir / "skills" / "football-emotion-video"
-        
-    def record(self, name: str, status: str, details: str = "", evidence: str = ""):
-        self.results[name] = {
-            "status": status,  # passed, failed, blocked
-            "details": details,
-            "evidence": evidence
-        }
-        icon = {"passed": "✅", "failed": "❌", "blocked": "⚠️"}.get(status, "❓")
-        print(f"{icon} {name}: {details}")
+    reverse = run(["git", "apply", "--reverse", "--check", str(OPENMONTAGE_PATCH_PATH)], cwd=openmontage)
+    if reverse.returncode:
+        return Gate("openmontage_compatibility", "failed", "audited patch is not applied cleanly: " + reverse.stderr.strip()[-500:])
+    modified = {
+        line.strip()
+        for line in run(["git", "diff", "--name-only"], cwd=openmontage).stdout.splitlines()
+        if line.strip()
+    }
+    if modified != OPENMONTAGE_PATCHED_PATHS:
+        return Gate(
+            "openmontage_compatibility",
+            "failed",
+            f"tracked OpenMontage delta differs from audited paths; expected {sorted(OPENMONTAGE_PATCHED_PATHS)}, found {sorted(modified)}",
+        )
 
-    # --- Upstream Commits ---
-    def check_upstream_commits(self):
-        # Hermes
-        if (self.hermes_dir / ".git").exists():
-            ok, out, _ = run_cmd(["git", "rev-parse", "HEAD"], cwd=self.hermes_dir)
-            if ok and out.strip() == "5ecc07986f46463ca3096679b03a46402eb19cee":
-                self.record("hermes_commit", "passed", f"Hermes at pinned commit {out.strip()[:8]}")
-            else:
-                self.record("hermes_commit", "failed", f"Hermes commit mismatch: {out.strip()[:8]}")
-        else:
-            self.record("hermes_commit", "failed", "Hermes-Agent not cloned")
-        
-        # OpenMontage
-        if (self.om_dir / ".git").exists():
-            ok, out, _ = run_cmd(["git", "rev-parse", "HEAD"], cwd=self.om_dir)
-            if ok and out.strip() == "f633b5f428b9be9a2afecba851dfddd101619756":
-                self.record("openmontage_commit", "passed", f"OpenMontage at pinned commit {out.strip()[:8]}")
-            else:
-                self.record("openmontage_commit", "failed", f"OpenMontage commit mismatch: {out.strip()[:8]}")
-        else:
-            self.record("openmontage_commit", "failed", "OpenMontage not cloned")
+    expected_overlay = marker.get("overlay_sha256")
+    if not isinstance(expected_overlay, dict) or not expected_overlay:
+        return Gate("openmontage_compatibility", "failed", "compatibility marker has no overlay hashes")
+    tracked_overlay: dict[str, str] = {}
+    for source in sorted(OPENMONTAGE_OVERLAY_ROOT.rglob("*")):
+        if source.is_file() and source.suffix != ".pyc" and "__pycache__" not in source.parts:
+            relative = str(source.relative_to(OPENMONTAGE_OVERLAY_ROOT))
+            tracked_overlay[relative] = sha256(source)
+    if expected_overlay != tracked_overlay:
+        return Gate("openmontage_compatibility", "failed", "marker overlay hashes differ from the tracked overlay")
+    for relative, expected in tracked_overlay.items():
+        installed = openmontage / relative
+        if not installed.is_file() or sha256(installed) != expected:
+            return Gate("openmontage_compatibility", "failed", f"installed overlay differs from tracked source: {relative}")
+    return Gate(
+        "openmontage_compatibility",
+        "passed",
+        f"{OPENMONTAGE_PIN} + {OPENMONTAGE_PATCH_ID} ({marker['patch_sha256'][:12]})",
+    )
 
-    # --- Hermes ---
-    def check_hermes_install(self):
-        ok, out, err = run_cmd(["hermes", "--version"])
-        if ok:
-            self.record("hermes_install", "passed", f"Hermes CLI: {out.strip()}")
-        else:
-            self.record("hermes_install", "failed", f"hermes --version failed: {err}")
 
-    def check_hermes_profile(self):
-        required = ["config.yaml", "memories", "skills", "state.db"]
-        missing = [r for r in required if not (self.profile_dir / r).exists()]
-        if not missing:
-            self.record("hermes_profile", "passed", "Profile exists with all required dirs")
-        else:
-            self.record("hermes_profile", "failed", f"Profile missing: {missing}")
+def remotion_runtime_gate(openmontage: Path) -> Gate:
+    composer = openmontage / "remotion-composer"
+    cli = composer / "node_modules" / ".bin" / "remotion"
+    browser_root = composer / "node_modules" / ".remotion"
+    browsers = [
+        path for path in browser_root.rglob("chrome-headless-shell*")
+        if path.is_file() and os.access(path, os.X_OK)
+    ] if browser_root.is_dir() else []
+    missing = []
+    if not shutil.which("node"):
+        missing.append("node")
+    if not shutil.which("npx"):
+        missing.append("npx")
+    if not cli.is_file():
+        missing.append("locked Remotion CLI")
+    if not browsers:
+        missing.append("preinstalled Remotion browser")
+    if missing:
+        return Gate("remotion_runtime", "blocked", "missing: " + ", ".join(missing))
+    return Gate("remotion_runtime", "passed", f"locked CLI + browser: {browsers[0]}")
 
-    def check_skill_discovery(self):
-        skills_dir = self.installed_skills
-        if not skills_dir.exists():
-            self.record("skill_discovery", "failed", "Skills not installed in profile")
-            return
-        skill_count = len([d for d in skills_dir.iterdir() if d.is_dir() and (d / "SKILL.md").exists()])
-        if skill_count >= 23:
-            self.record("skill_discovery", "passed", f"All {skill_count} skills discovered")
-        else:
-            self.record("skill_discovery", "failed", f"Only {skill_count}/23 skills found")
 
-    def check_skill_validation(self):
-        validator = self.installed_skills / "tools" / "validate_skill_system.py"
-        if not validator.exists():
-            self.record("skill_validation", "failed", "Validator not found")
-            return
-        ok, out, err = run_cmd([sys.executable, str(validator), str(self.installed_skills)])
-        if ok and "PASSED" in out:
-            self.record("skill_validation", "passed", out.strip().split("\n")[-1])
-        else:
-            self.record("skill_validation", "failed", f"Validation failed: {err or out}")
+def production_boundary() -> Gate:
+    path = ROOT / "scripts" / "acd_worker.py"
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return Gate("production_boundary", "failed", str(exc))
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imports.append(node.module or "")
+        elif isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+    forbidden = [name for name in imports if name in {"acd_worker.orchestrator", "acd_worker.openmontage_runner", "acd_worker.quality_loop", "acd_worker.footage_requirements"}]
+    return Gate("production_boundary", "failed" if forbidden else "passed", f"forbidden imports: {forbidden}" if forbidden else "thin controller only")
 
-    # --- Built-in Memory ---
-    def check_memory_write_read(self):
-        mem_dir = self.profile_dir / "memories"
-        mem_file = mem_dir / "MEMORY.md"
-        user_file = mem_dir / "USER.md"
-        
-        # Check directory is writable
-        if not mem_dir.exists():
-            self.record("memory_write_read", "failed", "memories directory missing")
-            return
-        
-        # Try to write a test file
-        test_file = mem_dir / ".write_test"
+
+def skill_gate(profile_home: Path) -> Gate:
+    root = profile_home / "skills"
+    if not root.is_dir():
+        return Gate("football_skills", "blocked", f"profile skills missing: {root}")
+    found = {path.parent.name for path in root.rglob("SKILL.md")}
+    missing = sorted(set(ENTRY_SKILLS) - found)
+    if missing:
+        return Gate("football_skills", "failed", f"missing entry skills: {', '.join(missing)}")
+    return Gate("football_skills", "passed", f"{len(found)} SKILL.md packages discovered")
+
+
+def hermes_openmontage_plugin_gate(profile_home: Path, hermes_repo: Path) -> Gate:
+    plugin = profile_home / "plugins" / "acd-openmontage"
+    missing = [
+        str(path)
+        for path in (plugin / "plugin.yaml", plugin / "__init__.py", ROOT / "scripts" / "openmontage_creative_adapter.py")
+        if not path.is_file()
+    ]
+    reference_dir = profile_home / "skills" / "football-emotion-video" / "skills" / "hermes-openmontage-repo-bridge" / "references"
+    for name in ("repo-setup-status.md", "openmontage-schema-lock.md", "repo-source-lock.md"):
+        if not (reference_dir / name).is_file():
+            missing.append(str(reference_dir / name))
+    hermes_python = hermes_repo / "venv" / "bin" / "python"
+    if not hermes_python.is_file():
+        missing.append(str(hermes_python))
+    if missing:
+        return Gate("hermes_openmontage_plugin", "blocked", "missing: " + ", ".join(missing))
+    ddgs_version = os.environ.get("ACD_DDGS_VERSION", "9.14.4")
+    probe = run([
+        str(hermes_python), "-c",
+        f"import importlib.metadata as m; assert m.version('ddgs') == {ddgs_version!r}; print(m.version('ddgs'))",
+    ], timeout=30)
+    if probe.returncode:
+        return Gate("hermes_openmontage_plugin", "blocked", "Hermes DDGS dependency is unavailable: " + probe.stderr.strip()[-500:])
+    config_path = profile_home / "config.yaml"
+    config = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+    required = ("acd-openmontage", "search_backend: ddgs", "coding_context: off")
+    absent = [item for item in required if item not in config]
+    if absent:
+        return Gate("hermes_openmontage_plugin", "failed", "profile config missing: " + ", ".join(absent))
+    toolset_lines: list[str] = []
+    collecting = False
+    for line in config.splitlines():
+        if line.startswith("toolsets:"):
+            collecting = True
+            toolset_lines.append(line)
+            continue
+        if collecting and (line.startswith("  - ") or not line.strip()):
+            toolset_lines.append(line)
+            continue
+        if collecting:
+            break
+    toolset_text = "\n".join(toolset_lines)
+    mutable = [name for name in ("file", "terminal", "code_execution", "coding") if name in toolset_text]
+    if mutable:
+        return Gate(
+            "hermes_openmontage_plugin",
+            "failed",
+            "production profile exposes mutable coding toolsets: " + ", ".join(mutable),
+        )
+    discovery = run(
+        [
+            str(hermes_python),
+            "-c",
+            (
+                "from hermes_cli.plugins import discover_plugins,get_plugin_manager; "
+                "from tools.registry import registry; discover_plugins(force=True); "
+                "m=get_plugin_manager(); names=set(m._plugin_tool_names); "
+                "expected={'openmontage_native','acd_acquire_source'}; "
+                "assert expected.issubset(names), names; "
+                "assert all(registry.get_entry(n) and registry.get_entry(n).toolset=='acd-openmontage' for n in expected); "
+                "print(','.join(sorted(expected)))"
+            ),
+        ],
+        cwd=hermes_repo,
+        timeout=60,
+        env={**os.environ, "HERMES_HOME": str(profile_home)},
+    )
+    if discovery.returncode:
+        detail = (discovery.stderr or discovery.stdout).strip()[-1000:]
+        return Gate("hermes_openmontage_plugin", "failed", "pinned Hermes plugin discovery failed: " + detail)
+    return Gate(
+        "hermes_openmontage_plugin",
+        "passed",
+        "pinned Hermes discovered typed tools; bridge references and zero-key web search verified",
+    )
+
+
+def registry_gate(openmontage: Path) -> Gate:
+    python = Path(os.environ.get("OPENMONTAGE_PYTHON", openmontage / ".venv" / "bin" / "python")).expanduser().absolute()
+    if not python.is_file():
+        return Gate("openmontage_registry", "blocked", "OpenMontage virtual environment is not installed")
+    command = [str(python), "-c", "from tools.tool_registry import registry; registry.discover(); print(len(registry._tools))"]
+    result = run(command, cwd=openmontage)
+    if result.returncode:
+        error = result.stderr.strip()[-1000:]
+        return Gate("openmontage_registry", "blocked" if "ModuleNotFoundError" in error else "failed", error)
+    return Gate("openmontage_registry", "passed", f"{result.stdout.strip()} tools discovered")
+
+
+def model_gate(profile_home: Path) -> Gate:
+    config_path = profile_home / "config.yaml"
+    if not config_path.is_file():
+        return Gate("free_model_endpoint", "blocked", "Hermes profile config is missing")
+    config_text = config_path.read_text(encoding="utf-8")
+    configured_model = any(
+        line.strip().startswith("default:") and line.split(":", 1)[1].strip().strip("\"'")
+        for line in config_text.splitlines()
+    )
+    if not configured_model:
+        return Gate("free_model_endpoint", "blocked", "select a model in the named Hermes profile")
+    env_keys = ("LLM_API_KEY", "OPENAI_API_KEY", "NVIDIA_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY")
+    if any(os.environ.get(key) for key in env_keys):
+        return Gate("free_model_endpoint", "passed", "model configured; credential present in environment (value not inspected)")
+    env_file = profile_home / ".env"
+    if env_file.is_file():
         try:
-            test_file.write_text("test")
-            test_file.unlink()
-        except Exception as e:
-            self.record("memory_write_read", "failed", f"memories dir not writable: {e}")
-            return
-        
-        # Check size limits if files exist
-        issues = []
-        if mem_file.exists():
-            mem_size = len(mem_file.read_text())
-            if mem_size > 2200:
-                issues.append(f"MEMORY.md exceeds 2200 chars: {mem_size}")
-        if user_file.exists():
-            user_size = len(user_file.read_text())
-            if user_size > 1375:
-                issues.append(f"USER.md exceeds 1375 chars: {user_size}")
-        
-        if issues:
-            self.record("memory_write_read", "failed", "; ".join(issues))
-        else:
-            mem_size = len(mem_file.read_text()) if mem_file.exists() else 0
-            user_size = len(user_file.read_text()) if user_file.exists() else 0
-            self.record("memory_write_read", "passed", f"MEMORY: {mem_size}/2200, USER: {user_size}/1375 (writable)")
-
-    def check_session_search(self):
-        state_db = self.profile_dir / "state.db"
-        if not state_db.exists():
-            self.record("session_search", "failed", "state.db not found")
-            return
-        
-        try:
-            conn = sqlite3.connect(state_db)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = [row[0] for row in cursor.fetchall()]
-            conn.close()
-            
-            required = ["messages", "sessions", "messages_fts"]
-            missing = [t for t in required if t not in tables]
-            if missing:
-                self.record("session_search", "failed", f"Missing tables: {missing}")
-            else:
-                self.record("session_search", "passed", f"All session tables present: {tables}")
-        except Exception as e:
-            self.record("session_search", "failed", f"SQLite error: {e}")
-
-    # --- Hindsight ---
-    def check_hindsight(self):
-        config_path = self.profile_dir / "hindsight" / "config.json"
-        if not config_path.exists():
-            self.record("hindsight", "blocked", "No Hindsight config (built-in memory only)")
-            return
-        
-        with open(config_path) as f:
-            config = json.load(f)
-        
-        mode = config.get("mode", "cloud")
-        if mode == "cloud":
-            self.record("hindsight", "blocked", "Hindsight in cloud mode (requires internet - blocked on Kaggle)")
-        elif mode == "local_embedded":
-            self.record("hindsight", "blocked", "local_embedded mode (daemon not supported on Kaggle)")
-        else:
-            self.record("hindsight", "blocked", f"Mode: {mode}")
-
-    # --- OpenMontage ---
-    def check_openmontage_import(self):
-        venv_python = self.om_dir / ".venv" / "bin" / "python"
-        if not venv_python.exists():
-            venv_python = Path("python3")
-        
-        ok, out, err = run_cmd([str(venv_python), "-c", "import lib.config_model; print('OK')"], cwd=self.om_dir)
-        if ok:
-            self.record("openmontage_import", "passed", "OpenMontage imports cleanly")
-        else:
-            self.record("openmontage_import", "failed", f"Import failed: {err}")
-
-    def check_tool_registry(self):
-        venv_python = self.om_dir / ".venv" / "bin" / "python"
-        if not venv_python.exists():
-            venv_python = Path("python3")
-        
-        ok, out, err = run_cmd([
-            str(venv_python), "-c",
-            "from tools.tool_registry import registry; registry.discover(); "
-            "import json; print(json.dumps(registry.provider_menu_summary()))"
-        ], cwd=self.om_dir, timeout=90)
-        
-        if ok:
-            try:
-                data = json.loads(out)
-                runtimes = data.get("composition_runtimes", {})
-                if runtimes.get("ffmpeg"):
-                    self.record("tool_registry", "passed", f"Tool registry OK, runtimes: {runtimes}")
-                else:
-                    self.record("tool_registry", "failed", "FFmpeg runtime not available")
-            except json.JSONDecodeError:
-                self.record("tool_registry", "failed", "Invalid JSON from provider_menu_summary")
-        else:
-            self.record("tool_registry", "failed", f"Tool registry failed: {err}")
-
-    def check_pipeline_load(self):
-        venv_python = self.om_dir / ".venv" / "bin" / "python"
-        if not venv_python.exists():
-            venv_python = Path("python3")
-        
-        # Load without strict schema validation (documentary category not in enum)
-        script = """
-import yaml
-with open('pipeline_defs/documentary-montage.yaml') as f:
-    p = yaml.safe_load(f)
-print('Pipeline:', p['name'])
-print('Stages:', [s['name'] for s in p['stages']])
-"""
-        ok, out, err = run_cmd([str(venv_python), "-c", script], cwd=self.om_dir)
-        
-        if ok:
-            self.record("pipeline_load", "passed", out.strip())
-        else:
-            self.record("pipeline_load", "failed", f"Pipeline load failed: {err}")
-            self.record("pipeline_load", "failed", f"Pipeline load failed: {err}")
-
-    def check_ffmpeg_provider(self):
-        venv_python = self.om_dir / ".venv" / "bin" / "python"
-        if not venv_python.exists():
-            venv_python = Path("python3")
-        
-        ok, out, err = run_cmd([
-            str(venv_python), "-c",
-            "from tools.tool_registry import registry; registry.discover(); "
-            "tools = registry.get_by_capability('analysis'); "
-            "avail = [t.name for t in tools if getattr(t, 'status', None) and getattr(t.status, 'name', None) == 'AVAILABLE']; "
-            "print('Available:', avail)"
-        ], cwd=self.om_dir)
-        
-        if ok:
-            self.record("ffmpeg_provider", "passed", out.strip())
-        else:
-            self.record("ffmpeg_provider", "failed", f"Tool query failed: {err}")
-
-    # --- Schema Lock ---
-    def check_schema_lock(self):
-        lock_file = self.canonical_skills / "shared" / "references" / "repo-bridge" / "openmontage-schema-lock.md"
-        if not lock_file.exists():
-            self.record("schema_lock", "failed", "Schema lock file not found")
-            return
-        
-        content = lock_file.read_text()
-        # Check for key mapping concepts (more flexible matching)
-        required_concepts = [
-            "edit_decisions", "cuts", "overlays", "audio", "subtitles",
-            "renderer_family", "render_runtime", "composition_mode"
-        ]
-        missing = [f for f in required_concepts if f not in content]
-        if missing:
-            self.record("schema_lock", "failed", f"Missing mapping concepts: {missing}")
-            return
-        
-        # Validate against actual schemas
-        venv_python = self.om_dir / ".venv" / "bin" / "python"
-        if not venv_python.exists():
-            venv_python = Path("python3")
-        
-        ok, out, err = run_cmd([
-            str(venv_python), "-c",
-            "from schemas.artifacts import validate_artifact; "
-            "validate_artifact('edit_decisions', {'version':'1.0','cuts':[],'render_runtime':'ffmpeg'}); "
-            "print('edit_decisions schema validation OK')"
-        ], cwd=self.om_dir)
-        
-        if ok:
-            self.record("schema_lock", "passed", "Schema lock mappings complete + validation OK")
-        else:
-            self.record("schema_lock", "failed", f"Schema validation failed: {err}")
-
-    # --- Browser ---
-    def check_browser_capability(self):
-        result_file = Path("/tmp/browser_capability_result.json")
-        if result_file.exists():
-            with open(result_file) as f:
-                data = json.load(f)
-            verdict = data.get("verdict", "BROWSER_UNSUPPORTED")
-            if verdict != "BROWSER_UNSUPPORTED":
-                self.record("browser_capability", "passed", f"Browser verdict: {verdict}")
-            else:
-                self.record("browser_capability", "blocked", "Browser unsupported on this environment")
-        else:
-            self.record("browser_capability", "blocked", "Browser capability test not run")
-
-    # --- ACD Worker ---
-    def check_acd_worker_dry_run(self):
-        worker = self.project_root / "scripts" / "acd_worker.py"
-        if not worker.exists():
-            self.record("acd_worker_dry_run", "failed", "acd_worker.py not found")
-            return
-        
-        ok, out, err = run_cmd([sys.executable, str(worker), "--dry-run", "test request"])
-        if ok:
-            self.record("acd_worker_dry_run", "passed", "ACD worker dry-run successful")
-        else:
-            self.record("acd_worker_dry_run", "failed", f"Dry-run failed: {err}")
-
-    # --- Runtime Folders ---
-    def check_runtime_folders(self):
-        issues = []
-        # Hermes home writable
-        if not os.access(self.hermes_home, os.W_OK):
-            issues.append(f"HERMES_HOME not writable: {self.hermes_home}")
-        # OpenMontage projects dir writable (only check if set or on Kaggle)
-        om_projects = os.environ.get("OPENMONTAGE_PROJECTS_DIR")
-        is_kaggle = os.path.exists("/kaggle/working")
-        if om_projects:
-            if not os.access(om_projects, os.W_OK):
-                issues.append(f"OPENMONTAGE_PROJECTS_DIR not writable: {om_projects}")
-        elif is_kaggle:
-            issues.append("OPENMONTAGE_PROJECTS_DIR not set (required on Kaggle)")
-        
-        if issues:
-            self.record("runtime_folders", "failed", "; ".join(issues))
-        else:
-            self.record("runtime_folders", "passed", "All runtime folders writable")
-
-    # --- Session 3 Gates ---
-    def check_youtube_discovery(self):
-        """Test yt-dlp search operations work without browser."""
-        try:
-            import yt_dlp
-            ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist"}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                result = ydl.extract_info("ytsearch3:Messi World Cup 2022", download=False)
-                entries = result.get("entries", []) if result else []
-                if len(entries) >= 3:
-                    self.record("youtube_discovery", "passed", f"yt-dlp search works: {len(entries)} results")
-                else:
-                    self.record("youtube_discovery", "failed", f"Only {len(entries)} results")
-        except Exception as e:
-            self.record("youtube_discovery", "failed", f"yt-dlp search error: {e}")
-
-    def check_candidate_ranking(self):
-        """Test candidate ranking with 7-axis rubric."""
-        try:
-            sys.path.insert(0, str(self.project_root / "src"))
-            from acd_worker.source.discovery import CandidateRanker, SourceCandidate
-            
-            ranker = CandidateRanker()
-            candidates = [
-                SourceCandidate(
-                    candidate_id="test_1",
-                    url="https://youtu.be/abc123",
-                    video_id="abc123",
-                    title="Messi World Cup 2022 Final Pressure Build Up Official FIFA",
-                    channel="FIFA",
-                    duration=180,
-                    upload_date="20221218",
-                    thumbnail="",
-                    query="Messi pressure",
-                    story_slot="opening_pressure",
-                    ranking_score=0.0,
-                ),
-                SourceCandidate(
-                    candidate_id="test_2",
-                    url="https://youtu.be/def456",
-                    video_id="def456",
-                    title="Messi Crying Reaction Shorts #shorts",
-                    channel="Fan Channel",
-                    duration=15,
-                    upload_date="20221218",
-                    thumbnail="",
-                    query="Messi crying",
-                    story_slot="opening_pressure",
-                    ranking_score=0.0,
-                ),
-            ]
-            ranked = ranker.rank(candidates, "opening_pressure", "triumph")
-            assert ranked[0].ranking_score >= ranked[1].ranking_score
-            assert ranked[0].video_id == "abc123"  # FIFA should rank higher
-            self.record("candidate_ranking", "passed", f"7-axis rubric works: scores {ranked[0].ranking_score:.1f}, {ranked[1].ranking_score:.1f}")
-        except Exception as e:
-            self.record("candidate_ranking", "failed", f"Ranking test error: {e}")
-
-    def check_sequential_acquisition(self):
-        """Test sequential acquisition engine initializes."""
-        try:
-            sys.path.insert(0, str(self.project_root / "src"))
-            from acd_worker.source.acquisition import AcquisitionEngine
-            
-            with tempfile.TemporaryDirectory() as tmpdir:
-                engine = AcquisitionEngine(output_dir=tmpdir, max_attempts_per_slot=2)
-                assert engine.max_attempts == 2
-                assert engine.output_dir.exists()
-            self.record("sequential_acquisition", "passed", "Acquisition engine initializes correctly")
-        except Exception as e:
-            self.record("sequential_acquisition", "failed", f"Acquisition engine error: {e}")
-
-    def check_failure_replacement(self):
-        """Test failure classification and candidate replacement logic."""
-        try:
-            sys.path.insert(0, str(self.project_root / "src"))
-            from acd_worker.source.acquisition import FailureClassifier, FailureType
-            
-            classifier = FailureClassifier()
-            # Test classification
-            assert classifier.classify("Video unavailable") == FailureType.REMOVED
-            assert classifier.classify("Private video") == FailureType.PRIVATE
-            assert classifier.classify("Age restricted") == FailureType.AGE_RESTRICTED
-            assert classifier.classify("Geo blocked") == FailureType.GEO_RESTRICTED
-            assert classifier.classify("Format not available") == FailureType.FORMAT_UNAVAILABLE
-            assert classifier.classify("403 Forbidden") == FailureType.PLAYBACK_BLOCKED
-            assert classifier.classify("Connection timeout") == FailureType.TRANSIENT_NETWORK
-            assert classifier.classify("Corrupt file") == FailureType.INVALID_MEDIA
-            
-            self.record("failure_replacement", "passed", "Failure classification + replacement logic works")
-        except Exception as e:
-            self.record("failure_replacement", "failed", f"Failure replacement error: {e}")
-
-    def check_media_validation(self):
-        """Test media validation with ffprobe and frame sampling."""
-        try:
-            # Check ffprobe available
-            result = subprocess.run(["ffprobe", "-version"], capture_output=True, timeout=5)
-            if result.returncode != 0:
-                self.record("media_validation", "blocked", "ffprobe not available")
-                return
-            
-            # Check ffmpeg available for frame sampling
-            result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
-            if result.returncode != 0:
-                self.record("media_validation", "blocked", "ffmpeg not available")
-                return
-            
-            self.record("media_validation", "passed", "ffprobe + ffmpeg available for validation")
-        except Exception as e:
-            self.record("media_validation", "failed", f"Media validation error: {e}")
-
-    def check_checkpoint_resume(self):
-        """Test checkpoint save/load for acquisition."""
-        try:
-            sys.path.insert(0, str(self.project_root / "src"))
-            from acd_worker.source.acquisition import CheckpointManager
-            
-            with tempfile.TemporaryDirectory() as tmpdir:
-                manager = CheckpointManager(tmpdir)
-                data = {"project_id": "test", "stage": "acquisition", "completed_slots": ["slot1"]}
-                path = manager.save("test_project", "footage_acquisition", data)
-                loaded = manager.load_latest("test_project", "footage_acquisition")
-                assert loaded is not None
-                assert loaded["project_id"] == "test"
-                assert loaded["completed_slots"] == ["slot1"]
-            
-            self.record("checkpoint_resume", "passed", "Checkpoint save/load works")
-        except Exception as e:
-            self.record("checkpoint_resume", "failed", f"Checkpoint error: {e}")
-
-    def check_source_media_review_schema(self):
-        """Test source_media_review artifact structure matches OpenMontage schema."""
-        try:
-            sys.path.insert(0, str(self.project_root / "src"))
-            from acd_worker.source.acquisition import AcquiredSource
-            
-            acquired = AcquiredSource(
-                source_id="src_test",
-                candidate_id="cand_1",
-                original_url="https://archive.org/details/test",
-                video_id="test123",
-                local_path="/path/to/video.mp4",
-                story_slot="opening_pressure",
-                clip_id="clip_1",
-                technical_metadata={
-                    "duration_seconds": 120.5,
-                    "width": 1920,
-                    "height": 1080,
-                    "video_codec": "h264",
-                    "audio_codec": "aac",
-                    "sample_rate": 44100,
-                    "channels": 2,
-                },
-                quality_warnings=[],
-                verification_status="verified",
-                acquisition_attempts=[],
-                file_hash="abc123",
-                file_size_bytes=10000000,
+            configured = any(
+                line.split("=", 1)[0].strip() in env_keys and line.split("=", 1)[1].strip()
+                for line in env_file.read_text(encoding="utf-8").splitlines()
+                if "=" in line and not line.lstrip().startswith("#")
             )
-            
-            # Build source_media_review structure
-            review = {
-                "files": [{
-                    "path": acquired.local_path,
-                    "media_type": "video",
-                    "reviewed": True,
-                    "technical_probe": acquired.technical_metadata,
-                    "content_summary": "Test video",
-                    "transcript_summary": None,
-                    "representative_frames": [],
-                    "quality_risks": acquired.quality_warnings,
-                    "usable_for": ["hero_footage", "b_roll"],
-                    "verification_status": acquired.verification_status,
-                    "acquisition_attempt": 1,
-                    "original_candidate_id": acquired.candidate_id,
-                    "source_url": acquired.original_url,
-                }],
-                "summary": "Test summary",
-                "planning_implications": ["Slot filled"],
-            }
-            
-            # Validate required fields
-            assert "files" in review
-            assert len(review["files"]) == 1
-            f = review["files"][0]
-            assert f["media_type"] == "video"
-            assert f["reviewed"] is True
-            assert "technical_probe" in f
-            assert "verification_status" in f
-            assert "summary" in review
-            assert "planning_implications" in review
-            
-            self.record("source_media_review_schema", "passed", "source_media_review structure matches schema")
-        except Exception as e:
-            self.record("source_media_review_schema", "failed", f"Schema error: {e}")
+        except OSError:
+            configured = False
+        if configured:
+            return Gate("free_model_endpoint", "passed", "model configured; credential present in profile .env (value not reported)")
+    return Gate("free_model_endpoint", "blocked", "model configured but its endpoint credential is unavailable")
 
-    def check_asset_manifest_schema(self):
-        """Test asset_manifest entry structure matches OpenMontage schema."""
+
+def model_tool_contract_gate(profile_home: Path) -> Gate:
+    """Fail closed when a selected provider needs tool-parsing request flags."""
+    config_path = profile_home / "config.yaml"
+    if not config_path.is_file():
+        return Gate("model_tool_contract", "blocked", "Hermes profile config is missing")
+    config_text = config_path.read_text(encoding="utf-8")
+    if "nvidia/nemotron-3-ultra-550b-a55b" not in config_text:
+        return Gate("model_tool_contract", "passed", "no additional selected-model tool contract")
+    required = (
+        "chat_template_kwargs:",
+        "enable_thinking: true",
+        "force_nonempty_content: true",
+    )
+    missing = [item for item in required if item not in config_text]
+    if missing:
+        return Gate(
+            "model_tool_contract",
+            "failed",
+            "Nemotron 3 Ultra reasoning/tool parsing contract is incomplete: " + ", ".join(missing),
+        )
+    return Gate(
+        "model_tool_contract",
+        "passed",
+        "Nemotron 3 Ultra reasoning/tool parsing flags are configured",
+    )
+
+
+def hermes_same_path_contract_gate(hermes_repo: Path) -> Gate:
+    """Verify the exact pinned hooks used by the production handshake adapter."""
+    required = {
+        hermes_repo / "run_agent.py": (
+            "class AIAgent",
+            "def _build_api_kwargs(",
+            "def _interruptible_api_call(",
+            "def _interruptible_streaming_api_call(",
+        ),
+        hermes_repo / "agent" / "conversation_loop.py": (
+            "_cc_fr = agent._get_transport()",
+            "_finish_result = _cc_fr.normalize_response(response)",
+        ),
+        hermes_repo / "agent" / "tool_executor.py": (
+            "agent.tool_start_callback(",
+            "agent.tool_complete_callback(",
+            "function_result",
+        ),
+        hermes_repo / "agent" / "transports" / "types.py": (
+            "class ToolCall",
+            "arguments: str",
+            "class NormalizedResponse",
+        ),
+        ROOT / "scripts" / "hermes_event_adapter.py": (
+            "_status_only_tool",
+            "api_response_normalized",
+            "ACD_HERMES_TOOL_HANDSHAKE_FAILED",
+        ),
+    }
+    absent = []
+    for path, markers in required.items():
         try:
-            sys.path.insert(0, str(self.project_root / "src"))
-            from acd_worker.source.acquisition import AcquiredSource
-            
-            acquired = AcquiredSource(
-                source_id="src_test",
-                candidate_id="cand_1",
-                original_url="https://archive.org/details/test",
-                video_id="test123",
-                local_path="/path/to/video.mp4",
-                story_slot="opening_pressure",
-                clip_id="clip_1",
-                technical_metadata={
-                    "duration_seconds": 120.5,
-                    "width": 1920,
-                    "height": 1080,
-                    "video_codec": "h264",
-                    "audio_codec": "aac",
-                    "sample_rate": 44100,
-                    "channels": 2,
-                },
-                quality_warnings=[],
-                verification_status="verified",
-                acquisition_attempts=[],
-                file_hash="abc123",
-                file_size_bytes=10000000,
-            )
-            
-            manifest_entry = {
-                "id": acquired.source_id,
-                "type": "video",
-                "path": acquired.local_path,
-                "source_tool": "video_downloader",
-                "scene_id": acquired.story_slot,
-                "subtype": "source_footage",
-                "license": "unverified",
-                "original_url": acquired.original_url,
-                "generation_summary": f"Downloaded via yt-dlp; verification_status: {acquired.verification_status}",
-                "technical_metadata": acquired.technical_metadata,
-                "quality_warnings": acquired.quality_warnings,
-                "file_hash": acquired.file_hash,
-                "file_size_bytes": acquired.file_size_bytes,
-            }
-            
-            required = ["id", "type", "path", "source_tool", "scene_id", "subtype", "license", "original_url"]
-            for field in required:
-                assert field in manifest_entry, f"Missing: {field}"
-            
-            self.record("asset_manifest_schema", "passed", "asset_manifest structure matches OpenMontage schema")
-        except Exception as e:
-            self.record("asset_manifest_schema", "failed", f"Schema error: {e}")
+            source = path.read_text(encoding="utf-8")
+        except OSError:
+            absent.append(f"missing {path}")
+            continue
+        absent.extend(f"{path.name}: {marker}" for marker in markers if marker not in source)
+    adapter_path = ROOT / "scripts" / "hermes_event_adapter.py"
+    try:
+        adapter_source = adapter_path.read_text(encoding="utf-8")
+    except OSError:
+        adapter_source = ""
+    profile_bootstrap = "from hermes_cli import main as hermes_main_module"
+    run_agent_import = "import run_agent"
+    if not (
+        profile_bootstrap in adapter_source
+        and run_agent_import in adapter_source
+        and adapter_source.index(profile_bootstrap) < adapter_source.index(run_agent_import)
+    ):
+        absent.append("hermes_event_adapter.py: named-profile bootstrap before run_agent import")
+    if absent:
+        return Gate(
+            "hermes_same_path_contract",
+            "failed",
+            "pinned request/response/callback surface differs: " + "; ".join(absent),
+        )
+    return Gate(
+        "hermes_same_path_contract",
+        "passed",
+        "live request restriction, normalized response and real tool callbacks verified",
+    )
 
-    def check_hindsight_persistence(self):
-        """Test Hindsight persistence (documented as blocked)."""
-        # This documents the Hindsight status
-        self.record("hindsight_persistence", "blocked", "Hindsight blocked on Kaggle (no daemon, no free persistent deployment); built-in memory + session search + project records work")
 
-    def run_all(self):
-        print("=" * 60)
-        print("SESSION 2 & 3 SETUP VALIDATION")
-        print("=" * 60)
-        
-        # Upstream commits
-        self.check_upstream_commits()
-        
-        # Hermes
-        self.check_hermes_install()
-        self.check_hermes_profile()
-        self.check_skill_discovery()
-        self.check_skill_validation()
-        
-        # Built-in memory
-        self.check_memory_write_read()
-        self.check_session_search()
-        
-        # Hindsight
-        self.check_hindsight()
-        
-        # OpenMontage
-        self.check_openmontage_import()
-        self.check_tool_registry()
-        self.check_pipeline_load()
-        self.check_ffmpeg_provider()
-        
-        # Schema lock
-        self.check_schema_lock()
-        
-        # Browser
-        self.check_browser_capability()
-        
-        # ACD Worker
-        self.check_acd_worker_dry_run()
-        
-        # Runtime folders
-        self.check_runtime_folders()
-        
-        # Session 3 Gates
-        self.check_youtube_discovery()
-        self.check_candidate_ranking()
-        self.check_sequential_acquisition()
-        self.check_failure_replacement()
-        self.check_media_validation()
-        self.check_checkpoint_resume()
-        self.check_source_media_review_schema()
-        self.check_asset_manifest_schema()
-        self.check_hindsight_persistence()
-        
-        # Summary
-        passed = sum(1 for r in self.results.values() if r["status"] == "passed")
-        failed = sum(1 for r in self.results.values() if r["status"] == "failed")
-        blocked = sum(1 for r in self.results.values() if r["status"] == "blocked")
-        
-        print("\n" + "=" * 60)
-        print(f"SUMMARY: {passed} passed, {failed} failed, {blocked} blocked")
-        print("=" * 60)
-        
-        # Write outputs
-        state_dir = self.project_root / "state" / "setup"
-        state_dir.mkdir(parents=True, exist_ok=True)
-        
-        with open(state_dir / "setup-validation.json", "w") as f:
-            json.dump(self.results, f, indent=2)
-        
-        # Markdown report
-        with open(state_dir / "setup-validation.md", "w") as f:
-            f.write("# Setup Validation Report\n\n")
-            f.write(f"**Passed:** {passed} | **Failed:** {failed} | **Blocked:** {blocked}\n\n")
-            f.write("| Check | Status | Details |\n")
-            f.write("|-------|--------|---------|\n")
-            for name, result in self.results.items():
-                status = result["status"].upper()
-                f.write(f"| {name} | {status} | {result['details']} |\n")
-        
-        return failed == 0
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Validate the thin ACD runtime")
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "state" / "setup")
+    args = parser.parse_args()
 
-def main():
-    project_root = os.environ.get("PROJECT_ROOT", "/home/kasun/Music/Director/acd-video-worker")
-    validator = SetupValidator(project_root)
-    success = validator.run_all()
-    sys.exit(0 if success else 1)
+    hermes_root = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser().resolve()
+    profile = os.environ.get("HERMES_PROFILE", "football-emotion")
+    profile_home = hermes_root if hermes_root.parent.name == "profiles" else hermes_root / "profiles" / profile
+    hermes_repo = Path(os.environ.get("HERMES_AGENT_PATH", ROOT / "external" / "Hermes-Agent")).expanduser().resolve()
+    openmontage = Path(os.environ.get("OPENMONTAGE_ROOT", ROOT / "external" / "OpenMontage")).expanduser().resolve()
+
+    gates = [
+        git_pin("hermes_pin", hermes_repo, HERMES_PIN),
+        hermes_same_path_contract_gate(hermes_repo),
+        openmontage_compatibility_gate(openmontage),
+        production_boundary(),
+    ]
+
+    compile_result = run([sys.executable, "-m", "compileall", "-q", "src", "scripts", "bootstrap", "plugins"], cwd=ROOT)
+    gates.append(Gate("python_compile", "passed" if compile_result.returncode == 0 else "failed", compile_result.stderr.strip() or "compiled"))
+    test_result = run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], cwd=ROOT, timeout=180)
+    gates.append(Gate("focused_tests", "passed" if test_result.returncode == 0 else "failed", (test_result.stderr or test_result.stdout).strip()[-1000:]))
+
+    hermes_cli = shutil.which("hermes")
+    gates.append(Gate("hermes_cli", "passed" if hermes_cli else "blocked", hermes_cli or "Hermes CLI is not installed"))
+    gates.append(Gate("hermes_profile", "passed" if (profile_home / "config.yaml").is_file() else "blocked", str(profile_home)))
+    gates.append(skill_gate(profile_home))
+    gates.append(hermes_openmontage_plugin_gate(profile_home, hermes_repo))
+    skill_result = run([sys.executable, str(ROOT / "skills" / "football-emotion-video" / "tools" / "validate_skill_system.py"), str(ROOT / "skills" / "football-emotion-video")])
+    gates.append(Gate("canonical_skill_validation", "passed" if skill_result.returncode == 0 and "Result: PASSED" in skill_result.stdout else "failed", (skill_result.stdout + skill_result.stderr).strip()[-1000:]))
+    gates.append(model_gate(profile_home))
+    gates.append(model_tool_contract_gate(profile_home))
+
+    manifest = openmontage / "pipeline_defs" / "documentary-montage.yaml"
+    gates.append(Gate("openmontage_manifest", "passed" if manifest.is_file() else "failed", str(manifest)))
+    gates.append(registry_gate(openmontage))
+    gates.append(remotion_runtime_gate(openmontage))
+    gates.append(Gate("ffmpeg_ffprobe", "passed" if shutil.which("ffmpeg") and shutil.which("ffprobe") else "blocked", "required for render/validation"))
+    gates.append(Gate("source_acquisition", "passed" if importlib.util.find_spec("yt_dlp") else "blocked", "yt-dlp Python package"))
+    gates.append(Gate("discord", "passed" if os.environ.get("DISCORD_WEBHOOK_URL") else "blocked", "optional; run is unaffected when absent"))
+
+    summary = {status: sum(g.status == status for g in gates) for status in ("passed", "failed", "blocked")}
+    required_blockers = [gate.name for gate in gates if gate.status == "blocked" and gate.name != "discord"]
+    worker_head = run(["git", "rev-parse", "HEAD"], cwd=ROOT).stdout.strip()
+    worker_dirty = run(["git", "status", "--porcelain"], cwd=ROOT).stdout.strip() != ""
+    marker_path = openmontage / ".acd-compatibility-patches.json"
+    try:
+        compatibility_marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        compatibility_marker = None
+    report = {
+        "schema_version": "1.0",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "gates": [asdict(g) for g in gates],
+        "summary": summary,
+        "production_path_complete": summary["failed"] == 0 and not required_blockers,
+        "live_certification": "blocked" if summary["failed"] or required_blockers else "ready_for_live_smoke",
+        "required_blockers": required_blockers,
+        "runtime_identity": {
+            "worker_commit": worker_head or None,
+            "worker_dirty": worker_dirty,
+            "hermes_commit": HERMES_PIN,
+            "openmontage_commit": OPENMONTAGE_PIN,
+            "openmontage_compatibility": compatibility_marker,
+            "python": sys.version.split()[0],
+            "node": run(["node", "--version"]).stdout.strip() if shutil.which("node") else None,
+            "npm": run(["npm", "--version"]).stdout.strip() if shutil.which("npm") else None,
+            "requirements_sha256": sha256(ROOT / "requirements.txt"),
+            "remotion_lock_sha256": sha256(openmontage / "remotion-composer" / "package-lock.json") if (openmontage / "remotion-composer" / "package-lock.json").is_file() else None,
+        },
+    }
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = args.output_dir / "thin-validation.json"
+    md_path = args.output_dir / "thin-validation.md"
+    json_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    (args.output_dir / "runtime-validation-certificate.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    rows = "\n".join(f"| {g.name} | {g.status} | {g.evidence.replace('|', '/')} |" for g in gates)
+    md_path.write_text(
+        "# Thin Runtime Validation\n\n| Gate | Status | Evidence |\n|---|---|---|\n" + rows +
+        f"\n\nPassed: {summary['passed']}  Failed: {summary['failed']}  Blocked: {summary['blocked']}\n",
+        encoding="utf-8",
+    )
+    for gate in gates:
+        marker = {"passed": "✓", "failed": "✗", "blocked": "!"}[gate.status]
+        print(f"{marker} {gate.name}: {gate.status} — {gate.evidence}")
+    print(f"Summary: {summary}; reports: {json_path}, {md_path}")
+    return 1 if summary["failed"] or required_blockers else 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

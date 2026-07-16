@@ -16,7 +16,7 @@ import os
 import json
 import tempfile
 import shutil
-sys.path.insert(0, "/home/kasun/Music/Director/acd-video-worker/src")
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from acd_worker.source.discovery import SourceCandidate
 from acd_worker.source.acquisition import (

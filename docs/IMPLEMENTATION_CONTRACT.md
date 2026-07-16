@@ -1,236 +1,173 @@
-# Implementation Contract — AI Creative Director Football Video System
+# Implementation Contract — Thin ACD Control Plane
 
-**Status:** LOCKED — All future coding sessions must comply  
-**Date:** 2026-07-11  
-**Authority:** Derived from locked product decisions + upstream compatibility + skill reconciliation
+**Status:** locked, root-cause recovery revision
 
----
+**Authority:** `docs/FINAL_ARCHITECTURE.md`
 
-## 1. Locked Decisions (Non-Negotiable)
+## Required production path
 
-| # | Decision | Reference |
-|---|----------|-----------|
-| 1 | Hermes-Agent is the permanent primary agent | Product decision |
-| 2 | Hermes skills, session history, Hindsight memory are part of final system | Product decision |
-| 3 | OpenMontage is the primary editing/rendering engine | Product decision |
-| 4 | FFmpeg remains part of permanent rendering backbone | Product decision |
-| 5 | Kaggle is the main runtime environment | Product decision |
-| 6 | OpenCode is used for development | Product decision |
-| 7 | YouTube is the main automatic footage source | Product decision |
-| 8 | Programme must discover footage automatically when user provides no links | Product decision |
-| 9 | User-provided YouTube links must also be supported | Product decision |
-| 10 | Footage acquisition stays outside OpenMontage; hands local footage to OpenMontage | Product decision |
-| 11 | No proxies, CAPTCHA solving, stolen cookies, IP rotation, bot-protection bypass | Product decision |
-| 12 | Blocked footage candidates abandoned and replaced strategically | Product decision |
-| 13 | Football Emotion V7 skill system used after validation/correction | Product decision |
-| 14 | Future video categories use separate skill systems | Product decision |
-| 15 | Licensing automation outside current target | Product decision |
-| 16 | This is final-product architecture, not temporary MVP | Product decision |
+The only production entrypoint is `scripts/acd_worker.py`. It must call `ThinRunController`; it must never import or invoke the retired worker creative orchestrator, manual OpenMontage stage runner, worker creative artifact generators or duplicate quality-loop router.
 
----
+The controller may perform only:
 
-## 2. Rules Future Coding Sessions Must Follow
+1. intake and run-state persistence;
+2. source manifest preparation;
+3. environment/profile/skill preflight;
+4. one supported Hermes job invocation or supported session resume, plus a
+   small configured number of bounded same-session checkpoint continuations
+   only when Hermes exits zero after publishing a coherent native
+   checkpoint/artifact pair;
+5. strict creative-handoff parsing and deterministic reconciliation of an
+   already-complete native edit checkpoint;
+6. compatibility, approval, schema and cross-artifact validation followed by
+   one isolated OpenMontage native compose/review transaction;
+7. independent final artifact/media/visual validation;
+8. generation-atomic terminal persistence and best-effort notification.
 
-### 2.1 Upstream Modification Restrictions
-- **NEVER** modify `external/Hermes-Agent/` or `external/OpenMontage/` source code
-- All integration via: Hermes skills (agentskills.io standard), OpenMontage pipeline manifests + stage director skills, tool registry discovery
-- If upstream lacks a capability, build a **thin adapter skill** or **custom tool** in our repo — not a patch
+## State contract
 
-### 2.2 Schema Validation Rules
-- All artifacts must validate against schemas in `shared/contracts/pipeline-artifacts.md` (football) and `OpenMontage/schemas/artifacts/*.schema.json` (OpenMontage)
-- **Before** writing any OpenMontage-native artifact (`edit_decisions`, `asset_manifest`, `scene_plan`, `script`, `render_report`):
-  - `openmontage_schema_lock.bridge_status` MUST be `passed`
-  - Mapping documented in `shared/references/repo-bridge/openmontage-schema-lock.md`
-- Adapter-facing plans (`openmontage_edit_plan`, `openmontage_audio_operations`) allowed before schema lock
-- `jsonschema` validation required at each checkpoint write
+Allowed states are exactly `INTAKE`, `SOURCE_READY`, `AGENT_RUNNING`,
+`NATIVE_EXECUTING`, `VALIDATING`, `DELIVERED`, `BLOCKED`, and `FAILED`.
+`NATIVE_EXECUTING` records only the deterministic transaction boundary. State
+writes are atomic. State stores no creative stage machine, chain-of-thought or
+duplicated OpenMontage artifacts.
 
-### 2.3 Source Acquisition Rules
-- **Automatic discovery:** Hermes `browser` tool → YouTube search → extract video IDs/URLs
-- **User-provided links:** Accepted as supplementary input to `football-source-discovery`
-- **Download:** OpenMontage `video_downloader` tool (yt-dlp) via Hermes `terminal` tool
-- **Sequential acquisition:** One clip at a time; verify before next
-- **Failure handling:** On download/verify failure → mark rejected → fetch next ranked candidate (max 3 per slot)
-- **No retry loops** on same URL; no parallel downloads
-- **Manifest:** Every acquired file → `source_media_review` + `asset_manifest` entry with provenance
+Every blocker/error has a stable code, actionable message, phase and optional evidence. Expected missing external prerequisites map to `BLOCKED`; malformed results and unexpected execution faults map to `FAILED`.
 
-### 2.4 Memory Rules
-- **Hermes MEMORY.md:** ≤ 2,200 chars total; only distilled lessons (1 sentence each)
-- **Hermes USER.md:** ≤ 1,375 chars total; only user preferences
-- **Full project records:** `projects/<id>/football_emotion/project_record.json` (unlimited size)
-- **Memory update:** Only via `hermes-football-memory-learning` skill after QA/delivery
-- **No unverified claims:** Current-event facts, legal assessments, performance metrics → stored as `provenance: estimated_by_editor` or `creative_hypothesis`, never `verified_from_source`
-- **Hindsight (if enabled):** `local_embedded` mode only; bank_id `hermes-{profile}`
+Terminal states are immutable during ordinary resume. An explicit
+`--retry-blocked` may reopen only the controller's fixed retryable blocker
+allowlist (provider/runtime availability, typed approval, and bounded native
+progress blockers). An interrupted render with no durable native review is not
+retryable because a second compose would violate exactly-once execution. It must reuse the same project and, when one exists, the
+supported Hermes `--resume` session. Failed and delivered states never reopen.
+If the persisted profile/model/plugin/Football-skill identity changes, reuse of
+that conversation is forbidden. Explicit `--restart-hermes-session` authority
+may start a clean Hermes conversation while preserving valid native project
+checkpoints.
 
-### 2.5 Testing Gates (Must pass
-| Gate | When | Criteria |
-|------|------|----------|
-| **Setup Validation** | Session start | `bridge_preflight.py`: repos exist, pinned commits match, tool registry preflight runs |
-| **Skill System Validation** | After skill install | `validate_skill_system.py`: 0 errors, 0 warnings |
-| **Schema Lock** | Before first native OpenMontage artifact | `openmontage_schema_lock.bridge_status: passed` with all fields mapped |
-| **Pipeline Preflight** | Before pipeline run | Manifest loads, stage director skills readable, tool registry shows required providers |
-| **Stage Checkpoint** | Each OpenMontage stage | Artifact validates against schema; human gate if `human_approval_default: true` |
-| **QA Gate** | Before compose | `football-retention-quality-control` + `football-audio-quality-control` + `football-platform-export-validator` all `pass: true` |
-| **Render Validation** | After compose | `render_report` exists, video file playable, `export_profile.pass: true` |
-| **Memory Update** | After delivery | `hermes-football-memory-learning` produces `hermes_memory_update`; MEMORY.md/USER.md size enforced |
+## Hermes contract
 
----
+- Use the pinned supported `-p ... chat -q ... -Q` interface.
+- The runner uses Hermes' supported global `-m` selector before `chat` for the
+  configured model. A model/profile/plugin/skill identity change requires an
+  explicit clean Hermes session; it cannot be injected into an old session.
+- Use `--resume`, not invented session flags.
+- Pass the Hermes root as `HERMES_HOME`; let `-p` resolve the named profile.
+- Preload the six core bridge/story/cutting/audio/quality entry skills and
+  instruct progressive use of every relevant Football Emotion skill. The full
+  system remains installed and first-class.
+- Run from the isolated per-run project directory with `coding_context: off`.
+  Never run the production conversation from either source checkout.
+- Enable the installed `acd-openmontage` plugin/toolset. Do not expose terminal,
+  mutable file or code-execution toolsets and do not enable headless `--yolo`.
+- For `nvidia/nemotron-3-ultra-550b-a55b`, the generated provider request must
+  include both `chat_template_kwargs.enable_thinking=true` and NVIDIA's required
+  `chat_template_kwargs.force_nonempty_content=true`. Bootstrap must fail closed
+  if this reasoning-plus-tool parsing contract is absent.
+- Capture stdout/stderr for diagnostics, redact secrets and enforce timeout.
+  Isolate the adapter in its own process group and terminate all descendants on
+  timeout or heartbeat failure.
+  Capture the supported `run_conversation` return value separately because
+  quiet CLI stdout can still contain reasoning/progress rendering; never scan
+  general stdout for a convenient JSON substring.
+- Hermes returns exactly one strict JSON terminal object. The worker validates
+  and atomically publishes it; Hermes has no direct file-write authority. No
+  missing field is normalized and no prose is parsed as a result.
+- A bounded same-session continuation is allowed only after a checkpoint with
+  `completed`/`awaiting_human` status embeds the same canonical artifact JSON
+  that exists on disk. Loose files, event activity and exit zero are not
+  progress. A slice with no new coherent checkpoint blocks immediately.
 
-## 3. Source Acquisition Rules (Detailed)
+## Deterministic native bridge contract
 
-### 3.1 Discovery (football-source-discovery)
-- **Trigger:** User request + `user_instruction_profile` (or inferred)
-- **Queries:** 5 styles per topic (story, moment, editing-style, official, non-English)
-- **Ranking:** 7-axis rubric (0-10); ≥8 deep-analysis, 6-7.9 manual inspect, 4-5.9 topic-only, <4 reject
-- **Rejection Rules:** Generic highlights, goals-only, AI fakes, watermarks, shorts-only, unverified current events, copyrighted music, exploitative emotion
-- **Output:** `source_video_candidate[]` with `verification_status: unverified`
+- Keep the exact pinned OpenMontage commit. Apply only the tracked, hashed
+  compatibility patch/overlay; bootstrap and execution must reject any other
+  tracked delta or hash mismatch.
+- Hermes reads bounded allowlisted regions of the actual guide, context,
+  selected manifest/director skills and Football references through
+  `openmontage_native(operation=read_document)`.
+- The plugin's isolated adapter imports the pinned OpenMontage checkout,
+  initializes the native project and discovers the real ToolRegistry. Hermes
+  never imports OpenMontage or guesses a CLI/module function.
+- Hermes authors canonical creative payloads; `publish_artifact` validates each
+  against the pinned schema, enforces native stage order, writes it atomically
+  and calls the native checkpoint writer. Approval is derived only from typed
+  run policy.
+- `run_tool` may invoke only the audited zero-cost creative allowlist and calls
+  `registry.get(name).execute(inputs)` under the pinned OpenMontage interpreter.
+  Source/publish tiers, `video_compose`, paid calls, unsafe code and paths
+  outside the run project are rejected.
+- Hermes authors through the native edit checkpoint, then returns
+  `ready_for_execution`. The worker owns publication of the terminal envelope.
+- The worker overwrites any model-supplied approval fields with run-state policy,
+  validates native checkpoint gates through pinned OpenMontage, and invokes the
+  isolated native adapter exactly once per input fingerprint.
+- OpenMontage owns runtime choice/routing, `video_compose`, rendering and native review.
+- If the pinned capability is unavailable, return an exact blocker; do not invent a CLI or implement the stages in the worker.
+- Respect native approval gates. `human_approved` is accepted only when the
+  same stage appears in the typed user policy. Missing approval is a structured
+  retryable blocker; a suppressed manifest gate is a failure.
+- Legacy Hermes `delivered` envelopes are parsed only to return
+  `LEGACY_DELIVERY_UNSUPPORTED`; they cannot enter validation or delivery.
+- Native publication is a crash-safe `prepared → rendering →
+  rendered_reviewed → published` journal. Recovery after `rendered_reviewed`
+  must reuse the reviewed bytes and must not call `video_compose` twice.
+- The native input fingerprint binds the complete typed request, approvals,
+  source manifest, canonical artifacts, referenced media, Football skills,
+  pinned commits, compatibility marker, and installed adapter/overlay bytes.
 
-### 3.2 Acquisition (football-footage-acquisition — NEW)
-- **Input:** Ranked `source_video_candidate[]` with `deep_analysis_candidate: yes`
-- **Process per clip:**
-  1. `video_downloader` (yt-dlp) → local file `projects/<id>/sources/<candidate_id>.mp4`
-  2. `audio_probe` → technical metadata
-  3. `frame_sampler` (4 frames) → visual verification
-  4. `transcriber` (if audio) → transcript summary
-  5. Build `source_media_review` entry
-  6. On any failure → reject candidate → try next ranked
-- **Output:** Complete `source_media_review` artifact + updated `asset_manifest`
+## Source contract
 
-### 3.3 Analysis (football-visual-scene-analysis)
-- **Input:** `source_media_review` entries with `deep_analysis_candidate: yes`
-- **Tools:** `frame_sampler` (scene_guided), `scene_detect` (content), `transcriber`
-- **Output:** `video_scene_analysis` with `confidence` + `manual_review_needed` per scene
+- Local paths and URLs may enter the source manifest.
+- Discovery/ranking is a creative Hermes/skill decision.
+- Download/replacement uses the worker-owned `scripts/acquire_sources.py` boundary.
+- Candidates are tried sequentially and validated before acceptance.
+- Every attempt and exact failure is recorded.
+- Never bypass DRM, login, age/geo gates, cookies, CAPTCHA, protected playback or access controls.
+- Rights status remains unverified until evidenced; transformative intent is not declared legally safe.
+- Availability, technical validation, provenance, license and rights evidence
+  are separate fields. A successful download or ffprobe result is never rights
+  verification.
 
-### 3.4 No Unsafe Assumptions
-- Browser tool may fail (YouTube layout changes, consent walls) → skill handles gracefully
-- yt-dlp may fail (geo-block, age-gate, removed) → replacement logic mandatory
-- No API keys for YouTube Data API (not in locked secrets)
-- No cookie authentication (locked decision)
+## Delivery contract
 
----
+`DELIVERED` requires all of the following:
 
-## 4. Testing Gates (Expanded)
+- Hermes produced or the controller deterministically reconciled a typed
+  `ready_for_execution` handoff from already-authored native artifacts;
+- at least one candidate path is inside the run’s OpenMontage project workspace;
+- the file exists and is non-empty;
+- real ffprobe succeeds;
+- exactly one schema-valid planning artifact (`proposal_packet` or `brief`),
+  plus `scene_plan`, `asset_manifest`, `edit_decisions`, `render_report`, and
+  `final_review` exist separately under native `artifacts/`;
+- `render_report`, `final_review`, renderer family and runtime agree on the delivered file;
+- eleven uniformly sampled frames contain meaningful detail and distributed
+  temporal change across the beginning, middle and ending; one changing frame,
+  an animated intro followed by a freeze, or a frozen ending cannot pass;
+- a video stream and positive duration exist;
+- validation evidence is persisted.
 
-### 4.1 Unit/Contract Tests (Run in Session 2+)
-```bash
-# Skill system
-python3 tools/validate_skill_system.py skills/football-emotion-video/
+Dry runs, fixture bytes, mocked outputs, plan JSON, self-referential or schema-invalid artifact claims, blank renders, registry discovery and process exit zero cannot satisfy delivery.
 
-# OpenMontage schemas
-python3 -m pytest tests/contracts/ -v
+## Persistence and notification
 
-# Tool registry preflight
-cd external/OpenMontage && python3 -c "from tools.tool_registry import registry; registry.discover(); print(registry.provider_menu_summary())"
-```
+Kaggle hydration/export copies only project state, outputs and the named Hermes
+profile’s durable non-secret data. It requires either an explicit fresh start
+or a hash-verified committed generation, refuses active run leases, uses SQLite
+backup, scans for secrets, publishes an immutable generation, then atomically
+advances `current.json`. `.env`, tokens and credentials are excluded. Discord
+is optional, receives only macro outcomes, and can never change a run result.
 
-### 4.2 Integration Tests (Session 3+)
-- **Footage acquisition smoke test:** Download 1 public domain football clip → verify `source_media_review`
-- **Pipeline dry-run:** `documentary-montage` with synthetic artifacts → all 5 checkpoints pass
-- **End-to-end (short):** 30s football comeback edit → render → validate → Discord notify
+## Required validation
 
-### 4.3 Kaggle Compatibility Tests
-- `HERMES_HOME=/kaggle/working/.hermes` persistence across kernel restarts
-- `OPENMONTAGE_PROJECTS_DIR=/kaggle/working/projects` checkpoint survival
-- FFmpeg-only render path works without Node/Remotion/HyperFrames
-- No network calls in inference mode (all cloud providers unavailable)
-
----
-
-## 5. Definition of a Completed Final System
-
-The system is **complete** when ALL of the following are true:
-
-### 5.1 Infrastructure
-- [ ] `bootstrap/install_hermes.sh` → Hermes runs with football-emotion skills loaded
-- [ ] `bootstrap/install_openmontage.sh` → OpenMontage `make setup` passes, tool registry discovers providers
-- [ ] `bootstrap/install_skills.sh` → ZIP extracted to `~/.hermes/skills/football-emotion-video/`, validation passes
-- [ ] `bootstrap/validate_setup.py` → bridge_preflight + skill validation = 0 errors
-- [ ] Kaggle persistence symlinks work; kernel restart preserves Hermes memory + OpenMontage projects
-
-### 5.2 Orchestration
-- [ ] `scripts/acd_worker.py` accepts user request (Discord/CLI) → creates Hermes session → runs full workflow
-- [ ] `social-edit-reasoning` enforces editorial journey stage order
-- [ ] Project workspace created at `OPENMONTAGE_PROJECTS_DIR/<project-id>/`
-- [ ] Checkpoints written per OpenMontage stage; resume from last completed stage works
-- [ ] Discord notifications: start, stage transitions, failure (with context), completion (with output path)
-
-### 5.3 Footage Acquisition
-- [ ] Automatic YouTube discovery via Hermes `browser` tool finds ≥5 candidates for test topic
-- [ ] `football-source-discovery` ranks candidates per rubric; rejects per rules
-- [ ] `football-footage-acquisition` downloads sequentially, builds `source_media_review`
-- [ ] Failed download → next candidate tried (max 3) → slot filled or gap reported
-- [ ] User-provided YouTube links accepted and integrated into candidate pool
-
-### 5.4 Analysis & Editorial
-- [ ] `football-visual-scene-analysis` uses `frame_sampler` + `scene_detect` → `video_scene_analysis`
-- [ ] `football-timestamp-extraction` + `football-clip-scoring` produce ranked `clip_candidate[]` with scores
-- [ ] `football-story-strategy` + `football-narration-scriptwriting` produce script tied to clips
-- [ ] `football-pro-cutting-pacing` + `football-audio-music-director` + `football-commentary-ducking-mixer` produce edit/audio plans
-- [ ] `football-caption-thumbnail-direction` produces caption/thumbnail plans
-- [ ] `football-fact-provenance-gate` + `football-footage-rights-transformative-risk-assessor` + `football-rights-safe-audio-license-checker` all pass
-
-### 5.5 OpenMontage Pipeline Execution
-- [ ] `documentary-montage` pipeline selected; manifest + stage director skills read
-- [ ] `idea-director` → `brief` (thematic question, tone, duration, music, end-tag)
-- [ ] `scene-director` → `scene_plan` (slots mapped to our clips)
-- [ ] `asset-director` → `asset_manifest` (ingests our local files + provenance)
-- [ ] `openmontage-edit-planning` → `openmontage_edit_plan` → **after schema lock** → `edit_decisions`
-- [ ] `openmontage-audio-operation-mapper` → `edit_decisions.audio`
-- [ ] `compose-director` → `render_report` (FFmpeg render, `render_runtime: ffmpeg`)
-
-### 5.6 Quality & Delivery
-- [ ] `football-retention-quality-control` → `full_qa_report.pass: true`
-- [ ] `football-audio-quality-control` → `qc_report.pass: true` (loudness -14 LUFS, true peak -1dB)
-- [ ] `football-platform-export-validator` → `export_profile.pass: true`
-- [ ] Video file exists at `projects/<id>/output/final.mp4`, playable, correct specs
-- [ ] Discord webhook delivers completion message with output location
-
-### 5.7 Memory & Learning
-- [ ] `hermes-football-memory-learning` → `hermes_memory_update` written to Hermes memory
-- [ ] MEMORY.md ≤ 2,200 chars, USER.md ≤ 1,375 chars enforced
-- [ ] Full project record at `projects/<id>/football_emotion/project_record.json`
-- [ ] Hindsight (if enabled) retains semantic recall
-
-### 5.8 Extensibility Proven
-- [ ] New skill category (e.g., `tech-review-video/`) can be added under `~/.hermes/skills/` without modifying football skills
-- [ ] Shared infrastructure (`social-edit-reasoning`, repo bridge, editorial journey refs) reused
-- [ ] New pipeline manifest can be added to OpenMontage without core changes
-
----
-
-## 6. Prohibited Patterns (Will Fail Review)
-
-| Pattern | Why |
-|---------|-----|
-| `import hermes_agent.*` or `import openmontage.*` in our code | Upstream modification prohibition |
-| Writing artifacts outside `projects/<id>/` | Breaks Backlot/checkpoints |
-| Silent `render_runtime` default (no user confirmation) | Governance violation |
-| Storing legal claims as verified facts in memory | Liability + memory corruption |
-| Parallel video downloads | Resource contention, no strategic replacement |
-| Using `web` toolset for YouTube search | Doesn't work; requires `browser` tool |
-| Assuming `video_analyzer` is granular sub-tool | It's monolithic; use `frame_sampler`/`scene_detect` directly |
-| Skipping `openmontage_schema_lock` before native artifacts | Schema drift guaranteed |
-| Hardcoding `/home/kasun/Music/Director/` paths | Not portable; use `HERMES_HOME`, `OPENMONTAGE_PROJECTS_DIR` |
-| Writing to `MEMORY.md` directly (bypassing skill) | Breaks drift detection, size limits, threat scanning |
-
----
-
-## 7. Version Locks (from upstream-lock.json)
-
-```json
-{
-  "hermes_agent": {
-    "repository": "https://github.com/NousResearch/Hermes-Agent",
-    "commit": "5ecc07986f46463ca3096679b03a46402eb19cee",
-    "branch": "main",
-    "inspection_date": "2026-07-11"
-  },
-  "openmontage": {
-    "repository": "https://github.com/calesthio/OpenMontage",
-    "commit": "f633b5f428b9be9a2afecba851dfddd101619756",
-    "branch": "main",
-    "inspection_date": "2026-07-11"
-  }
-}
-```
-
-All implementation must target these exact commits. Do not upgrade without explicit architecture review session.
+- Python compilation.
+- Focused thin-controller tests.
+- Real technical media canary when ffmpeg/ffprobe exist.
+- Fake media rejection.
+- Production-import AST boundary test.
+- Hermes argv/profile/resume/skill contract test.
+- Skill-system validator with zero errors/warnings.
+- Exact upstream pins and exactly the audited hashed OpenMontage compatibility delta.
+- Secret scan.
+- Honest live blockers when endpoint/runtime/network requirements are unavailable.

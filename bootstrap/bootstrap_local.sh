@@ -33,6 +33,7 @@ OPENMONTAGE_COMMIT=$(jq -r '.openmontage.commit' "$UPSTREAM_LOCK")
 log "Project root: $PROJECT_ROOT"
 log "Hermes commit: $HERMES_COMMIT"
 log "OpenMontage commit: $OPENMONTAGE_COMMIT"
+python3 -m pip install -r "$PROJECT_ROOT/requirements.txt"
 
 # 1. Clone/verify Hermes
 log "Setting up Hermes-Agent..."
@@ -96,15 +97,35 @@ else
     ok "Profile 'football-emotion' created"
 fi
 
-# 5. Install OpenMontage (FFmpeg-only for local dev too, Remotion optional)
-log "Installing OpenMontage (FFmpeg-only)..."
+# Apply the same audited OpenMontage compatibility layer used in production.
+python3 "$PROJECT_ROOT/bootstrap/apply_openmontage_compatibility.py" \
+    --worker-root "$PROJECT_ROOT" \
+    --openmontage-root "$PROJECT_ROOT/external/OpenMontage"
+
+# 5. Install the same pinned native runtime used in production.
+log "Installing OpenMontage native runtime..."
 cd "$PROJECT_ROOT/external/OpenMontage"
 if [[ -d ".venv" ]] && [[ -x ".venv/bin/python" ]]; then
     ok "OpenMontage venv exists"
 else
-    log "Running 'make install' (Python deps only, no Remotion/HyperFrames)..."
+    log "Running 'make install' (Python dependencies)..."
     make install
     ok "OpenMontage Python deps installed"
+fi
+if [[ ! -x "$PROJECT_ROOT/external/OpenMontage/remotion-composer/node_modules/.bin/remotion" ]]; then
+    npm ci --prefix "$PROJECT_ROOT/external/OpenMontage/remotion-composer" --no-audit --no-fund
+fi
+(cd "$PROJECT_ROOT/external/OpenMontage/remotion-composer" && npx --no-install remotion browser ensure)
+"$PROJECT_ROOT/external/OpenMontage/.venv/bin/python" -m pip install -r "$PROJECT_ROOT/requirements.txt"
+
+# Configure a free endpoint when LLM_* values are present; otherwise preserve
+# the profile and report the exact remaining manual setup.
+set +e
+python3 "$SCRIPT_DIR/configure_hermes_profile.py"
+PROFILE_STATUS=$?
+set -e
+if [[ "$PROFILE_STATUS" -ne 0 && "$PROFILE_STATUS" -ne 2 ]]; then
+    exit "$PROFILE_STATUS"
 fi
 
 # 6. Install skills

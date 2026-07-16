@@ -1,21 +1,4 @@
 {
-  "mode": "local_embedded",
-  "api_url": "https://api.hindsight.vectorize.io",
-  "bank_id": "hermes-football-emotion",
-  "bank_id_template": "hermes-{profile}",
-  "budget": "mid",
-  "llm_provider": "openai",
-  "llm_model": "gpt-4o-mini",
-  "llm_api_key": "",
-  "llm_base_url": "https://api.openai.com/v1",
-  "memory_mode": "hybrid",
-  "recall_prefetch_method": "recall",
-  "retain_tags": "hermes,agent,football-emotion",
-  "observation_scopes": "combined",
-  "auto_recall": true,
-  "auto_retain": true,
-  "retain_every_n_turns": 1,
-  "timeout": 120,
-  "idle_timeout": 300,
-  "port_health_grace_timeout": 30
+  "enabled": false,
+  "reason": "Optional only. Configure a genuinely free supported Hindsight deployment before enabling; built-in Hermes memory remains the default."
 }

@@ -94,12 +94,12 @@ Our `openmontage-edit-planning` skill produces `openmontage_edit_plan` which map
 
 | Football Field | OpenMontage Field | Confidence |
 |----------------|-------------------|------------|
-| `output_path` | `render_report.output_file` | high |
-| `duration` | `render_report.duration_seconds` | high |
-| `resolution` | `render_report.resolution` | high |
-| `codec` | `render_report.codec` | high |
-| `audio_lufs` | `render_report.audio_lufs` | high |
-| `true_peak_db` | `render_report.true_peak_db` | high |
+| `output_path` | `render_report.outputs[].path` | high |
+| `duration` | `render_report.outputs[].duration_seconds` | high |
+| `resolution` | `render_report.outputs[].resolution` | high |
+| `codec` | `render_report.outputs[].codec` | high |
+| `audio_lufs` | `render_report.metadata` or `verification_notes` (not a first-class pinned-schema field) | medium |
+| `true_peak_db` | `render_report.metadata` or `verification_notes` (not a first-class pinned-schema field) | medium |
 
 ---
 
@@ -107,7 +107,7 @@ Our `openmontage-edit-planning` skill produces `openmontage_edit_plan` which map
 
 1. ❌ `edit_decisions` has `sections[]` — it has `cuts[]` and `overlays[]`
 2. ❌ `render_runtime` can default to HyperFrames — must be user-confirmed
-3. ❌ `composition_mode` can be omitted — required, enum: templated\|atelier
+3. ❌ Schema-optional means execution-optional — the pinned JSON schema permits omission, but the ACD production handoff requires an explicit `templated|atelier` value so compatibility can fail closed.
 4. ❌ `renderer_family` can change at edit stage — locked at proposal
 5. ❌ `audio.music` is legacy — prefer `audio.music` object (not top-level `music`)
 6. ❌ `silence_cuts` map directly to edit_decisions — they don't; handled by tool

@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 
 # Add src to path
-sys.path.insert(0, "/home/kasun/Music/Director/acd-video-worker/src")
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
 def test_hindsight_config():
@@ -24,7 +24,7 @@ def test_hindsight_config():
     print("\n=== Test 1: Hindsight Config Validity ===")
     
     # Check if Hindsight config template exists
-    config_path = Path("/home/kasun/Music/Director/acd-video-worker/config/hindsight.template.json")
+    config_path = Path(__file__).parent.parent / "config" / "hindsight.template.json"
     if config_path.exists():
         with open(config_path) as f:
             config = json.load(f)

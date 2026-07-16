@@ -1,0 +1,8 @@
+name: acd-openmontage
+version: 1.1.0
+description: "Typed read-only/native Hermes bridge to pinned OpenMontage contracts, checkpoints and certified zero-cost tools."
+author: ACD
+kind: standalone
+provides_tools:
+  - openmontage_native
+  - acd_acquire_source
