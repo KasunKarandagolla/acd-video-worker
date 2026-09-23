@@ -24,6 +24,7 @@ from enum import Enum
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from acd_worker.orchestrator import (
     StageOrchestrator, ProjectState, StageCheckpoint, StageName, StageStatus,
@@ -1126,18 +1127,18 @@ def main():
     
     # Load config
     config = ACDConfig.from_env()
-    if args.dry_run:
-        config.dry_run = True
     if args.config:
         with open(args.config) as f:
             config.__dict__.update(json.load(f))
-    
-    worker = ACDWorker(config)
+    if args.dry_run:
+        config.dry_run = True
     
     if args.validate_only:
         logger.info("Running setup validation only...")
-        # Would call bootstrap/validate_setup.py
-        sys.exit(0)
+        from bootstrap.validate_setup import SetupValidator
+        project_root = os.environ.get("PROJECT_ROOT", str(Path(__file__).resolve().parent.parent))
+        sys.exit(0 if SetupValidator(project_root).run_all() else 1)
+    worker = ACDWorker(config)
     
     if args.run_id:
         # Resume existing run
